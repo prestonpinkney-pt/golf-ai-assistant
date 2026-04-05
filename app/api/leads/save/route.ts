@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "../../../../lib/supabase/server";
+import { sendSMS } from "../../../../lib/twilio";
 
 export async function POST(req: Request) {
   try {
@@ -20,9 +21,6 @@ export async function POST(req: Request) {
       .select("id, name, domain")
       .eq("domain", "primetimegolf.org")
       .single();
-
-    console.log("Site result:", site);
-    console.log("Site error:", siteError);
 
     if (siteError || !site) {
       return NextResponse.json(
@@ -50,16 +48,11 @@ export async function POST(req: Request) {
       ai_last_reasoning: "Lead submitted form directly from website",
     };
 
-    console.log("Insert payload:", insertPayload);
-
     const { data, error } = await supabaseAdmin
       .from("leads")
       .insert([insertPayload])
       .select()
       .single();
-
-    console.log("Insert data:", data);
-    console.log("Insert error:", error);
 
     if (error) {
       return NextResponse.json(
@@ -68,7 +61,60 @@ export async function POST(req: Request) {
       );
     }
 
-    return NextResponse.json({ success: true, lead: data });
+    let smsResult: unknown = null;
+    let smsError: unknown = null;
+
+    try {
+      const smsBody = `Hey ${name}, thanks for reaching out to Primetime Golf. Got your inquiry and I’d be happy to help get you booked. What day are you looking to come in?`;
+
+      smsResult = await sendSMS(phone, smsBody);
+
+      await supabaseAdmin.from("lead_messages").insert([
+        {
+          lead_id: data.id,
+          direction: "outbound",
+          channel: "sms",
+          message_type: "initial_response",
+          body: smsBody,
+          delivery_status: "sent",
+          ai_generated: true,
+          template_type: "initial_response",
+          sent_at: new Date().toISOString(),
+        },
+      ]);
+
+      await supabaseAdmin
+        .from("leads")
+        .update({
+          status: "contacted",
+          last_contacted_at: new Date().toISOString(),
+          follow_up_count: 1,
+        })
+        .eq("id", data.id);
+    } catch (err) {
+      smsError = err;
+
+      await supabaseAdmin.from("lead_messages").insert([
+        {
+          lead_id: data.id,
+          direction: "outbound",
+          channel: "sms",
+          message_type: "initial_response",
+          body: "SMS send attempted but failed.",
+          delivery_status: "failed",
+          ai_generated: true,
+          template_type: "initial_response",
+          sent_at: new Date().toISOString(),
+        },
+      ]);
+    }
+
+    return NextResponse.json({
+      success: true,
+      lead: data,
+      smsResult,
+      smsError: smsError ? String(smsError) : null,
+    });
   } catch (error) {
     console.error("Save route catch error:", error);
     return NextResponse.json(
