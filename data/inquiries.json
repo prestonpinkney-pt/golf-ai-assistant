@@ -1,0 +1,141 @@
+[
+  {
+    "id": 1775240877698,
+    "customerName": "Preston Pinkney",
+    "phone": "5103756639",
+    "email": "PrestonPinkney@yahoo.com",
+    "preferredChannel": "sms",
+    "customerMessage": "hello id liek to book an event for 30 people and then schedule a tee time for 3 people friday afternoon",
+    "aiReply": "Hello! Thank you for reaching out. I'd be delighted to assist you in booking an event for 30 people. Additionally, I can help schedule a tee time for 3 people this Friday afternoon. Given the size of your event, I’ll need to escalate this to ensure we provide you with the best options and availability. Can you please provide me with the date and time you had in mind for the event? Looking forward to making this a memorable experience for you!",
+    "inquiryType": "general",
+    "createdAt": "2026-04-03T18:27:57.698Z",
+    "lastContactAt": "2026-04-03T18:28:24.070Z",
+    "nextFollowUpAt": "2026-04-04T18:28:24.070Z",
+    "followUpCount": 1,
+    "followUpMessage": "Just following up — let me know if you still want help and I’ll keep things moving for you.",
+    "status": "open"
+  },
+  {
+    "id": 1775189599199,
+    "customerName": "Preston Pinkney",
+    "phone": "5103756639",
+    "email": "prestonpinkney@yahoo.com",
+    "preferredChannel": "sms",
+    "customerMessage": "I want to book a lesson after 5 Pm",
+    "aiReply": "Hi there! I'd be happy to help you book a lesson after 5 PM. Please let me know your preferred date, and we can get you scheduled right away!",
+    "inquiryType": "lesson",
+    "createdAt": "2026-04-03T04:13:19.199Z",
+    "lastContactAt": "2026-04-03T04:26:10.719Z",
+    "nextFollowUpAt": "2026-04-04T04:26:10.719Z",
+    "followUpCount": 1,
+    "followUpMessage": "Just following up — I still have a couple good lesson openings available. Want me to help you lock one in?",
+    "status": "open"
+  },
+  {
+    "id": 1775189585658,
+    "customerName": "Preston Pinkney",
+    "phone": "5103756639",
+    "email": "prestonpinkney@yahoo.com",
+    "preferredChannel": "sms",
+    "customerMessage": "I want to book a message after 5 Pm",
+    "aiReply": "Hi there! It seems like you might be looking to book a massage. While we primarily focus on golfing services, I recommend checking with our front desk for the best options available after 5 PM. They will be more than happy to assist you with your request!",
+    "inquiryType": "general",
+    "createdAt": "2026-04-03T04:13:05.658Z",
+    "lastContactAt": "2026-04-03T04:26:10.719Z",
+    "nextFollowUpAt": "2026-04-04T04:26:10.719Z",
+    "followUpCount": 1,
+    "followUpMessage": "Just following up — let me know if you still want help and I’ll keep things moving for you.",
+    "status": "open"
+  },
+  {
+    "id": 1775186961217,
+    "customerMessage": "i want to book a lesson tomorrow at 5 PM",
+    "aiReply": "Hi there! I'd be happy to help you book a lesson for tomorrow at 5 PM. Please let me know if you have a specific instructor in mind or if you prefer me to assign one for you.",
+    "inquiryType": "lesson",
+    "createdAt": "2026-04-03T03:29:21.217Z",
+    "lastContactAt": "2026-04-03T04:26:10.719Z",
+    "nextFollowUpAt": "2026-04-04T04:26:10.719Z",
+    "followUpCount": 1,
+    "status": "open",
+    "followUpMessage": "Just following up — I still have a couple good lesson openings available. Want me to help you lock one in?"
+  },
+  {
+    "id": 1775185913091,
+    "customerMessage": "i want to book a tee time for tomorrow at 5 pm",
+    "aiReply": "Hi there! I'd be happy to help you book a tee time for tomorrow at 5 PM. Please hold on a moment while I check availability for you.",
+    "inquiryType": "tee_time",
+    "createdAt": "2026-04-03T03:11:53.091Z",
+    "lastContactAt": "2026-04-03T18:28:24.070Z",
+    "nextFollowUpAt": "2026-04-04T18:28:24.070Z",
+    "followUpCount": 1,
+    "status": "open",
+    "followUpMessage": "Quick follow-up — if you're still looking for a tee time, send me the day and preferred time window and I’ll help you from there."
+  },
+  {
+    "id": 1775185768959,
+    "customerMessage": "i would like to schedule a lesson after 5 Pm today",
+    "aiReply": "Hi there! I'd be happy to help you schedule a lesson after 5 PM today. Please let me know what time works best for you, and I'll make the arrangements!",
+    "inquiryType": "lesson",
+    "createdAt": "2026-04-03T03:09:28.959Z",
+    "lastContactAt": "2026-04-03T18:28:24.070Z",
+    "nextFollowUpAt": "2026-04-04T18:28:24.070Z",
+    "followUpCount": 1,
+    "status": "open",
+    "followUpMessage": "Just following up — I still have a couple good lesson openings available. Want me to help you lock one in?"
+  },
+  {
+    "id": 1775185733974,
+    "customerMessage": "i would like to schedule a lesson after 5 Pm today",
+    "aiReply": "Hi there! I’d be happy to help you schedule a lesson after 5 PM today. Please let me know what time works best for you, and I'll get everything set up!",
+    "inquiryType": "lesson",
+    "createdAt": "2026-04-03T03:08:53.974Z",
+    "lastContactAt": "2026-04-03T18:28:24.070Z",
+    "nextFollowUpAt": "2026-04-04T18:28:24.070Z",
+    "followUpCount": 1,
+    "status": "open",
+    "followUpMessage": "Just following up — I still have a couple good lesson openings available. Want me to help you lock one in?"
+  },
+  {
+    "id": 1775185144505,
+    "customerMessage": "i want to book a lesson today after 5 Pm\n",
+    "aiReply": "Hi there! I'd be happy to help you book a lesson today after 5 PM. Please let me know what time works best for you, and I'll get it scheduled!",
+    "inquiryType": "lesson",
+    "createdAt": "2026-04-03T02:59:04.505Z",
+    "lastContactAt": "2026-04-03T18:28:24.070Z",
+    "nextFollowUpAt": "2026-04-04T18:28:24.070Z",
+    "followUpCount": 1,
+    "status": "open",
+    "followUpMessage": "Just following up — I still have a couple good lesson openings available. Want me to help you lock one in?"
+  },
+  {
+    "id": 1775184526112,
+    "customerMessage": "Do you have any tee times saturday morning?\n",
+    "aiReply": "Hi there! Yes, we do have tee times available on Saturday morning. Please let me know what time you prefer, and I'll be happy to assist you in booking your spot!",
+    "inquiryType": "tee_time",
+    "createdAt": "2026-04-03T02:48:46.112Z",
+    "status": "open"
+  },
+  {
+    "id": 1775184495613,
+    "customerMessage": "How much is it to host a birthday party for 12 people?",
+    "aiReply": "Hi there! Hosting a birthday party for 12 people is a great idea! The pricing can vary based on the package you choose and any additional services you may want. I recommend reaching out to our events team for the most accurate quote and to discuss the options we have available. We look forward to helping you plan a memorable celebration!",
+    "inquiryType": "event",
+    "createdAt": "2026-04-03T02:48:15.613Z",
+    "status": "open"
+  },
+  {
+    "id": 1775184468472,
+    "customerMessage": "I want a lesson after 5 Pm today",
+    "aiReply": "Hi there! I'd be happy to help you schedule a lesson after 5 PM today. Please let me know your preferred time and if you have a specific instructor in mind, and I'll get that arranged for you!",
+    "inquiryType": "lesson",
+    "createdAt": "2026-04-03T02:47:48.472Z",
+    "status": "open"
+  },
+  {
+    "id": 1775183711503,
+    "customerMessage": "I want to book a lesson after 5 Pm today",
+    "aiReply": "Great to hear you're interested in booking a lesson! Can I ask if you have a specific instructor in mind, or would you like me to recommend one based on your experience level? Additionally, how long would you like the lesson to be? ",
+    "createdAt": "2026-04-03T02:35:11.503Z",
+    "status": "open"
+  }
+]

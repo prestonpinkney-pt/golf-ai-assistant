@@ -1,0 +1,28 @@
+[
+  {
+    "id": "1775329781892",
+    "message": "I want to host a golf event for 30 people and I need tee times for all of them",
+    "reply": "For a group that size, I’d want to line it up the right way. What date are you targeting for your event?",
+    "intents": [
+      "event",
+      "tee_time"
+    ],
+    "primaryIntent": "event",
+    "secondaryIntents": [
+      "tee_time"
+    ],
+    "complexity": "high",
+    "leadTemperature": "warm",
+    "persona": "group_client",
+    "pressureMode": "strong",
+    "goal": "qualify_and_route",
+    "shouldEscalate": true,
+    "status": "booked",
+    "followUpCount": 0,
+    "nextFollowUpAt": "2026-04-05T20:43:10.318Z",
+    "lastFollowUpAt": null,
+    "createdAt": "2026-04-04T19:09:41.892Z",
+    "statusReason": "The event has been confirmed with tee times arranged for the group.",
+    "preferredChannel": "email"
+  }
+]
