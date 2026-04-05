@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { sendSMS } from "@/lib/twilio";
+import { sendSMS } from "../../../lib/twilio";
 
 export async function POST(req: Request) {
   try {
