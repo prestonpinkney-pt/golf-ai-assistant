@@ -15,7 +15,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // Get site
     const { data: site, error: siteError } = await supabaseAdmin
       .from("sites")
       .select("id, domain")
@@ -29,7 +28,6 @@ export async function POST(req: Request) {
       );
     }
 
-    // Save lead
     const { data: lead, error: leadError } = await supabaseAdmin
       .from("leads")
       .insert([
@@ -40,7 +38,19 @@ export async function POST(req: Request) {
           email,
           message,
           source: "website_form",
+          lead_type: "lesson",
           status: "new",
+          temperature: "warm",
+          priority: "medium",
+          stage: "new_inquiry",
+          preferred_contact_channel: "sms",
+          likely_booking_window: "this_week",
+          follow_up_count: 0,
+          ai_summary: "New website lesson inquiry",
+          ai_next_best_action:
+            "Send immediate follow-up and ask what day they want to come in",
+          ai_last_reasoning:
+            "Lead submitted a website form asking about booking a lesson",
         },
       ])
       .select()
@@ -53,19 +63,16 @@ export async function POST(req: Request) {
       );
     }
 
-    // Format phone (IMPORTANT)
     let formattedPhone = phone;
-    if (!phone.startsWith("+")) {
-      formattedPhone = "+1" + phone.replace(/\D/g, "");
+    if (!formattedPhone.startsWith("+")) {
+      formattedPhone = "+1" + formattedPhone.replace(/\D/g, "");
     }
 
-    const smsBody = `Hey ${name}, thanks for reaching out to Primetime Golf. What day are you looking to come in?`;
+    const smsBody = `Hey ${name}, thanks for reaching out to Primetime Golf. Got your inquiry and I’d be happy to help get you booked. What day are you looking to come in?`;
 
     try {
-      // Send SMS
-      await sendSMS(formattedPhone, smsBody);
+      const smsResult = await sendSMS(formattedPhone, smsBody);
 
-      // Log success
       await supabaseAdmin.from("lead_messages").insert([
         {
           lead_id: lead.id,
@@ -79,18 +86,25 @@ export async function POST(req: Request) {
         },
       ]);
 
+      await supabaseAdmin
+        .from("leads")
+        .update({
+          status: "contacted",
+          last_contacted_at: new Date().toISOString(),
+          follow_up_count: 1,
+        })
+        .eq("id", lead.id);
+
       return NextResponse.json({
         success: true,
         message: "Lead saved and SMS sent",
+        lead,
+        smsResult,
       });
     } catch (err) {
-      // 👇 THIS IS THE IMPORTANT DEBUG PART
       const errorMessage =
         err instanceof Error ? err.message : JSON.stringify(err);
 
-      console.error("SMS ERROR:", errorMessage);
-
-      // Log failure WITH REAL ERROR
       await supabaseAdmin.from("lead_messages").insert([
         {
           lead_id: lead.id,
@@ -107,6 +121,7 @@ export async function POST(req: Request) {
       return NextResponse.json({
         success: true,
         message: "Lead saved but SMS failed",
+        lead,
         smsError: errorMessage,
       });
     }
