@@ -5,7 +5,6 @@ import { sendSMS } from "../../../../lib/twilio";
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    console.log("Incoming body:", body);
 
     const { name, phone, email, message } = body;
 
@@ -16,14 +15,12 @@ export async function POST(req: Request) {
       );
     }
 
+    // Get site
     const { data: site, error: siteError } = await supabaseAdmin
       .from("sites")
-      .select("id, name, domain")
+      .select("id, domain")
       .eq("domain", "primetimegolf.org")
       .single();
-
-    console.log("Site result:", site);
-    console.log("Site error:", siteError);
 
     if (siteError || !site) {
       return NextResponse.json(
@@ -32,35 +29,22 @@ export async function POST(req: Request) {
       );
     }
 
-    const insertPayload = {
-      site_id: site.id,
-      full_name: name,
-      phone,
-      email,
-      message,
-      source: "website_form",
-      lead_type: "lesson",
-      status: "new",
-      temperature: "warm",
-      priority: "medium",
-      stage: "new_inquiry",
-      preferred_contact_channel: "sms",
-      likely_booking_window: "this_week",
-      ai_summary: "New website lesson inquiry",
-      ai_next_best_action: "Send fast follow-up and offer booking times",
-      ai_last_reasoning: "Lead submitted form directly from website",
-    };
-
-    console.log("Insert payload:", insertPayload);
-
+    // Save lead
     const { data: lead, error: leadError } = await supabaseAdmin
       .from("leads")
-      .insert([insertPayload])
+      .insert([
+        {
+          site_id: site.id,
+          full_name: name,
+          phone,
+          email,
+          message,
+          source: "website_form",
+          status: "new",
+        },
+      ])
       .select()
       .single();
-
-    console.log("Lead insert result:", lead);
-    console.log("Lead insert error:", leadError);
 
     if (leadError || !lead) {
       return NextResponse.json(
@@ -69,22 +53,20 @@ export async function POST(req: Request) {
       );
     }
 
-    const smsBody = `Hey ${name}, thanks for reaching out to Primetime Golf. Got your inquiry and I’d be happy to help get you booked. What day are you looking to come in?`;
+    // Format phone (IMPORTANT)
+    let formattedPhone = phone;
+    if (!phone.startsWith("+")) {
+      formattedPhone = "+1" + phone.replace(/\D/g, "");
+    }
 
-    console.log("About to send SMS...");
-    console.log("Phone:", phone);
-    console.log("SMS body:", smsBody);
-
-    let smsResult: unknown = null;
-    let smsError: unknown = null;
-    let messageLogResult: unknown = null;
-    let messageLogError: unknown = null;
+    const smsBody = `Hey ${name}, thanks for reaching out to Primetime Golf. What day are you looking to come in?`;
 
     try {
-      smsResult = await sendSMS(phone, smsBody);
-      console.log("SMS send result:", smsResult);
+      // Send SMS
+      await sendSMS(formattedPhone, smsBody);
 
-      const logInsert = await supabaseAdmin.from("lead_messages").insert([
+      // Log success
+      await supabaseAdmin.from("lead_messages").insert([
         {
           lead_id: lead.id,
           direction: "outbound",
@@ -97,51 +79,38 @@ export async function POST(req: Request) {
         },
       ]);
 
-      messageLogResult = logInsert.data;
-      messageLogError = logInsert.error;
-
-      console.log("Lead message log result:", messageLogResult);
-      console.log("Lead message log error:", messageLogError);
-
-      await supabaseAdmin
-        .from("leads")
-        .update({
-          status: "contacted",
-          last_contacted_at: new Date().toISOString(),
-          follow_up_count: 1,
-        })
-        .eq("id", lead.id);
+      return NextResponse.json({
+        success: true,
+        message: "Lead saved and SMS sent",
+      });
     } catch (err) {
-      smsError = err;
-      console.error("SMS block error:", err);
+      // 👇 THIS IS THE IMPORTANT DEBUG PART
+      const errorMessage =
+        err instanceof Error ? err.message : JSON.stringify(err);
 
-      const failedLogInsert = await supabaseAdmin.from("lead_messages").insert([
+      console.error("SMS ERROR:", errorMessage);
+
+      // Log failure WITH REAL ERROR
+      await supabaseAdmin.from("lead_messages").insert([
         {
           lead_id: lead.id,
           direction: "outbound",
           channel: "sms",
           message_type: "initial_response",
-          body: smsBody,
+          body: `SMS failed: ${errorMessage}`,
           delivery_status: "failed",
           ai_generated: true,
           sent_at: new Date().toISOString(),
         },
       ]);
 
-      console.log("Failed log insert data:", failedLogInsert.data);
-      console.log("Failed log insert error:", failedLogInsert.error);
+      return NextResponse.json({
+        success: true,
+        message: "Lead saved but SMS failed",
+        smsError: errorMessage,
+      });
     }
-
-    return NextResponse.json({
-      success: true,
-      lead,
-      smsResult,
-      smsError: smsError ? String(smsError) : null,
-      messageLogResult,
-      messageLogError,
-    });
   } catch (error) {
-    console.error("Save route catch error:", error);
     return NextResponse.json(
       { error: "Server error", details: String(error) },
       { status: 500 }

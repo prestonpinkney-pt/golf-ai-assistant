@@ -1,181 +1,75 @@
 "use client";
 
-import React, { useState } from "react";
+import { useState } from "react";
 
-type BrainResult = {
-  intents: string[];
-  primaryIntent: string;
-  secondaryIntents: string[];
-  complexity: string;
-  leadTemperature: string;
-  persona: string;
-  pressureMode: string;
-  goal: string;
-  shouldEscalate: boolean;
-  reply: string;
-  error?: string;
-};
+export default function Home() {
+  const [form, setForm] = useState({
+    name: "",
+    phone: "",
+    email: "",
+    message: "",
+  });
 
-export default function TestAIPage() {
-  const [message, setMessage] = useState("");
-  const [result, setResult] = useState<BrainResult | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [saveStatus, setSaveStatus] = useState("");
+  async function handleLeadSubmit(e: React.FormEvent) {
+    e.preventDefault();
 
-  async function handleSend() {
-    setLoading(true);
-    setResult(null);
-    setSaveStatus("");
+    const res = await fetch("/api/leads/save", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(form),
+    });
 
-    try {
-      const res = await fetch("/api/ai/respond", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ message }),
-      });
+    const data = await res.json();
 
-      const data = await res.json();
-      setResult(data);
-
-      if (!data.error) {
-        const saveRes = await fetch("/api/leads/save", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            message,
-            reply: data.reply,
-            intents: data.intents,
-            primaryIntent: data.primaryIntent,
-            secondaryIntents: data.secondaryIntents,
-            complexity: data.complexity,
-            leadTemperature: data.leadTemperature,
-            persona: data.persona,
-            pressureMode: data.pressureMode,
-            goal: data.goal,
-            shouldEscalate: data.shouldEscalate,
-          }),
-        });
-
-        const saveData = await saveRes.json();
-
-        if (saveRes.ok) {
-          setSaveStatus("Lead saved");
-        } else {
-          setSaveStatus(saveData.error || "Save failed");
-        }
-      }
-    } catch (error: any) {
-      setResult({
-        intents: [],
-        primaryIntent: "",
-        secondaryIntents: [],
-        complexity: "",
-        leadTemperature: "",
-        persona: "",
-        pressureMode: "",
-        goal: "",
-        shouldEscalate: false,
-        reply: "",
-        error: error?.message || "Something went wrong",
-      });
+    if (!res.ok) {
+      alert(`Lead submit failed: ${data.error}`);
+      return;
     }
 
-    setLoading(false);
+    alert("Lead submitted successfully");
   }
 
   return (
-    <div style={{ padding: 40 }}>
-      <h1>Test Primetime Golf AI</h1>
+    <main style={{ padding: 40, maxWidth: 500, margin: "0 auto" }}>
+      <h1>Primetime Golf AI</h1>
 
-      <textarea
-        value={message}
-        onChange={(e) => setMessage(e.target.value)}
-        placeholder="Type a customer message..."
-        style={{ width: "100%", height: 120 }}
-      />
+      <form onSubmit={handleLeadSubmit} style={{ display: "grid", gap: 12 }}>
+        <input
+          type="text"
+          placeholder="Name"
+          value={form.name}
+          onChange={(e) => setForm({ ...form, name: e.target.value })}
+          required
+        />
 
-      <button onClick={handleSend} style={{ marginTop: 10 }}>
-        {loading ? "Thinking..." : "Send to AI"}
-      </button>
+        <input
+          type="tel"
+          placeholder="Phone"
+          value={form.phone}
+          onChange={(e) => setForm({ ...form, phone: e.target.value })}
+          required
+        />
 
-      {result && (
-        <div
-          style={{
-            marginTop: 20,
-            border: "1px solid #ccc",
-            padding: 16,
-            borderRadius: 8,
-          }}
-        >
-          {result.error ? (
-            <p>
-              <strong>Error:</strong> {result.error}
-            </p>
-          ) : (
-            <>
-              <p>
-                <strong>Intents:</strong> {result.intents?.join(", ")}
-              </p>
-              <p>
-                <strong>Primary Intent:</strong> {result.primaryIntent}
-              </p>
-              <p>
-                <strong>Secondary Intents:</strong>{" "}
-                {result.secondaryIntents?.join(", ")}
-              </p>
-              <p>
-                <strong>Complexity:</strong> {result.complexity}
-              </p>
-              <p>
-                <strong>Lead Temperature:</strong> {result.leadTemperature}
-              </p>
-              <p>
-                <strong>Persona:</strong> {result.persona}
-              </p>
-              <p>
-                <strong>Pressure Mode:</strong> {result.pressureMode}
-              </p>
-              <p>
-                <strong>Goal:</strong> {result.goal}
-              </p>
-              <p>
-                <strong>Should Escalate:</strong>{" "}
-                {result.shouldEscalate ? "Yes" : "No"}
-              </p>
+        <input
+          type="email"
+          placeholder="Email"
+          value={form.email}
+          onChange={(e) => setForm({ ...form, email: e.target.value })}
+          required
+        />
 
-              <div style={{ marginTop: 16 }}>
-                <strong>Reply:</strong>
-                <div
-                  style={{
-                    marginTop: 8,
-                    padding: 12,
-                    border: "1px solid #ddd",
-                    borderRadius: 8,
-                  }}
-                >
-                  {result.reply}
-                </div>
-              </div>
-            </>
-          )}
-        </div>
-      )}
+        <textarea
+          placeholder="What are you looking for?"
+          value={form.message}
+          onChange={(e) => setForm({ ...form, message: e.target.value })}
+          required
+          rows={5}
+        />
 
-      <div
-        style={{
-          marginTop: 20,
-          border: "1px solid #ccc",
-          padding: 16,
-          borderRadius: 8,
-        }}
-      >
-        <strong>Save Status:</strong>
-        <div>{saveStatus}</div>
-      </div>
-    </div>
+        <button type="submit">Submit Lead</button>
+      </form>
+    </main>
   );
 }
