@@ -63,10 +63,8 @@ export async function POST(req: Request) {
       );
     }
 
-    let formattedPhone = phone;
-    if (!formattedPhone.startsWith("+")) {
-      formattedPhone = "+1" + formattedPhone.replace(/\D/g, "");
-    }
+    // TEMP TEST — force SMS to your verified number
+    const formattedPhone = "+15103756639";
 
     const smsBody = `Hey ${name}, thanks for reaching out to Primetime Golf. Got your inquiry and I’d be happy to help get you booked. What day are you looking to come in?`;
 
