@@ -63,13 +63,15 @@ export async function POST(req: Request) {
       );
     }
 
-    // TEMP TEST — force SMS to your verified number
-    const formattedPhone = "+15103756639";
+    // TEMP TEST — force SMS to your verified phone
+    const to = "+15103756639";
 
     const smsBody = `Hey ${name}, thanks for reaching out to Primetime Golf. Got your inquiry and I’d be happy to help get you booked. What day are you looking to come in?`;
 
     try {
-      const smsResult = await sendSMS(formattedPhone, smsBody);
+      const smsResult = await sendSMS(to, smsBody);
+
+      console.log("TWILIO RESPONSE:", smsResult.sid, smsResult.status);
 
       await supabaseAdmin.from("lead_messages").insert([
         {
@@ -78,7 +80,7 @@ export async function POST(req: Request) {
           channel: "sms",
           message_type: "initial_response",
           body: smsBody,
-          delivery_status: "sent",
+          delivery_status: smsResult.status || "sent",
           ai_generated: true,
           sent_at: new Date().toISOString(),
         },
@@ -97,11 +99,14 @@ export async function POST(req: Request) {
         success: true,
         message: "Lead saved and SMS sent",
         lead,
-        smsResult,
+        smsStatus: smsResult.status,
+        smsSid: smsResult.sid,
       });
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : JSON.stringify(err);
+
+      console.error("SMS ERROR:", errorMessage);
 
       await supabaseAdmin.from("lead_messages").insert([
         {
