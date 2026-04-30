@@ -1,0 +1,1 @@
+export { POST } from "@/app/api/opportunities/targets/feedback/route";

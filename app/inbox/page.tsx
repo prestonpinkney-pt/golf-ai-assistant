@@ -31,6 +31,31 @@ type Lead = {
   createdAt: string;
 };
 
+function formatDate(value?: string | null) {
+  if (!value) return "-";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(parsed);
+}
+
+function statusChipClass(status: string) {
+  switch (status) {
+    case "booked":
+      return "bg-emerald-50 text-emerald-700 ring-emerald-600/20";
+    case "closed":
+      return "bg-slate-100 text-slate-700 ring-slate-300";
+    case "contacted":
+      return "bg-blue-50 text-blue-700 ring-blue-600/20";
+    default:
+      return "bg-amber-50 text-amber-700 ring-amber-600/20";
+  }
+}
+
 export default function InboxPage() {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
@@ -182,106 +207,167 @@ export default function InboxPage() {
   }, []);
 
   return (
-    <main style={{ padding: "40px", maxWidth: "1200px", margin: "0 auto" }}>
-      <h1 style={{ fontSize: "36px", marginBottom: "20px" }}>Leads Inbox</h1>
+    <main className="min-h-screen bg-slate-50 px-6 py-8 text-slate-900">
+      <div className="mx-auto max-w-6xl">
+        <div className="flex flex-col justify-between gap-5 border-b border-slate-200 pb-6 md:flex-row md:items-end">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+              CloseOS
+            </p>
+            <h1 className="mt-2 text-3xl font-semibold tracking-tight text-black">
+              Leads Inbox
+            </h1>
+            <p className="mt-2 text-sm text-slate-600">
+              Review lead context, update lifecycle status, and trigger follow-up actions.
+            </p>
+          </div>
 
-      <div style={{ display: "flex", gap: "12px", marginBottom: "20px", flexWrap: "wrap" }}>
-        <button onClick={loadLeads} style={{ padding: "10px 18px", cursor: "pointer" }}>
-          Refresh
-        </button>
-
-        <button onClick={runDueFollowUps} style={{ padding: "10px 18px", cursor: "pointer" }}>
-          Run Due Follow-Ups
-        </button>
-      </div>
-
-      {runStatus && (
-        <p>
-          <strong>Follow-Up Runner:</strong> {runStatus}
-        </p>
-      )}
-
-      {loading && <p>Loading leads...</p>}
-
-      {error && (
-        <p style={{ color: "red" }}>
-          <strong>Error:</strong> {error}
-        </p>
-      )}
-
-      {!loading && !error && leads.length === 0 && <p>No leads yet.</p>}
-
-      {!loading && !error && leads.length > 0 && (
-        <div style={{ display: "grid", gap: "16px" }}>
-          {leads.map((lead) => (
-            <div
-              key={lead.id}
-              style={{
-                border: "1px solid #ddd",
-                borderRadius: "12px",
-                padding: "20px",
-                background: "#fff",
-              }}
+          <div className="flex flex-wrap gap-3">
+            <button
+              onClick={loadLeads}
+              className="rounded-xl border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-100"
             >
-              <p><strong>Name:</strong> {lead.name || "-"}</p>
-              <p><strong>Phone:</strong> {lead.phone || "-"}</p>
-              <p><strong>Email:</strong> {lead.email || "-"}</p>
-              <p><strong>Preferred Channel:</strong> {lead.preferredChannel || "-"}</p>
-              <p><strong>Message:</strong> {lead.message}</p>
-              <p><strong>Reply:</strong> {lead.reply}</p>
-              <p><strong>Intents:</strong> {lead.intents?.join(", ") || "-"}</p>
-              <p><strong>Primary Intent:</strong> {lead.primaryIntent || "-"}</p>
-              <p><strong>Complexity:</strong> {lead.complexity || "-"}</p>
-              <p><strong>Lead Temperature:</strong> {lead.leadTemperature || "-"}</p>
-              <p><strong>Persona:</strong> {lead.persona || "-"}</p>
-              <p><strong>Pressure Mode:</strong> {lead.pressureMode || "-"}</p>
-              <p><strong>Goal:</strong> {lead.goal || "-"}</p>
-              <p><strong>Should Escalate:</strong> {lead.shouldEscalate ? "Yes" : "No"}</p>
-              <p><strong>Status:</strong> {lead.status || "-"}</p>
-              <p><strong>Status Reason:</strong> {lead.statusReason || "-"}</p>
-
-              <div style={{ marginTop: "12px", marginBottom: "12px" }}>
-                <strong>Manual Status:</strong>
-                <div style={{ display: "flex", gap: "10px", marginTop: "8px", flexWrap: "wrap" }}>
-                  <button onClick={() => updateStatus(lead.id, "open")}>Open</button>
-                  <button onClick={() => updateStatus(lead.id, "contacted")}>Contacted</button>
-                  <button onClick={() => updateStatus(lead.id, "booked")}>Booked</button>
-                  <button onClick={() => updateStatus(lead.id, "closed")}>Closed</button>
-                </div>
-              </div>
-
-              <div style={{ marginTop: "12px", marginBottom: "12px" }}>
-                <strong>AI Actions:</strong>
-                <div style={{ display: "flex", gap: "10px", marginTop: "8px", flexWrap: "wrap" }}>
-                  <button onClick={() => runFollowUp(lead.id)}>Run Follow-Up</button>
-                  <button onClick={() => runAIStatus(lead.id)}>Auto-Set Status</button>
-                </div>
-              </div>
-
-              <div style={{ marginTop: "12px", marginBottom: "12px" }}>
-                <strong>Schedule Follow-Up:</strong>
-                <div style={{ display: "flex", gap: "10px", marginTop: "8px", flexWrap: "wrap" }}>
-                  <button onClick={() => scheduleFollowUp(lead.id, "sms")}>
-                    Schedule SMS
-                  </button>
-                  <button onClick={() => scheduleFollowUp(lead.id, "email")}>
-                    Schedule Email
-                  </button>
-                </div>
-              </div>
-
-              <p><strong>Follow-Up Count:</strong> {lead.followUpCount ?? 0}</p>
-              <p><strong>Follow-Up Message:</strong> {lead.followUpMessage || "-"}</p>
-              <p><strong>Next Follow-Up:</strong> {lead.nextFollowUpAt || "-"}</p>
-              <p><strong>Last Follow-Up:</strong> {lead.lastFollowUpAt || "-"}</p>
-              <p><strong>Last Contacted At:</strong> {lead.lastContactedAt || "-"}</p>
-              <p><strong>Last Send Channel:</strong> {lead.lastSendChannel || "-"}</p>
-              <p><strong>Last Send Result:</strong> {lead.lastSendResult || "-"}</p>
-              <p><strong>Created At:</strong> {lead.createdAt || "-"}</p>
-            </div>
-          ))}
+              Refresh
+            </button>
+            <button
+              onClick={runDueFollowUps}
+              className="rounded-xl bg-slate-900 px-4 py-2 text-sm font-semibold text-white transition hover:bg-slate-800"
+            >
+              Run Due Follow-Ups
+            </button>
+          </div>
         </div>
-      )}
+
+        {runStatus && (
+          <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800">
+            <span className="font-semibold">Follow-Up Runner:</span> {runStatus}
+          </div>
+        )}
+
+        {loading && <p className="mt-6 text-sm text-slate-600">Loading leads...</p>}
+
+        {error && (
+          <div className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            <span className="font-semibold">Error:</span> {error}
+          </div>
+        )}
+
+        {!loading && !error && leads.length === 0 && (
+          <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-6">
+            <p className="text-sm text-slate-600">No leads yet.</p>
+          </div>
+        )}
+
+        {!loading && !error && leads.length > 0 && (
+          <div className="mt-6 grid gap-4">
+            {leads.map((lead) => (
+              <article
+                key={lead.id}
+                className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm"
+              >
+                <div className="flex flex-col gap-5 lg:flex-row lg:justify-between">
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-lg font-semibold text-slate-900">
+                        {lead.name || "Unnamed lead"}
+                      </h2>
+                      <span
+                        className={`rounded-full px-3 py-1 text-xs font-semibold ring-1 ${statusChipClass(
+                          lead.status || "open"
+                        )}`}
+                      >
+                        {(lead.status || "open").toUpperCase()}
+                      </span>
+                    </div>
+
+                    <p className="text-sm text-slate-600">
+                      {[lead.phone, lead.email].filter(Boolean).join(" · ") || "-"}
+                    </p>
+
+                    <div className="grid gap-2 text-sm text-slate-700 md:grid-cols-2">
+                      <p>
+                        <span className="font-medium text-slate-500">Intent:</span>{" "}
+                        {lead.primaryIntent || "-"}
+                      </p>
+                      <p>
+                        <span className="font-medium text-slate-500">Preferred Channel:</span>{" "}
+                        {lead.preferredChannel || "-"}
+                      </p>
+                      <p>
+                        <span className="font-medium text-slate-500">Follow-Up Count:</span>{" "}
+                        {lead.followUpCount ?? 0}
+                      </p>
+                      <p>
+                        <span className="font-medium text-slate-500">Created:</span>{" "}
+                        {formatDate(lead.createdAt)}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl bg-slate-50 p-4 text-sm text-slate-700 lg:w-[320px]">
+                    <p className="font-semibold text-slate-900">Status Reason</p>
+                    <p className="mt-1 leading-6">{lead.statusReason || "-"}</p>
+                    <p className="mt-3">
+                      <span className="font-medium text-slate-500">Last Contacted:</span>{" "}
+                      {formatDate(lead.lastContactedAt)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-4 lg:grid-cols-2">
+                  <div className="rounded-xl border border-slate-200 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+                      Message
+                    </p>
+                    <p className="mt-2 text-sm leading-6 text-slate-700">{lead.message || "-"}</p>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 p-4">
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-slate-500">
+                      Suggested Reply
+                    </p>
+                    <p className="mt-2 text-sm leading-6 text-slate-700">{lead.reply || "-"}</p>
+                  </div>
+                </div>
+
+                <div className="mt-5 grid gap-3 md:grid-cols-3">
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+                      Manual Status
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium" onClick={() => updateStatus(lead.id, "open")}>Open</button>
+                      <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium" onClick={() => updateStatus(lead.id, "contacted")}>Contacted</button>
+                      <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium" onClick={() => updateStatus(lead.id, "booked")}>Booked</button>
+                      <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium" onClick={() => updateStatus(lead.id, "closed")}>Closed</button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+                      AI Actions
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button className="rounded-lg bg-slate-900 px-3 py-1.5 text-xs font-semibold text-white" onClick={() => runFollowUp(lead.id)}>Run Follow-Up</button>
+                      <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium" onClick={() => runAIStatus(lead.id)}>Auto-Set Status</button>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+                      Schedule Follow-Up
+                    </p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium" onClick={() => scheduleFollowUp(lead.id, "sms")}>Schedule SMS</button>
+                      <button className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium" onClick={() => scheduleFollowUp(lead.id, "email")}>Schedule Email</button>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </div>
     </main>
   );
 }

@@ -1,6 +1,11 @@
 import { NextResponse } from "next/server";
-import { supabaseAdmin } from "../../../../lib/supabase/server";
-import { sendSMS } from "../../../../lib/twilio";
+import { supabaseAdmin } from "@/lib/supabase/admin";
+import { sendMessage } from "@/lib/send-message";
+import { WEBSITE_DOMAIN } from "../../config";
+
+function isLikelyE164Phone(value: string) {
+  return /^\+[1-9]\d{7,14}$/.test(value);
+}
 
 export async function POST(req: Request) {
   try {
@@ -18,7 +23,7 @@ export async function POST(req: Request) {
     const { data: site, error: siteError } = await supabaseAdmin
       .from("sites")
       .select("id, domain")
-      .eq("domain", "primetimegolf.org")
+      .eq("domain", WEBSITE_DOMAIN)
       .single();
 
     if (siteError || !site) {
@@ -63,15 +68,30 @@ export async function POST(req: Request) {
       );
     }
 
-    // TEMP TEST — force SMS to your verified phone
-    const to = "+15103756639";
+    const to =
+      process.env.CLOSEOS_LEAD_DEFAULT_TO_PHONE?.trim() ||
+      phone.trim();
+
+    if (!isLikelyE164Phone(to)) {
+      return NextResponse.json(
+        {
+          error:
+            "Invalid destination phone format. Expected E.164 format (example: +15551234567).",
+        },
+        { status: 400 }
+      );
+    }
 
     const smsBody = `Hey ${name}, thanks for reaching out to Primetime Golf. Got your inquiry and I’d be happy to help get you booked. What day are you looking to come in?`;
 
     try {
-      const smsResult = await sendSMS(to, smsBody);
+      const smsResult = await sendMessage({
+        channel: "sms",
+        to,
+        message: smsBody,
+      });
 
-      console.log("TWILIO RESPONSE:", smsResult.sid, smsResult.status);
+      console.log("MESSAGE RESPONSE:", smsResult);
 
       await supabaseAdmin.from("lead_messages").insert([
         {
@@ -83,6 +103,8 @@ export async function POST(req: Request) {
           delivery_status: smsResult.status || "sent",
           ai_generated: true,
           sent_at: new Date().toISOString(),
+          provider: smsResult.provider || "stub",
+          external_id: smsResult.external_id,
         },
       ]);
 
@@ -100,7 +122,8 @@ export async function POST(req: Request) {
         message: "Lead saved and SMS sent",
         lead,
         smsStatus: smsResult.status,
-        smsSid: smsResult.sid,
+        smsProvider: smsResult.provider,
+        smsExternalId: smsResult.external_id,
       });
     } catch (err) {
       const errorMessage =

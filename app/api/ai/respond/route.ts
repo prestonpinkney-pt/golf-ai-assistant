@@ -1,201 +1,303 @@
 import { NextResponse } from "next/server";
-import OpenAI from "openai";
+import { createClient } from "@supabase/supabase-js";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-});
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.SUPABASE_SERVICE_ROLE_KEY!
+);
 
+function decidePlaybook(message: string): string {
+  const text = (message || "").toLowerCase();
+
+  if (
+    text.includes("lesson") ||
+    text.includes("swing") ||
+    text.includes("junior") ||
+    text.includes("30 min") ||
+    text.includes("1 hour")
+  ) {
+    return "lesson";
+  }
+
+  if (
+    text.includes("event") ||
+    text.includes("party") ||
+    text.includes("birthday") ||
+    text.includes("corporate") ||
+    text.includes("group")
+  ) {
+    return "event";
+  }
+
+  if (
+    text.includes("membership") ||
+    text.includes("member") ||
+    text.includes("monthly")
+  ) {
+    return "membership";
+  }
+
+  return "general";
+}
+
+function buildResponseByState(
+  state: string,
+  playbook: string,
+  inboundText: string
+): string {
+  if (state === "cooling_off") {
+    return "Understood. I’ll leave it there for now.";
+  }
+
+  if (state === "booked") {
+    return "You’re all set. Is there anything else I can help with?";
+  }
+
+  if (state === "ready_to_book") {
+    switch (playbook) {
+      case "lesson":
+        return "Perfect. I can help get that set up. Are you looking for a 30-minute or 1-hour lesson?";
+      case "event":
+        return "Sounds good. I can help get that lined up. What date are you aiming for, and about how many people are you expecting?";
+      case "membership":
+        return "Got it. I can point you in the right direction. Are you mainly looking to practice, play, or both?";
+      default:
+        return "Happy to help. What are you looking to get set up?";
+    }
+  }
+
+  if (state === "qualifying") {
+    switch (playbook) {
+      case "lesson":
+        return "Got it. Is the lesson for you or someone else, and are you looking for a 30-minute or 1-hour session?";
+      case "event":
+        return "Got it. What type of event are you planning, and about how many people are you expecting?";
+      case "membership":
+        return "Got it. How often do you see yourself coming in during a normal week?";
+      default:
+        return "Happy to help. Are you looking to book time, get a lesson, ask about membership, or plan something for a group?";
+    }
+  }
+
+  // default = new_inquiry
+  switch (playbook) {
+    case "lesson":
+      return "Happy to help. Are you looking for a 30-minute or 1-hour lesson, and is it for you or someone else?";
+    case "event":
+      return "Happy to help. What type of event are you planning, and about how many people are you expecting?";
+    case "membership":
+      return "Happy to help. Are you mainly looking to practice, play more often, or a mix of both?";
+    default:
+      return "Happy to help. Are you looking to book time, get a lesson, ask about membership, or plan something for a group?";
+  }
+}
+function getNextConversationState(
+  currentState: string,
+  playbook: string,
+  inboundText: string
+): string {
+  const text = (inboundText || "").toLowerCase();
+
+  if (currentState === "new_inquiry") {
+    return "qualifying";
+  }
+
+  if (currentState === "qualifying") {
+    // simple readiness checks for MVP
+    if (
+      playbook === "lesson" &&
+      (text.includes("30") ||
+        text.includes("1 hour") ||
+        text.includes("hour") ||
+        text.includes("this week") ||
+        text.includes("book"))
+    ) {
+      return "ready_to_book";
+    }
+
+    if (
+      playbook === "event" &&
+      (text.includes("birthday") ||
+        text.includes("corporate") ||
+        text.includes("party") ||
+        text.includes("people") ||
+        text.includes("date"))
+    ) {
+      return "ready_to_book";
+    }
+
+    if (
+      playbook === "membership" &&
+      (text.includes("membership") ||
+        text.includes("practice") ||
+        text.includes("play") ||
+        text.includes("weekly"))
+    ) {
+      return "ready_to_book";
+    }
+  }
+
+  return currentState;
+}
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { message } = body;
+    const conversationId = body.conversation_id;
 
-    if (!message) {
+    if (!conversationId) {
       return NextResponse.json(
-        { error: "Message is required" },
+        { success: false, error: "Missing conversation_id" },
         { status: 400 }
       );
     }
 
-    const systemPrompt = `
-You are Primetime Golf AI, a premium golf concierge and sales assistant.
+    // 1. Load conversation
+    const { data: conversation, error: conversationError } = await supabase
+      .from("conversations")
+      .select("*")
+      .eq("id", conversationId)
+      .single();
 
-Your personality:
-- confident
-- smooth
-- premium
-- calm
-- direct
-- helpful
-- conversational
-- never overly formal
-- never robotic
-- never weak
-- never cheesy
-- never overly excited
+    if (conversationError || !conversation) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: conversationError?.message || "Conversation not found",
+        },
+        { status: 500 }
+      );
+    }
 
-Your job:
-1. detect all intents in the message
-2. extract group size if mentioned
-3. choose a primary intent
-4. choose secondary intents
-5. score complexity as low, medium, or high
-6. score lead temperature as cold, warm, or hot
-7. identify persona as one of:
-   - beginner
-   - serious_golfer
-   - corporate_client
-   - casual_player
-   - group_client
-   - general
-8. choose pressure mode as one of:
-   - soft
-   - balanced
-   - strong
-9. choose a goal as one of:
-   - answer_question
-   - qualify_lead
-   - book_lesson
-   - book_event
-   - route_to_booking
-   - qualify_and_route
-   - escalate_to_human
-   - continue_conversation
-10. decide if escalation is needed
-11. generate the best next reply
+    // 2. Get latest inbound message
+    const { data: latestMessage, error: messageError } = await supabase
+      .from("messages")
+      .select("*")
+      .eq("conversation_id", conversationId)
+      .eq("direction", "inbound")
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .single();
 
-STRICT BUSINESS RULES:
-- If group size is greater than 4, shouldEscalate must be true.
-- If group size is mentioned and greater than 4, complexity must be high.
-- If message includes both event and tee_time, strongly favor escalation.
-- Any event request with logistics should escalate.
-- Do not let large groups self-serve.
+    if (messageError || !latestMessage) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: messageError?.message || "No inbound message found",
+        },
+        { status: 500 }
+      );
+    }
 
-ESCALATION RULES:
-- If shouldEscalate is true, do NOT end the conversation immediately.
-- If shouldEscalate is true, ask the single most useful qualifying question first.
-- For large group or event requests, ask for the date and the type of event before routing.
-- For complaints or refunds, acknowledge the issue and say a team member will follow up directly.
-- Escalation replies should still feel helpful, controlled, and premium.
+    // 3. Get contact
+    const { data: contact, error: contactError } = await supabase
+      .from("contacts")
+      .select("*")
+      .eq("id", latestMessage.contact_id)
+      .single();
 
-TONE RULES:
-- No cheesy phrases.
-- No fake enthusiasm.
-- No phrases like "I'd be delighted," "exciting endeavor," or "unforgettable."
-- Do not sound like customer support.
-- Do not sound corny or overly polished.
-- Sound like a premium front desk operator who knows what they’re doing.
-- Keep replies natural, clean, and in control.
-- Move the conversation forward with the next best question or step.
-- If escalation is needed, say it confidently and smoothly, without sounding apologetic.
+    if (contactError || !contact) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: contactError?.message || "Contact not found",
+        },
+        { status: 500 }
+      );
+    }
 
-STYLE BY PERSONA:
-- beginner: patient, simple, encouraging, not overwhelming
-- serious_golfer: efficient, direct, minimal fluff
-- corporate_client: polished, structured, professional
-- group_client: organized, clear, operational
-- casual_player: friendly, easygoing, still guiding
-- general: balanced and helpful
+    // 4. Block if opted out
+    if (contact.sms_opt_out) {
+      return NextResponse.json({
+        success: false,
+        blocked: true,
+        reason: "Contact has opted out of SMS",
+      });
+    }
 
-GOOD EXAMPLES OF TONE:
-- "Got you."
-- "I can help with that."
-- "For a group that size, I’d want to line it up the right way."
-- "What date are you targeting?"
-- "Are you looking for weekday evenings or weekend availability?"
-- "That’s something we’d want to handle a little more directly."
+    // 5. Block if cooling off
+    if (
+      contact.cooling_off_until &&
+      new Date(contact.cooling_off_until) > new Date()
+    ) {
+      return NextResponse.json({
+        success: false,
+        blocked: true,
+        reason: "Contact is in cooling off period",
+      });
+    }
 
-BAD EXAMPLES OF TONE:
-- "I'd be delighted to assist."
-- "That sounds exciting!"
-- "Let’s make this unforgettable."
-- "We are thrilled to help."
+    // 6. Decide response
+    const inboundText = latestMessage.message_text || "";
+    const playbook = decidePlaybook(inboundText);
+    const currentState = conversation.status || "new_inquiry";
+    const responseText = buildResponseByState(
+      currentState,
+      playbook,
+      inboundText
+    );
+ const nextState = getNextConversationState(
+      currentState,
+      playbook,
+      inboundText
+    );
+    // 7. Save outbound message
+    const { data: outboundMessage, error: outboundError } = await supabase
+      .from("messages")
+      .insert({
+        conversation_id: conversationId,
+        contact_id: latestMessage.contact_id,
+        lead_id: latestMessage.lead_id,
+        direction: "outbound",
+        channel: latestMessage.channel || "web",
+        message_text: responseText,
+        status: "sent",
+      })
+      .select()
+      .single();
 
-INTENT LABELS:
-- lesson
-- event
-- tee_time
-- membership
-- pricing
-- general
-- complaint
-- refund
-- booking
-- availability
-
-Return ONLY valid JSON with this exact structure:
-
-{
-  "intents": [],
-  "primaryIntent": "",
-  "secondaryIntents": [],
-  "complexity": "",
-  "leadTemperature": "",
-  "persona": "",
-  "pressureMode": "",
-  "goal": "",
-  "shouldEscalate": false,
-  "reply": ""
-}
-`;
-
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      temperature: 0.4,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: message },
-      ],
+    if (outboundError || !outboundMessage) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: outboundError?.message || "Outbound message insert failed",
+        },
+        { status: 500 }
+      );
+    }
+if (nextState !== currentState) {
+      await supabase
+        .from("conversations")
+        .update({
+          status: nextState,
+        })
+        .eq("id", conversationId);
+    }
+    // 8. Audit log
+    await supabase.from("audit_logs").insert({
+      event_type: "ai_response_generated",
+      entity_type: "conversation",
+      entity_id: conversationId,
+      metadata: {
+        playbook,
+        state: currentState,
+        next_state: nextState,
+        inbound_message_id: latestMessage.id,
+        outbound_message_id: outboundMessage.id,
+        sent_to: contact.phone,
+      },
     });
 
-    const raw = completion.choices[0].message.content;
-    console.log("RAW AI RESPONSE:", raw);
-
-    let parsed;
-
-    try {
-      parsed = raw ? JSON.parse(raw) : null;
-    } catch (err) {
-      console.error("JSON parse failed:", raw);
-
-      parsed = {
-        intents: [],
-        primaryIntent: "general",
-        secondaryIntents: [],
-        complexity: "low",
-        leadTemperature: "cold",
-        persona: "general",
-        pressureMode: "balanced",
-        goal: "continue_conversation",
-        shouldEscalate: false,
-        reply: "Got you. Can you give me a little more detail on what you’re looking for?",
-      };
-    }
-
-    if (!parsed) {
-      parsed = {
-        intents: [],
-        primaryIntent: "general",
-        secondaryIntents: [],
-        complexity: "low",
-        leadTemperature: "cold",
-        persona: "general",
-        pressureMode: "balanced",
-        goal: "continue_conversation",
-        shouldEscalate: false,
-        reply: "Got you. Can you give me a little more detail on what you’re looking for?",
-      };
-    }
-
-    return NextResponse.json(parsed);
-  } catch (error: any) {
-    console.error("AI brain error:", error);
-
+    return NextResponse.json({
+      success: true,
+      state: currentState,
+      playbook,
+      response_text: responseText,
+      outbound_message_id: outboundMessage.id,
+      send_status: "sent",
+    });
+  } catch (err: any) {
     return NextResponse.json(
-      {
-        error: error?.message || "AI request failed",
-      },
+      { success: false, error: err?.message || "Unknown error" },
       { status: 500 }
     );
   }

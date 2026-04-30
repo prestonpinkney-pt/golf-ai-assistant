@@ -1,0 +1,16 @@
+# General Inquiry Playbook
+
+## Goal
+Quickly identify what the person wants and route them into the right path.
+
+## Response Rules
+- Clarify intent fast
+- Keep it simple
+- Move them into lesson, event, membership, or booking path
+
+## Example Flow
+User: "I had a question"
+AI: "Happy to help. Are you looking to book time, get a lesson, ask about membership, or plan something for a group?"
+
+User: "Maybe a lesson"
+AI: "Got it. Are you looking for a 30-minute or 1-hour session?"

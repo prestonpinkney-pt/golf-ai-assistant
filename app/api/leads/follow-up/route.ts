@@ -1,25 +1,11 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
-import fs from "fs";
-import path from "path";
+import { supabaseAdmin } from "@/lib/supabase/admin";
+import { fetchLeadById } from "../_shared";
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY!,
 });
-
-const filePath = path.join(process.cwd(), "data", "leads.json");
-
-function readLeads() {
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, "[]", "utf-8");
-  }
-
-  return JSON.parse(fs.readFileSync(filePath, "utf-8"));
-}
-
-function writeLeads(data: any) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
-}
 
 export async function POST(req: Request) {
   try {
@@ -33,8 +19,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const leads = readLeads();
-    const lead = leads.find((l: any) => l.id === id);
+    const lead = await fetchLeadById(id);
 
     if (!lead) {
       return NextResponse.json(
@@ -55,11 +40,11 @@ export async function POST(req: Request) {
         {
           role: "user",
           content: `
-Message: ${lead.message}
-Reply: ${lead.reply}
-Intent: ${lead.primaryIntent}
-Follow-ups: ${lead.followUpCount}
-Current Status: ${lead.status}
+Message: ${lead.message ?? ""}
+Reply: ${lead.ai_next_best_action ?? ""}
+Intent: ${lead.lead_type ?? "general"}
+Follow-ups: ${lead.follow_up_count ?? 0}
+Current Status: ${lead.status ?? "open"}
 
 Pick one:
 open, contacted, booked, closed
@@ -73,18 +58,21 @@ Return:
 
     const raw = completion.choices[0].message.content || "{}";
     const parsed = JSON.parse(raw);
+    const { error } = await supabaseAdmin
+      .from("leads")
+      .update({
+        status: parsed.status || lead.status,
+        ai_last_reasoning: parsed.reason || "",
+        last_contacted_at: new Date().toISOString(),
+      })
+      .eq("id", id);
 
-    const updated = leads.map((l: any) =>
-      l.id === id
-        ? {
-            ...l,
-            status: parsed.status || l.status,
-            statusReason: parsed.reason || "",
-          }
-        : l
-    );
-
-    writeLeads(updated);
+    if (error) {
+      return NextResponse.json(
+        { error: error.message || "Failed to save follow-up status" },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({ success: true });
   } catch (err: any) {

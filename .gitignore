@@ -32,6 +32,9 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # env files (can opt-in for committing if needed)
+.env
+.env.local
+.env.*.local
 .env*
 
 # vercel
@@ -40,3 +43,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local binaries and contact exports (do not commit)
+/curl.exe
+/CloseOS Mailchimp Contact Export.csv
+/SMS Import Contact CloseOS.csv
+/app/api/leads/save/AI Agent Leads System.txt

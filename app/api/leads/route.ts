@@ -1,23 +1,25 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
-import path from "path";
-
-const filePath = path.join(process.cwd(), "data", "leads.json");
-
-function readLeads() {
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, "[]", "utf-8");
-  }
-
-  const fileData = fs.readFileSync(filePath, "utf-8");
-  return JSON.parse(fileData);
-}
+import { supabaseAdmin } from "@/lib/supabase/admin";
+import { toInboxLead } from "./_shared";
 
 export async function GET() {
   try {
-    const leads = readLeads();
+    const { data, error } = await supabaseAdmin
+      .from("leads")
+      .select(
+        "id, full_name, phone, email, message, source, lead_type, status, follow_up_count, preferred_contact_channel, last_contacted_at, created_at, ai_summary, ai_next_best_action, ai_last_reasoning"
+      )
+      .order("created_at", { ascending: false })
+      .limit(250);
 
-    return NextResponse.json(leads);
+    if (error) {
+      return NextResponse.json(
+        { error: error.message || "Failed to load leads" },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json((data ?? []).map(toInboxLead));
   } catch (error: any) {
     console.error("Read leads error:", error);
 

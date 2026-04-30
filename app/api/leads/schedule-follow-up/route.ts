@@ -1,19 +1,5 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
-import path from "path";
-
-const filePath = path.join(process.cwd(), "data", "leads.json");
-
-function readLeads() {
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, "[]", "utf-8");
-  }
-  return JSON.parse(fs.readFileSync(filePath, "utf-8"));
-}
-
-function writeLeads(data: any) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
-}
+import { supabaseAdmin } from "@/lib/supabase/admin";
 
 function getFutureISO(hoursFromNow: number) {
   const d = new Date();
@@ -33,23 +19,26 @@ export async function POST(req: Request) {
       );
     }
 
-    const leads = readLeads();
+    const nextFollowUpAt = getFutureISO(
+      typeof hoursFromNow === "number" ? hoursFromNow : 24
+    );
 
-    const updatedLeads = leads.map((lead: any) => {
-      if (lead.id !== id) return lead;
+    const { data: updatedLead, error } = await supabaseAdmin
+      .from("leads")
+      .update({
+        preferred_contact_channel: channel || "sms",
+        ai_next_best_action: `Follow up after ${nextFollowUpAt}`,
+      })
+      .eq("id", id)
+      .select("id")
+      .single();
 
-      return {
-        ...lead,
-        preferredChannel: channel || lead.preferredChannel || "sms",
-        nextFollowUpAt: getFutureISO(
-          typeof hoursFromNow === "number" ? hoursFromNow : 24
-        ),
-      };
-    });
-
-    writeLeads(updatedLeads);
-
-    const updatedLead = updatedLeads.find((lead: any) => lead.id === id);
+    if (error || !updatedLead) {
+      return NextResponse.json(
+        { error: error?.message || "Lead not found" },
+        { status: 404 }
+      );
+    }
 
     return NextResponse.json({
       success: true,

@@ -1,19 +1,5 @@
 import { NextResponse } from "next/server";
-import fs from "fs";
-import path from "path";
-
-const filePath = path.join(process.cwd(), "data", "leads.json");
-
-function readLeads() {
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, "[]", "utf-8");
-  }
-  return JSON.parse(fs.readFileSync(filePath, "utf-8"));
-}
-
-function writeLeads(data: any) {
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
-}
+import { supabaseAdmin } from "@/lib/supabase/admin";
 
 function getNextFollowUpDate(hoursFromNow: number) {
   const date = new Date();
@@ -45,38 +31,49 @@ function buildFollowUpMessage(lead: any) {
 
 export async function POST() {
   try {
-    const leads = readLeads();
-    const now = new Date();
+    const { data: leads, error } = await supabaseAdmin
+      .from("leads")
+      .select("id, lead_type, status, follow_up_count")
+      .in("status", ["open", "contacted", "new"])
+      .order("created_at", { ascending: true })
+      .limit(100);
+
+    if (error) {
+      return NextResponse.json(
+        { error: error.message || "Failed to load due leads" },
+        { status: 500 }
+      );
+    }
 
     let processedCount = 0;
+    const nowIso = new Date().toISOString();
 
-    const updatedLeads = leads.map((lead: any) => {
-      if (!lead.nextFollowUpAt) return lead;
-      if (lead.status === "booked" || lead.status === "closed") return lead;
+    for (const lead of leads ?? []) {
+      const followUpMessage = buildFollowUpMessage({
+        primaryIntent: lead.lead_type,
+      });
+      const newCount = (lead.follow_up_count ?? 0) + 1;
+      const nextFollowUpAt =
+        newCount >= 2 ? null : `Follow up after ${getNextFollowUpDate(24)}`;
 
-      const dueDate = new Date(lead.nextFollowUpAt);
+      const { error: updateError } = await supabaseAdmin
+        .from("leads")
+        .update({
+          follow_up_count: newCount,
+          last_contacted_at: nowIso,
+          status:
+            lead.status === "open" || lead.status === "new"
+              ? "contacted"
+              : lead.status,
+          ai_next_best_action: nextFollowUpAt,
+          ai_summary: followUpMessage,
+        })
+        .eq("id", lead.id);
 
-      if (dueDate > now) return lead;
-
-      const followUpMessage = buildFollowUpMessage(lead);
-      const newCount = (lead.followUpCount || 0) + 1;
-
-      processedCount += 1;
-
-      return {
-        ...lead,
-        followUpMessage,
-        followUpCount: newCount,
-        lastFollowUpAt: now.toISOString(),
-        lastContactedAt: now.toISOString(),
-        status: lead.status === "open" ? "contacted" : lead.status,
-        nextFollowUpAt: newCount >= 2 ? null : getNextFollowUpDate(24),
-        lastSendChannel: lead.preferredChannel || "sms",
-        lastSendResult: `Follow-up prepared for ${lead.preferredChannel || "sms"}`,
-      };
-    });
-
-    writeLeads(updatedLeads);
+      if (!updateError) {
+        processedCount += 1;
+      }
+    }
 
     return NextResponse.json({
       success: true,

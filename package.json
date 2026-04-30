@@ -6,16 +6,22 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "lint:hardcoded": "node scripts/check-hardcoded-runtime-values.mjs"
   },
   "dependencies": {
+    "@supabase/ssr": "^0.6.1",
     "@supabase/supabase-js": "^2.101.1",
+    "@tailwindcss/postcss": "^4.2.4",
     "ai": "^6.0.144",
+    "googleapis": "^171.4.0",
     "next": "16.2.2",
     "open": "^11.0.0",
     "openai": "^6.33.0",
+    "postcss": "^8.5.10",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "tailwindcss": "^4.2.4",
     "twilio": "^5.13.1"
   },
   "devDependencies": {

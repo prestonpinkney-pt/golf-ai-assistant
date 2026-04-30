@@ -1,0 +1,1 @@
+export { sendMessage } from "@/lib/send-message";
