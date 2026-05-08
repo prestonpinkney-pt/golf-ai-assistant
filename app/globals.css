@@ -32,3 +32,103 @@ a {
   color: inherit;
   text-decoration: none;
 }
+
+@keyframes soft-float {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(0, -8px, 0) scale(1.02);
+  }
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.18);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes draw-line {
+  from {
+    stroke-dashoffset: 900;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.motion-card {
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    border-color 180ms ease,
+    background-color 180ms ease;
+}
+
+.motion-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.08);
+}
+
+.live-dot {
+  position: relative;
+}
+
+.live-dot::after {
+  animation: live-pulse 1.8s ease-in-out infinite;
+  background: currentColor;
+  border-radius: 9999px;
+  content: "";
+  inset: -4px;
+  opacity: 0.2;
+  position: absolute;
+}
+
+.ambient-orb {
+  animation: soft-float 7s ease-in-out infinite;
+  pointer-events: none;
+}
+
+.shimmer-text {
+  animation: shimmer 1.7s linear infinite;
+  background: linear-gradient(90deg, #64748b 20%, #059669 45%, #64748b 70%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.draw-line {
+  animation: draw-line 1.4s ease-out both;
+  stroke-dasharray: 900;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ambient-orb,
+  .draw-line,
+  .live-dot::after,
+  .shimmer-text {
+    animation: none;
+  }
+
+  .motion-card,
+  .motion-card:hover {
+    transform: none;
+  }
+}

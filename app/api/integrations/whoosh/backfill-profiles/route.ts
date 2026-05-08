@@ -1,13 +1,12 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { BUSINESS_ID } from "../../../config";
 import { gateBusinessUser } from "../../../lib/require-auth";
 import {
   backfillCustomerProfilesFromMatchedWhoosh,
   syncBookingReservationsFromWhoosh,
 } from "../../../lib/whoosh-import";
 import { evaluateGoogleCalendarBookingOpportunities } from "../../../lib/google-calendar-booking-opportunities";
-
-const BUSINESS_ID = "b381c0cc-4786-4032-8b22-5143aeaf3e30";
 
 function getSupabaseAdmin() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;

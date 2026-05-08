@@ -45,8 +45,8 @@ export default async function DashboardLayout({
         <div className="flex min-w-0 flex-1 flex-col">
           <Topbar />
 
-          <main className="flex-1 overflow-y-auto">
-            <div className="mx-auto w-full max-w-7xl px-6 py-6">{children}</div>
+          <main className="flex-1 overflow-y-auto bg-[radial-gradient(circle_at_top_left,rgba(16,185,129,0.11),transparent_28%),linear-gradient(180deg,#f8fafc_0%,#f1f5f9_100%)]">
+            <div className="mx-auto w-full max-w-[1500px] px-4 py-5 sm:px-5 lg:px-6 lg:py-6">{children}</div>
           </main>
         </div>
       </div>

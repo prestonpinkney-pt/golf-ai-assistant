@@ -1,5 +1,6 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { isParenLessonCalendarTitle } from "./lesson-whoosh-identity";
+import { truthFieldsForDb } from "./closeos-opportunity-truth";
 
 const SOURCE = "google_calendar_booking" as const;
 
@@ -93,7 +94,6 @@ async function upsertBookingOpportunity(input: {
   opportunityType: string;
   priority: number;
   confidence: number;
-  estimatedRevenueCents: number;
   signalSummary: string;
   nextBestAction: string;
   replyHandlingGoal: string;
@@ -102,6 +102,7 @@ async function upsertBookingOpportunity(input: {
 }) {
   const playbook = PLAYBOOK_BY_SIGNAL[input.signal];
   const now = new Date().toISOString();
+  const truth = truthFieldsForDb(input.signal);
 
   const existing = await findOpenBookingOpportunity({
     supabase: input.supabase,
@@ -118,7 +119,7 @@ async function upsertBookingOpportunity(input: {
       .update({
         priority: input.priority,
         confidence: input.confidence,
-        estimated_revenue_cents: input.estimatedRevenueCents,
+        ...truth,
         signal_summary: input.signalSummary,
         next_best_action: input.nextBestAction,
         reply_handling_goal: input.replyHandlingGoal,
@@ -137,7 +138,7 @@ async function upsertBookingOpportunity(input: {
       .update({
         priority: input.priority,
         confidence: input.confidence,
-        estimated_revenue_cents: input.estimatedRevenueCents,
+        ...truth,
         signal_summary: input.signalSummary,
         next_best_action: input.nextBestAction,
         reply_handling_goal: input.replyHandlingGoal,
@@ -163,7 +164,7 @@ async function upsertBookingOpportunity(input: {
       status: "open",
       priority: input.priority,
       confidence: input.confidence,
-      estimated_revenue_cents: input.estimatedRevenueCents,
+      ...truth,
       signal_summary: input.signalSummary,
       next_best_action: input.nextBestAction,
       reply_handling_goal: input.replyHandlingGoal,
@@ -249,7 +250,6 @@ export async function evaluateGoogleCalendarBookingOpportunities(input: {
       opportunityType: "identity",
       priority: 62,
       confidence: 55,
-      estimatedRevenueCents: 0,
       signalSummary: summary,
       nextBestAction:
         "Review extracted email/phone against Square and Mailchimp, then link or create customer_profiles safely.",
@@ -312,7 +312,6 @@ export async function evaluateGoogleCalendarBookingOpportunities(input: {
           opportunityType: "lesson",
           priority: 74,
           confidence: 72,
-          estimatedRevenueCents: 15000,
           signalSummary: `Last completed lesson ended ${lastEnd.ends_at}. No later lesson booked after ${Math.floor(daysSince)} days.`,
           nextBestAction:
             "Offer lesson rebooking based on history; do not auto-send until reviewed.",
@@ -350,7 +349,6 @@ export async function evaluateGoogleCalendarBookingOpportunities(input: {
           opportunityType: "event",
           priority: 70,
           confidence: 68,
-          estimatedRevenueCents: 25000,
           signalSummary: `Completed event "${last.title ?? ""}" ended ${last.ends_at}. Follow up or rebook within policy.`,
           nextBestAction:
             "Send a human-reviewed thank-you or rebooking prompt for events.",
@@ -387,7 +385,6 @@ export async function evaluateGoogleCalendarBookingOpportunities(input: {
           opportunityType: "clinic",
           priority: 71,
           confidence: 66,
-          estimatedRevenueCents: 12000,
           signalSummary: `Clinic "${last.title ?? ""}" completed ${last.ends_at}. Consider next-step lesson or clinic series.`,
           nextBestAction:
             "Propose appropriate next clinic or private lesson; manual review first.",
@@ -430,7 +427,6 @@ export async function evaluateGoogleCalendarBookingOpportunities(input: {
           opportunityType: "reactivation",
           priority: 69,
           confidence: 64,
-          estimatedRevenueCents: 10000,
           signalSummary: `Cancelled ${c.reservation_type} on ${c.starts_at} ("${c.title ?? ""}") with no replacement booking found in synced calendar data.`,
           nextBestAction:
             "Recover booking with a human-reviewed message; confirm availability first.",

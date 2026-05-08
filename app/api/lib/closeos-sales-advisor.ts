@@ -7,7 +7,20 @@ export type AdvisorRevenueSummary = {
   actualRevenueCents: number;
   remainingGapCents: number;
   goalCoveragePercent: number;
+  knownPipelineCents: number;
+  qualifiedLeadCount: number;
+  revenueTbdCount: number;
+  reviewOnlyCount: number;
+  goalStatus: "configured" | "missing" | "duplicate_resolved";
 };
+
+/** What to do first / next / later — operator-facing buckets (not internal types). */
+export type SellerStrand =
+  | "close_first"
+  | "build_pipeline"
+  | "hidden_upsell"
+  | "needs_review"
+  | "do_not_prioritize";
 
 export type AdvisorSuggestionType =
   | "close_first"
@@ -27,14 +40,18 @@ export type AdvisorSuggestionPriority = "critical" | "high" | "medium" | "low";
 export type AdvisorSuggestion = {
   id: string;
   type: AdvisorSuggestionType;
+  /** Seller-facing bucket for dashboard ordering and labels. */
+  strand: SellerStrand;
   title: string;
   priority: AdvisorSuggestionPriority;
   confidence: number;
+  /** Dollar gap or upside where relevant; never invented list prices for TBD leads. */
   revenueImpactCents: number;
   targetCount: number;
   reasoning: string;
+  /** Imperative next step the operator can take now. */
   recommendedAction: string;
-  actionHref: string | null;
+  actionHref: string;
   supportingSignals: string[];
   caution?: string;
   suggestedMessageAngle?: string;
@@ -42,7 +59,12 @@ export type AdvisorSuggestion = {
 
 export type CloseOsSalesAdvisorResult = {
   generatedAt: string;
+  /** One plain-language sentence on where the business stands this month. */
+  businessHeadline: string;
+  /** Same as businessHeadline (legacy field name). */
   headline: string;
+  /** max(0, remaining gap minus known forecastable pipeline). */
+  pipelineShortfallCents: number;
   summary: string;
   suggestions: AdvisorSuggestion[];
 };
@@ -53,8 +75,47 @@ export type BuildCloseOsSalesAdvisorInput = {
   revenueSummary: AdvisorRevenueSummary | null;
 };
 
-function sumRevenue(ts: OutboundOpportunityTarget[]) {
-  return ts.reduce((s, t) => s + t.estimatedRevenueCents, 0);
+function sumKnownPipeline(ts: OutboundOpportunityTarget[]) {
+  return ts.reduce((s, t) => s + t.knownPipelineContributionCents, 0);
+}
+
+function formatMoneyPlain(cents: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(Math.round(cents / 100));
+}
+
+function buildBusinessHeadline(
+  revenueSummary: AdvisorRevenueSummary | null,
+  targetsCount: number
+): string {
+  if (!revenueSummary) {
+    return targetsCount > 0
+      ? "You have people ready to work, but this month’s revenue picture is still loading—hit refresh after the next sync."
+      : "Bring in bookings and purchases so CloseOS can line up goal, gap, and your sharpest next moves.";
+  }
+  const g = revenueSummary;
+  if (g.goalStatus === "missing" || g.monthlyGoalCents <= 0) {
+    return "Set a real monthly revenue goal for this location so CloseOS can measure the gap and how much forecastable pipeline covers it.";
+  }
+  if (g.remainingGapCents <= 0) {
+    return `Booked revenue is at or past your ${formatMoneyPlain(g.monthlyGoalCents)} monthly goal—finish what is in flight or line up next month’s number.`;
+  }
+  const cov =
+    g.remainingGapCents > 0
+      ? Math.min(100, Math.round((g.knownPipelineCents / g.remainingGapCents) * 100))
+      : 0;
+  const short = Math.max(0, g.remainingGapCents - g.knownPipelineCents);
+  if (g.knownPipelineCents >= g.remainingGapCents) {
+    return `You are ${g.goalCoveragePercent}% of the way to goal with ${formatMoneyPlain(g.remainingGapCents)} left to close, and forecastable pipeline can cover that if it converts.`;
+  }
+  const tbdNote =
+    g.revenueTbdCount > 0
+      ? ` Another ${g.revenueTbdCount} warm ${g.revenueTbdCount === 1 ? "deal needs" : "deals need"} a clear price before they add to pipeline dollars.`
+      : "";
+  return `You are ${g.goalCoveragePercent}% of the way to goal (${formatMoneyPlain(g.remainingGapCents)} to go); forecastable pipeline covers about ${cov}% of that gap, leaving roughly ${formatMoneyPlain(short)} uncovered in hard dollars.${tbdNote}`;
 }
 
 function playbookHref(campaignName: string) {
@@ -94,7 +155,11 @@ export function buildCloseOsSalesAdvisor(
   const generatedAt = new Date().toISOString();
   const suggestions: AdvisorSuggestion[] = [];
 
-  const pipelineCents = sumRevenue(targets);
+  const knownPipelineCents =
+    revenueSummary?.knownPipelineCents ?? sumKnownPipeline(targets);
+  const qualifiedLeadCountFromApi =
+    revenueSummary?.qualifiedLeadCount ?? null;
+  const revenueTbdFromApi = revenueSummary?.revenueTbdCount ?? null;
   const gapCents = revenueSummary?.remainingGapCents ?? 0;
 
   const bookingIntel = targets.filter(
@@ -164,18 +229,20 @@ export function buildCloseOsSalesAdvisor(
     suggestions.push({
       id: "close-first-cancelled-lesson",
       type: "close_first",
+      strand: "close_first",
       title: "Start with cancelled lesson recovery",
       priority: "critical",
       confidence: 88,
-      revenueImpactCents: sumRevenue(cancelledRecovery),
+      revenueImpactCents: sumKnownPipeline(cancelledRecovery),
       targetCount: cancelledRecovery.length,
       reasoning:
         "These customers already tried to book lessons and cancelled without a replacement. They are warmer than cold leads.",
-      recommendedAction: "Review and recover cancelled lesson bookings first.",
+      recommendedAction:
+        "Open the cancelled-lesson campaign and personally rebook each person before chasing new leads.",
       actionHref: campaign ? playbookHref(campaign) : "/opportunities",
       supportingSignals: [
-        `${cancelledRecovery.length} reachable targets tied to cancelled or recovery signals`,
-        bookingIntel.length > 0 ? "Booking Intelligence is live in the mix" : "Calendar-backed signals present",
+        `${cancelledRecovery.length} reachable people tied to cancelled or recovery signals`,
+        bookingIntel.length > 0 ? "Calendar-backed bookings are in the mix" : "Calendar-backed signals present",
       ],
       suggestedMessageAngle:
         "We noticed your lesson slot opened up — want help rebooking before it fills?",
@@ -187,37 +254,51 @@ export function buildCloseOsSalesAdvisor(
     suggestions.push({
       id: "manual-review-booking-identity",
       type: "manual_review",
-      title: "Review unmatched booking identities",
+      strand: "needs_review",
+      title: "Fix calendar names that do not match a customer yet",
       priority: "critical",
       confidence: 82,
-      revenueImpactCents: sumRevenue(identityGap),
+      revenueImpactCents: 0,
       targetCount: identityGap.length,
       reasoning:
-        "Some lesson bookings have names but are not safely attached to reachable Square profiles. Clean matches before outreach.",
-      recommendedAction: "Resolve identity matches in Opportunities before sending.",
+        "Some lesson bookings have contact info but are not safely matched to a paying customer record. Clean that up before any outreach.",
+      recommendedAction:
+        "Go to Opportunities, match or create the right customer for each unmatched calendar booking, then approve outreach.",
       actionHref: "/opportunities",
-      supportingSignals: [`${identityGap.length} targets flagged booked_but_no_square_match`],
+      supportingSignals: [
+        `${identityGap.length} calendar booking${identityGap.length === 1 ? "" : "s"} need a safe customer match`,
+      ],
       caution: "Do not auto-text until identity is confirmed.",
     });
   }
 
-  // 3) pipeline_gap
-  if (revenueSummary && gapCents > 0 && pipelineCents < gapCents) {
-    const pct = Math.round((pipelineCents / gapCents) * 100);
+  // 3) pipeline_gap (known pipeline only — never TBD or open-house estimates)
+  if (revenueSummary && gapCents > 0 && knownPipelineCents < gapCents) {
+    const pct = Math.round((knownPipelineCents / gapCents) * 100);
+    const shortfall = Math.max(0, gapCents - knownPipelineCents);
+    const tbd =
+      revenueTbdFromApi ??
+      targets.filter((t) => t.revenueReviewRequired).length;
+    const ql =
+      qualifiedLeadCountFromApi ??
+      targets.filter((t) => t.pipelineCategory === "qualified_lead").length;
     suggestions.push({
       id: "pipeline-gap-monthly-goal",
       type: "pipeline_gap",
-      title: "Current pipeline does not cover the goal",
+      strand: "build_pipeline",
+      title: "Build more pipeline — known dollars still short of the gap",
       priority: "high",
       confidence: 78,
-      revenueImpactCents: Math.max(0, gapCents - pipelineCents),
+      revenueImpactCents: shortfall,
       targetCount: targets.length,
-      reasoning: `Even if every open opportunity closed at full estimate, you still need more pipeline. Open pipeline covers about ${pct}% of the remaining gap.`,
-      recommendedAction: "Layer reactivation and event invites while you close booking plays.",
+      reasoning: `Forecastable pipeline only covers about ${pct}% of what you still need this month; roughly ${formatMoneyPlain(shortfall)} is not yet represented in hard dollars. You have ${ql} qualified lead${ql === 1 ? "" : "s"} and ${tbd} deal${tbd === 1 ? "" : "s"} waiting on a clear price before they count as pipeline—set those offer amounts when you are ready so the forecast stays honest.`,
+      recommendedAction:
+        "Work the highest-confidence known-dollar deals first, then add one reactivation or event push to widen the top of funnel.",
       actionHref: "/opportunities",
       supportingSignals: [
-        `Gap ${(gapCents / 100).toFixed(0)} vs pipeline ${(pipelineCents / 100).toFixed(0)}`,
+        `${formatMoneyPlain(gapCents)} left to goal vs ${formatMoneyPlain(knownPipelineCents)} in forecastable pipeline`,
         `Goal progress ${Math.round(revenueSummary.goalCoveragePercent)}%`,
+        "Open-house style invites do not count as pipeline dollars until priced.",
       ],
     });
   }
@@ -230,14 +311,16 @@ export function buildCloseOsSalesAdvisor(
     suggestions.push({
       id: "lesson-package-repeat-lessons",
       type: "lesson_package_opportunity",
+      strand: "hidden_upsell",
       title: "Turn repeat lesson customers into packages",
       priority: "high",
       confidence: 76,
-      revenueImpactCents: sumRevenue(repeatLessonSignals),
+      revenueImpactCents: sumKnownPipeline(repeatLessonSignals),
       targetCount: repeatLessonSignals.length,
       reasoning:
         "Several customers are repeatedly booking lessons. A package may be a better close than another one-off booking.",
-      recommendedAction: "Offer lesson package options to repeat lesson customers.",
+      recommendedAction:
+        "Open the repeat-lesson campaign and pitch a packaged path with a clear price you stand behind.",
       actionHref: campaign ? playbookHref(campaign) : "/opportunities",
       supportingSignals: [
         `${repeatLessonSignals.length} targets with repeat lesson or high visit signals`,
@@ -255,14 +338,16 @@ export function buildCloseOsSalesAdvisor(
     suggestions.push({
       id: "membership-repeat-non-members",
       type: "membership_opportunity",
+      strand: "hidden_upsell",
       title: "Membership may be a better close for repeat non-members",
       priority: "medium",
       confidence: 72,
-      revenueImpactCents: sumRevenue(membershipCandidates),
+      revenueImpactCents: sumKnownPipeline(membershipCandidates),
       targetCount: membershipCandidates.length,
       reasoning:
         "They are already behaving like regulars. Membership can be positioned as convenience and value.",
-      recommendedAction: "Pitch membership after confirming they are not already members.",
+      recommendedAction:
+        "Open the membership-angled campaign, confirm they are not already members, then send one tailored membership path.",
       actionHref: campaign ? playbookHref(campaign) : "/opportunities",
       supportingSignals: [
         `${membershipCandidates.length} non-members with repeat visits or strong spend`,
@@ -278,14 +363,16 @@ export function buildCloseOsSalesAdvisor(
     suggestions.push({
       id: "event-invite-soft-reactivation",
       type: "event_invite_opportunity",
-      title: "Use a Friday-style scramble as a soft reactivation play",
+      strand: "build_pipeline",
+      title: "Use a social event as a soft reactivation play",
       priority: "medium",
       confidence: 68,
-      revenueImpactCents: sumRevenue(eventSoftLeads),
+      revenueImpactCents: sumKnownPipeline(eventSoftLeads),
       targetCount: eventSoftLeads.length,
       reasoning:
         "A social event invitation is lower friction than asking for a purchase immediately for lapsed or practice-heavy customers.",
-      recommendedAction: "Invite warm-but-uncertain leads to a social round or simulator night.",
+      recommendedAction:
+        "Pick one social or simulator night, draft a short invite list from these warmer contacts, and personally invite them.",
       actionHref: "/opportunities",
       supportingSignals: [
         `${eventSoftLeads.length} softer-intent targets (reactivation, practice, or Mailchimp)`,
@@ -300,14 +387,16 @@ export function buildCloseOsSalesAdvisor(
     suggestions.push({
       id: "junior-program-dedicated-path",
       type: "junior_program_opportunity",
+      strand: "hidden_upsell",
       title: "Junior program leads should get a dedicated path",
       priority: "medium",
       confidence: 74,
-      revenueImpactCents: sumRevenue(juniorSignals),
+      revenueImpactCents: sumKnownPipeline(juniorSignals),
       targetCount: juniorSignals.length,
       reasoning:
         "Junior customers should not receive generic lesson or reactivation messaging. Route them to junior programming.",
-      recommendedAction: "Segment junior leads before sending adult lesson copy.",
+      recommendedAction:
+        "Open the junior-program playbook and send age-fit program details before any adult-lesson pitch.",
       actionHref: "/opportunities",
       supportingSignals: [`${juniorSignals.length} targets with junior / Whoosh / family signals`],
       suggestedMessageAngle:
@@ -320,14 +409,16 @@ export function buildCloseOsSalesAdvisor(
     suggestions.push({
       id: "open-house-warm-uncertain",
       type: "open_house_opportunity",
+      strand: "build_pipeline",
       title: "Use open house for uncertain warm leads",
       priority: "low",
       confidence: 64,
-      revenueImpactCents: sumRevenue(reviewOnlySoft),
+      revenueImpactCents: sumKnownPipeline(reviewOnlySoft),
       targetCount: reviewOnlySoft.length,
       reasoning:
         "Open house is a low-pressure way to bring uncertain leads back into the facility when SMS drafts are not ready.",
-      recommendedAction: "Invite review-only leads to an open house or walk-through.",
+      recommendedAction:
+        "Text or call each review-only contact with a simple invite to walk the space this week—no hard sell.",
       actionHref: "/opportunities",
       supportingSignals: [`${reviewOnlySoft.length} review-only targets with softer confidence`],
       suggestedMessageAngle:
@@ -345,14 +436,16 @@ export function buildCloseOsSalesAdvisor(
     suggestions.push({
       id: "hidden-upsell-practice-lesson",
       type: "hidden_upsell",
+      strand: "hidden_upsell",
       title: "Convert practice traffic into lesson revenue",
       priority: "medium",
       confidence: 70,
-      revenueImpactCents: sumRevenue(practiceToLesson),
+      revenueImpactCents: sumKnownPipeline(practiceToLesson),
       targetCount: practiceToLesson.length,
       reasoning:
         "Practice and simulator visits hide lesson upside. These customers already show facility intent.",
-      recommendedAction: "Pair practice-to-lesson plays before broad buyer blasts.",
+      recommendedAction:
+        "Run the practice-to-lesson campaign next so simulator-heavy guests get a coaching offer before generic blasts.",
       actionHref: campaign ? playbookHref(campaign) : "/opportunities",
       supportingSignals: [`${practiceToLesson.length} practice-to-lesson targets`],
     });
@@ -363,14 +456,16 @@ export function buildCloseOsSalesAdvisor(
     suggestions.push({
       id: "do-not-lead-generic-buyer",
       type: "do_not_prioritize",
-      title: "Do not lead with generic recent buyer follow-up",
+      strand: "do_not_prioritize",
+      title: "Do not lead with generic recent-buyer follow-up",
       priority: "low",
       confidence: 66,
       revenueImpactCents: 0,
       targetCount: recentBuyer.length,
       reasoning:
-        "Generic follow-up is less urgent than cancelled bookings, lesson rebooking, and repeat customer upsells when Booking Intelligence is active.",
-      recommendedAction: "Run booking and upsell plays first.",
+        "Generic follow-up is less urgent than cancelled bookings, lesson rebooking, and repeat customer upsells when calendar signals are active.",
+      recommendedAction:
+        "Leave generic buyer blasts for later this week; finish calendar-led recovery and rebooking plays first.",
       actionHref: "/opportunities",
       supportingSignals: [
         `${bookingIntel.length} booking-intelligence targets`,
@@ -388,14 +483,16 @@ export function buildCloseOsSalesAdvisor(
     suggestions.push({
       id: "data-quality-calendar-signal-thin",
       type: "data_quality",
+      strand: "build_pipeline",
       title: "Calendar booking signals look thin",
       priority: "medium",
       confidence: 60,
       revenueImpactCents: 0,
       targetCount: mailchimpTargets.length,
       reasoning:
-        "Most open opportunities are Mailchimp intent without fresh calendar bookings. Calendar sync will sharpen lesson plays.",
-      recommendedAction: "Sync Google Calendar and re-run opportunities after bookings update.",
+        "Most of the queue is marketing intent without fresh calendar bookings, so lesson timing plays are harder to trust.",
+      recommendedAction:
+        "Sync Google Calendar, let bookings populate, then refresh this list so lesson plays line up with real tee times.",
       actionHref: "/opportunities",
       supportingSignals: [`${mailchimpTargets.length} Mailchimp-led targets vs ${bookingIntel.length} booking-led`],
     });
@@ -405,36 +502,43 @@ export function buildCloseOsSalesAdvisor(
     suggestions.push({
       id: "baseline-stack-ranked-queue",
       type: "open_house_opportunity",
+      strand: "build_pipeline",
       title: "Stack today’s queue before branching campaigns",
       priority: "medium",
       confidence: 55,
-      revenueImpactCents: pipelineCents,
+      revenueImpactCents: knownPipelineCents,
       targetCount: targets.length,
       reasoning:
         "No single strategic signal dominated the stack. Review the highest-score targets and pick two parallel plays.",
-      recommendedAction: "Open Opportunities, sort by score, and run the top two campaigns manually.",
+      recommendedAction:
+        "Open Opportunities, skim the top five by score, and run two manual campaigns this afternoon—not five.",
       actionHref: "/opportunities",
       supportingSignals: [`${targets.length} eligible targets loaded`],
     });
   }
 
   const sorted = sortSuggestions(suggestions);
-  const top = sorted.slice(0, 8);
+  const top = sorted.slice(0, 5);
 
-  const headline =
-    top[0]?.title ??
-    (targets.length === 0 ? "Load opportunities to get seller guidance" : "Review opportunities to unlock plays");
+  const pipelineShortfallCents =
+    revenueSummary && revenueSummary.remainingGapCents > 0
+      ? Math.max(0, revenueSummary.remainingGapCents - knownPipelineCents)
+      : 0;
 
-  const summaryParts: string[] = [];
-  if (top[0]) summaryParts.push(top[0].recommendedAction);
-  if (top[1]) summaryParts.push(top[1].title + ": " + top[1].recommendedAction);
+  const businessHeadline = buildBusinessHeadline(revenueSummary, targets.length);
+
   const summary =
-    summaryParts.slice(0, 2).join(" ") ||
-    "CloseOS will propose plays once targets and revenue signals are available.";
+    top.length >= 2
+      ? `First: ${top[0]!.recommendedAction} Next: ${top[1]!.recommendedAction}`
+      : top.length === 1
+        ? `First: ${top[0]!.recommendedAction}`
+        : "Once your monthly goal and queue load, your first and second moves will appear here.";
 
   return {
     generatedAt,
-    headline,
+    businessHeadline,
+    headline: businessHeadline,
+    pipelineShortfallCents,
     summary,
     suggestions: top,
   };

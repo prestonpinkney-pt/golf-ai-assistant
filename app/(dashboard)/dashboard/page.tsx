@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { slugifyCampaignName } from "@/app/api/lib/closeos-playbook-engine";
 import { buildWhyNowLine, firstSentence, oneSentence } from "@/lib/operator-ui-copy";
 
@@ -12,7 +12,24 @@ type RevenueSummary = {
   monthlyGoalCents: number;
   actualRevenueCents: number;
   remainingGapCents: number;
+  openPipelineCents: number;
+  knownPipelineCents: number;
+  qualifiedLeadCount: number;
+  revenueTbdCount: number;
+  reviewOnlyCount: number;
+  pipelineCoveragePercent: number;
+  goalProgressPercent: number;
   goalCoveragePercent: number;
+  goalStatus: "configured" | "missing" | "duplicate_resolved";
+  reportingMonth: string;
+  reportingStart: string;
+  reportingEnd: string;
+  generatedAt: string;
+  revenueSource: "revenue_events_live";
+  latestRevenueEventAt: string | null;
+  latestRevenueInsertedAt: string | null;
+  revenueEventCount: number;
+  openOpportunityCount: number;
 };
 
 type OpportunityTarget = {
@@ -24,6 +41,9 @@ type OpportunityTarget = {
   leadName: string;
   phone: string | null;
   estimatedRevenueCents: number;
+  revenueReviewRequired?: boolean;
+  knownPipelineContributionCents?: number;
+  pipelineCategory?: string;
   playbook: string;
   status?: string;
   confidence: number;
@@ -42,16 +62,28 @@ type CloseOsPlaybookSummary = {
   campaignName: string;
   sourceMix: Record<string, number>;
   targetCount: number;
+  knownPipelineCents: number;
+  qualifiedLeadCount: number;
+  revenueTbdCount: number;
   estimatedRevenueCents: number;
+  pipelineRevenueLabel?: string;
   averageConfidence: number;
   recommendedChannel: string;
   strategicReason: string;
   urgency: string;
 };
 
+type AdvisorStrand =
+  | "close_first"
+  | "build_pipeline"
+  | "hidden_upsell"
+  | "needs_review"
+  | "do_not_prioritize";
+
 type AdvisorSuggestion = {
   id: string;
   type: string;
+  strand: AdvisorStrand;
   title: string;
   priority: "critical" | "high" | "medium" | "low";
   confidence: number;
@@ -59,7 +91,7 @@ type AdvisorSuggestion = {
   targetCount: number;
   reasoning: string;
   recommendedAction: string;
-  actionHref: string | null;
+  actionHref: string;
   supportingSignals: string[];
   caution?: string;
   suggestedMessageAngle?: string;
@@ -67,9 +99,42 @@ type AdvisorSuggestion = {
 
 type SalesAdvisorPayload = {
   generatedAt: string;
+  businessHeadline: string;
   headline: string;
+  pipelineShortfallCents: number;
   summary: string;
   suggestions: AdvisorSuggestion[];
+};
+
+type RecentConversation = {
+  id: string;
+  contactName: string;
+  preview: string;
+  direction: string;
+  status: string | null;
+  lastMessageAt: string | null;
+};
+
+type ConversationsPayload = {
+  generatedAt: string;
+  conversations: RecentConversation[];
+};
+
+type RevenueTimeseriesPayload = {
+  range: "30d" | "month";
+  points: Array<{ date: string; revenueCents: number }>;
+  generatedAt: string;
+};
+
+type SourceSlice = {
+  label: string;
+  count: number;
+  color: string;
+};
+
+const NO_STORE_FETCH: RequestInit = {
+  cache: "no-store",
+  headers: { "Cache-Control": "no-cache" },
 };
 
 const URGENCY_RANK: Record<string, number> = {
@@ -80,15 +145,11 @@ const URGENCY_RANK: Record<string, number> = {
   low: 1,
 };
 
-const btnPrimary =
-  "inline-flex items-center justify-center rounded-lg border border-[#0F172A] bg-[#0F172A] px-3 py-2 text-sm font-semibold text-white no-underline shadow-sm transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50";
-const btnSecondary =
-  "inline-flex items-center justify-center rounded-lg border border-[#CBD5E1] bg-white px-3 py-2 text-sm font-semibold text-[#0F172A] no-underline shadow-sm transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50";
-const btnPrimarySm =
-  "inline-flex items-center justify-center rounded-lg border border-[#0F172A] bg-[#0F172A] px-2.5 py-1.5 text-xs font-semibold text-white no-underline shadow-sm transition hover:bg-slate-800";
+const SOURCE_COLORS = ["#059669", "#38bdf8", "#22c55e", "#a78bfa", "#f97316"];
 
-function urgencyScore(urgency: string) {
-  return URGENCY_RANK[urgency.toLowerCase()] ?? 0;
+function bustUrl(path: string) {
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}_=${Date.now()}`;
 }
 
 function formatCurrency(value: number) {
@@ -96,11 +157,43 @@ function formatCurrency(value: number) {
     style: "currency",
     currency: "USD",
     maximumFractionDigits: 0,
-  }).format(value);
+  }).format(value || 0);
 }
 
-function labelize(value: string) {
-  return value
+function formatCompactNumber(value: number) {
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 }).format(value || 0);
+}
+
+function formatDateRange(start?: string, end?: string) {
+  if (!start || !end) return "This month";
+  try {
+    const s = new Date(start);
+    const e = new Date(end);
+    return `${s.toLocaleDateString("en-US", { month: "short", day: "numeric" })} - ${e.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+    })}`;
+  } catch {
+    return "This month";
+  }
+}
+
+function formatDateTime(iso: string | null | undefined) {
+  if (!iso) return "Not synced yet";
+  try {
+    return new Date(iso).toLocaleString("en-US", {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch {
+    return "Not synced yet";
+  }
+}
+
+function labelize(value: string | undefined | null) {
+  return (value ?? "Unknown")
     .replace(/_/g, " ")
     .replace(/-/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
@@ -114,213 +207,432 @@ function hasUsablePhone(phone: string | null | undefined) {
   return false;
 }
 
-function formatRecommendedChannel(channel: string | undefined) {
-  if (!channel) return "SMS";
-  if (channel === "review_only") return "Review only";
-  if (channel === "sms") return "SMS";
-  if (channel === "email") return "Email";
-  return labelize(channel);
+function initials(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "PG";
+  return parts.slice(0, 2).map((part) => part[0]?.toUpperCase()).join("");
 }
 
-function sourceBadgeClass(label: string | undefined) {
-  const l = (label ?? "").toLowerCase();
-  if (l.includes("booking")) return "border border-indigo-200 bg-indigo-50 text-indigo-900";
-  if (l.includes("mailchimp")) return "border border-emerald-200 bg-emerald-50 text-emerald-800";
-  if (l.includes("purchase")) return "border border-slate-300 bg-slate-50 text-slate-700";
-  return "border border-slate-300 bg-slate-50 text-slate-700";
+function urgencyScore(urgency: string) {
+  return URGENCY_RANK[urgency.toLowerCase()] ?? 0;
 }
 
-function urgencyBadgeClass(urgency: string) {
-  const u = urgency.toLowerCase();
-  if (u === "urgent") return "border border-red-200 bg-red-50 text-red-900";
-  if (u === "high") return "border border-orange-200 bg-orange-50 text-orange-950";
-  if (u === "medium-high") return "border border-amber-300 bg-amber-100 text-amber-950";
-  if (u === "medium") return "border border-sky-200 bg-sky-50 text-sky-950";
-  return "border border-slate-300 bg-slate-100 text-slate-800";
+function priorityClass(priority: string) {
+  const p = priority.toLowerCase();
+  if (p === "critical" || p === "urgent" || p === "high") {
+    return "border-emerald-400/40 bg-emerald-400/10 text-emerald-700";
+  }
+  if (p === "medium-high" || p === "medium") {
+    return "border-sky-200 bg-sky-50 text-sky-700";
+  }
+  return "border-slate-200 bg-slate-50 text-slate-700";
 }
 
-function advisorPriorityBadgeClass(priority: AdvisorSuggestion["priority"]) {
-  if (priority === "critical") return "border border-red-200 bg-red-50 text-red-900";
-  if (priority === "high") return "border border-orange-200 bg-orange-50 text-orange-950";
-  if (priority === "medium") return "border border-sky-200 bg-sky-50 text-sky-950";
-  return "border border-slate-300 bg-slate-100 text-slate-800";
-}
-
-function reasoningAtMostTwoSentences(text: string) {
-  const trimmed = text.trim();
-  const parts = trimmed.split(/(?<=[.!?])\s+/).filter(Boolean);
-  if (parts.length <= 2) return trimmed;
-  return `${parts[0]} ${parts[1]}`;
+function sourceLabel(target: OpportunityTarget) {
+  const raw = target.sourceDisplayLabel ?? target.opportunitySource ?? "Operator Signal";
+  const lower = raw.toLowerCase();
+  if (lower.includes("booking") || lower.includes("calendar")) return "Booking Intelligence";
+  if (lower.includes("mailchimp")) return "Mailchimp Intent";
+  if (lower.includes("purchase") || lower.includes("square")) return "Purchase Signal";
+  if (lower.includes("website") || lower.includes("form")) return "Website Form";
+  if (lower.includes("referral")) return "Referral";
+  if ((target.externalCustomerId ?? "").toLowerCase().startsWith("whoosh:")) return "Purchase Signal";
+  return labelize(raw);
 }
 
 function playbookHref(campaignName: string) {
   return `/opportunities/playbooks/${slugifyCampaignName(campaignName)}?campaign=${encodeURIComponent(campaignName)}`;
 }
 
-function buildDraftCampaignHref(playbook: CloseOsPlaybookSummary) {
+function targetDraftHref(target: OpportunityTarget) {
+  const campaign = (target.recommendedCampaign ?? "").trim() || target.playbook || "Opportunity Review";
   const params = new URLSearchParams({
-    playbook_campaign: playbook.campaignName,
     manual_draft: "1",
-    target_count: String(playbook.targetCount),
+    opportunity_id: target.id,
+    playbook_campaign: campaign,
+    lead_name: target.leadName,
   });
   return `/outbound?${params.toString()}`;
 }
 
 function sortPlaybooksByPriority(list: CloseOsPlaybookSummary[]) {
   return [...list].sort((a, b) => {
-    const du = urgencyScore(b.urgency) - urgencyScore(a.urgency);
-    if (du !== 0) return du;
-    return b.estimatedRevenueCents - a.estimatedRevenueCents;
+    const urgencyDelta = urgencyScore(b.urgency) - urgencyScore(a.urgency);
+    if (urgencyDelta !== 0) return urgencyDelta;
+    return b.knownPipelineCents - a.knownPipelineCents;
   });
 }
 
 function campaignUrgencyMap(playbooks: CloseOsPlaybookSummary[]) {
   const map = new Map<string, number>();
-  for (const pb of playbooks) map.set(pb.campaignName, urgencyScore(pb.urgency));
+  for (const playbook of playbooks) map.set(playbook.campaignName, urgencyScore(playbook.urgency));
   return map;
 }
 
-function targetAttentionScore(t: OpportunityTarget, urgencyByCampaign: Map<string, number>) {
-  let s = 0;
-  const source = (t.opportunitySource ?? "").toLowerCase();
-  const label = (t.sourceDisplayLabel ?? "").toLowerCase();
-  const rec = t.recognizedOpportunity;
-
-  if (source === "google_calendar_booking" || label.includes("booking")) s += 130;
-  if (rec === "booking_cancelled_recovery") s += 95;
-  if (rec === "lesson_rebooking_due") s += 85;
-  if (rec === "practice_to_lesson") s += 45;
-  if (rec === "recent_buyer_follow_up") s += 20;
-
-  const campaign = (t.recommendedCampaign ?? "").trim();
-  s += (urgencyByCampaign.get(campaign) ?? 0) * 14;
-  s += Math.min(t.estimatedRevenueCents / 4000, 30);
-  s += Math.min(t.confidence, 100) * 0.12;
-  return s;
+function knownPipelineForTarget(target: OpportunityTarget) {
+  if (target.revenueReviewRequired) return 0;
+  return target.knownPipelineContributionCents ?? target.estimatedRevenueCents ?? 0;
 }
 
-function draftPreview(text: string | undefined) {
-  return oneSentence(text, 96);
+function knownPipelineForPlaybook(playbook: CloseOsPlaybookSummary) {
+  return playbook.knownPipelineCents > 0 ? playbook.knownPipelineCents : 0;
+}
+
+function targetAttentionScore(target: OpportunityTarget, urgencyByCampaign: Map<string, number>) {
+  let score = 0;
+  const recognized = target.recognizedOpportunity;
+  const source = sourceLabel(target).toLowerCase();
+
+  if (source.includes("booking")) score += 120;
+  if (recognized === "booking_cancelled_recovery") score += 95;
+  if (recognized === "lesson_rebooking_due") score += 85;
+  if (recognized === "practice_to_lesson") score += 50;
+  if (recognized === "recent_buyer_follow_up") score += 30;
+
+  const campaign = (target.recommendedCampaign ?? "").trim();
+  score += (urgencyByCampaign.get(campaign) ?? 0) * 14;
+  score += Math.min(knownPipelineForTarget(target) / 4000, 35);
+  score += Math.min(target.confidence, 100) * 0.12;
+  return score;
+}
+
+function concisePreview(text: string | undefined, fallback = "Review the recommended next touch.") {
+  const preview = oneSentence(text, 92);
+  return preview || fallback;
+}
+
+function sourceBreakdown(targets: OpportunityTarget[]): SourceSlice[] {
+  const counts = new Map<string, number>();
+  for (const target of targets) {
+    const label = sourceLabel(target);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 5)
+    .map(([label, count], index) => ({
+      label,
+      count,
+      color: SOURCE_COLORS[index] ?? "#64748b",
+    }));
+}
+
+function donutBackground(slices: SourceSlice[]) {
+  const total = slices.reduce((sum, slice) => sum + slice.count, 0);
+  if (total <= 0) return "conic-gradient(rgba(148,163,184,0.22) 0deg 360deg)";
+
+  let cursor = 0;
+  const stops = slices.map((slice) => {
+    const start = cursor;
+    const end = cursor + (slice.count / total) * 360;
+    cursor = end;
+    return `${slice.color} ${start}deg ${end}deg`;
+  });
+  return `conic-gradient(${stops.join(", ")})`;
+}
+
+function chartPoints(points: RevenueTimeseriesPayload["points"]) {
+  const width = 500;
+  const height = 180;
+  if (points.length === 0) return "";
+  const max = Math.max(...points.map((point) => point.revenueCents), 1);
+  return points
+    .map((point, index) => {
+      const x = points.length === 1 ? width : (index / (points.length - 1)) * width;
+      const y = height - (point.revenueCents / max) * 140 - 20;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+}
+
+function Card({
+  children,
+  className = "",
+}: {
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <section
+      className={`motion-card group rounded-[22px] border border-slate-200 bg-white shadow-sm ${className}`}
+    >
+      {children}
+    </section>
+  );
+}
+
+function CardHeader({
+  title,
+  action,
+  eyebrow,
+}: {
+  title: string;
+  action?: ReactNode;
+  eyebrow?: string;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-4">
+      <div>
+        {eyebrow ? <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-700/70">{eyebrow}</p> : null}
+        <h2 className="text-sm font-semibold tracking-[-0.015em] text-slate-950">{title}</h2>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function PanelButton({ href, children }: { href: string; children: ReactNode }) {
+  return (
+    <Link
+      href={href}
+      className="inline-flex items-center justify-center rounded-full border border-slate-200 bg-slate-100 px-3 py-1.5 text-xs font-semibold text-slate-900 transition hover:border-emerald-300/40 hover:bg-emerald-50 hover:text-emerald-900"
+    >
+      {children}
+    </Link>
+  );
 }
 
 export default function CloseOsDashboardPage() {
   const [revenue, setRevenue] = useState<RevenueSummary | null>(null);
   const [playbooks, setPlaybooks] = useState<CloseOsPlaybookSummary[]>([]);
   const [targets, setTargets] = useState<OpportunityTarget[]>([]);
+  const [advisor, setAdvisor] = useState<SalesAdvisorPayload | null>(null);
+  const [conversations, setConversations] = useState<RecentConversation[]>([]);
+  const [timeseries, setTimeseries] = useState<RevenueTimeseriesPayload | null>(null);
 
   const [revenueLoading, setRevenueLoading] = useState(true);
   const [playbooksLoading, setPlaybooksLoading] = useState(true);
   const [targetsLoading, setTargetsLoading] = useState(true);
+  const [advisorLoading, setAdvisorLoading] = useState(true);
+  const [conversationsLoading, setConversationsLoading] = useState(true);
+  const [timeseriesLoading, setTimeseriesLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
   const [revenueError, setRevenueError] = useState<string | null>(null);
   const [playbooksError, setPlaybooksError] = useState<string | null>(null);
   const [targetsError, setTargetsError] = useState<string | null>(null);
-  const [advisor, setAdvisor] = useState<SalesAdvisorPayload | null>(null);
-  const [advisorLoading, setAdvisorLoading] = useState(true);
   const [advisorError, setAdvisorError] = useState<string | null>(null);
+  const [conversationsError, setConversationsError] = useState<string | null>(null);
+  const [timeseriesError, setTimeseriesError] = useState<string | null>(null);
 
-  const loadRevenue = useCallback(async () => {
-    setRevenueError(null);
-    const res = await fetch("/api/revenue/summary", { cache: "no-store" });
-    const json = (await res.json()) as RevenueSummary & { error?: string; details?: string };
-    if (!res.ok) throw new Error(json.details || json.error || `Revenue HTTP ${res.status}`);
-    setRevenue(json);
+  const loadRevenue = useCallback(async (mode: "full" | "quiet" = "full") => {
+    const quiet = mode === "quiet";
+    if (!quiet) {
+      setRevenueLoading(true);
+      setRevenueError(null);
+    }
+    try {
+      const res = await fetch(bustUrl("/api/revenue/summary"), NO_STORE_FETCH);
+      const json = (await res.json()) as RevenueSummary & { error?: string; details?: string };
+      if (!res.ok) throw new Error(json.details || json.error || `Revenue HTTP ${res.status}`);
+      setRevenue(json);
+    } catch (error) {
+      if (!quiet) {
+        setRevenueError(error instanceof Error ? error.message : "Revenue failed");
+        setRevenue(null);
+      } else {
+        console.error(error);
+      }
+    } finally {
+      if (!quiet) setRevenueLoading(false);
+    }
   }, []);
 
-  const loadPlaybooks = useCallback(async () => {
-    setPlaybooksError(null);
-    const res = await fetch("/api/opportunities/playbooks", { cache: "no-store" });
-    const json = (await res.json()) as {
-      playbooks?: CloseOsPlaybookSummary[];
-      error?: string;
-      details?: string;
-    };
-    if (!res.ok) throw new Error(json.details || json.error || `Playbooks HTTP ${res.status}`);
-    setPlaybooks(Array.isArray(json.playbooks) ? json.playbooks : []);
+  const loadPlaybooks = useCallback(async (mode: "full" | "quiet" = "full") => {
+    const quiet = mode === "quiet";
+    if (!quiet) {
+      setPlaybooksLoading(true);
+      setPlaybooksError(null);
+    }
+    try {
+      const res = await fetch(bustUrl("/api/opportunities/playbooks"), NO_STORE_FETCH);
+      const json = (await res.json()) as {
+        playbooks?: CloseOsPlaybookSummary[];
+        error?: string;
+        details?: string;
+      };
+      if (!res.ok) throw new Error(json.details || json.error || `Playbooks HTTP ${res.status}`);
+      setPlaybooks(Array.isArray(json.playbooks) ? json.playbooks : []);
+    } catch (error) {
+      if (!quiet) {
+        setPlaybooksError(error instanceof Error ? error.message : "Playbooks failed");
+        setPlaybooks([]);
+      } else {
+        console.error(error);
+      }
+    } finally {
+      if (!quiet) setPlaybooksLoading(false);
+    }
   }, []);
 
-  const loadTargets = useCallback(async () => {
-    setTargetsError(null);
-    const res = await fetch("/api/opportunities/targets", { cache: "no-store" });
-    const json = (await res.json()) as {
-      targets?: OpportunityTarget[];
-      error?: string;
-      details?: string;
-    };
-    if (!res.ok) throw new Error(json.details || json.error || `Targets HTTP ${res.status}`);
-    const raw = Array.isArray(json.targets) ? json.targets : [];
-    setTargets(raw.filter((t) => hasUsablePhone(t.phone)));
+  const loadTargets = useCallback(async (mode: "full" | "quiet" = "full") => {
+    const quiet = mode === "quiet";
+    if (!quiet) {
+      setTargetsLoading(true);
+      setTargetsError(null);
+    }
+    try {
+      const res = await fetch(bustUrl("/api/opportunities/targets"), NO_STORE_FETCH);
+      const json = (await res.json()) as {
+        targets?: OpportunityTarget[];
+        error?: string;
+        details?: string;
+      };
+      if (!res.ok) throw new Error(json.details || json.error || `Targets HTTP ${res.status}`);
+      const raw = Array.isArray(json.targets) ? json.targets : [];
+      setTargets(raw.filter((target) => hasUsablePhone(target.phone)));
+    } catch (error) {
+      if (!quiet) {
+        setTargetsError(error instanceof Error ? error.message : "Targets failed");
+        setTargets([]);
+      } else {
+        console.error(error);
+      }
+    } finally {
+      if (!quiet) setTargetsLoading(false);
+    }
   }, []);
 
-  const loadAdvisor = useCallback(async () => {
-    setAdvisorError(null);
-    const res = await fetch("/api/opportunities/advisor", { cache: "no-store" });
-    const json = (await res.json()) as SalesAdvisorPayload & { error?: string; details?: string };
-    if (!res.ok) throw new Error(json.details || json.error || `Advisor HTTP ${res.status}`);
-    setAdvisor({
-      generatedAt: json.generatedAt,
-      headline: json.headline,
-      summary: json.summary,
-      suggestions: Array.isArray(json.suggestions) ? json.suggestions : [],
-    });
+  const loadAdvisor = useCallback(async (mode: "full" | "quiet" = "full") => {
+    const quiet = mode === "quiet";
+    if (!quiet) {
+      setAdvisorLoading(true);
+      setAdvisorError(null);
+    }
+    try {
+      const res = await fetch(bustUrl("/api/opportunities/advisor"), NO_STORE_FETCH);
+      const json = (await res.json()) as SalesAdvisorPayload & { error?: string; details?: string };
+      if (!res.ok) throw new Error(json.details || json.error || `Advisor HTTP ${res.status}`);
+      const suggestionsRaw = Array.isArray(json.suggestions) ? json.suggestions : [];
+      const suggestions: AdvisorSuggestion[] = suggestionsRaw.map((raw) => {
+        const suggestion = raw as AdvisorSuggestion & { strand?: AdvisorStrand };
+        return {
+          ...suggestion,
+          strand: suggestion.strand ?? "build_pipeline",
+          actionHref: suggestion.actionHref || "/opportunities",
+        };
+      });
+      setAdvisor({
+        generatedAt: json.generatedAt,
+        businessHeadline: json.businessHeadline ?? json.headline ?? "",
+        headline: json.headline ?? json.businessHeadline ?? "",
+        pipelineShortfallCents:
+          typeof json.pipelineShortfallCents === "number" ? json.pipelineShortfallCents : 0,
+        summary: json.summary,
+        suggestions,
+      });
+    } catch (error) {
+      if (!quiet) {
+        setAdvisorError(error instanceof Error ? error.message : "Advisor failed");
+        setAdvisor(null);
+      } else {
+        console.error(error);
+      }
+    } finally {
+      if (!quiet) setAdvisorLoading(false);
+    }
+  }, []);
+
+  const loadConversations = useCallback(async (mode: "full" | "quiet" = "full") => {
+    const quiet = mode === "quiet";
+    if (!quiet) {
+      setConversationsLoading(true);
+      setConversationsError(null);
+    }
+    try {
+      const res = await fetch(bustUrl("/api/conversations/recent"), NO_STORE_FETCH);
+      const json = (await res.json()) as ConversationsPayload & { error?: string; details?: string };
+      if (!res.ok) throw new Error(json.details || json.error || `Conversations HTTP ${res.status}`);
+      setConversations(Array.isArray(json.conversations) ? json.conversations : []);
+    } catch (error) {
+      if (!quiet) {
+        setConversationsError(error instanceof Error ? error.message : "Conversations failed");
+        setConversations([]);
+      } else {
+        console.error(error);
+      }
+    } finally {
+      if (!quiet) setConversationsLoading(false);
+    }
+  }, []);
+
+  const loadTimeseries = useCallback(async (mode: "full" | "quiet" = "full") => {
+    const quiet = mode === "quiet";
+    if (!quiet) {
+      setTimeseriesLoading(true);
+      setTimeseriesError(null);
+    }
+    try {
+      const res = await fetch(bustUrl("/api/revenue/timeseries?range=30d"), NO_STORE_FETCH);
+      const json = (await res.json()) as RevenueTimeseriesPayload & { error?: string; details?: string };
+      if (!res.ok) throw new Error(json.details || json.error || `Timeseries HTTP ${res.status}`);
+      setTimeseries(json);
+    } catch (error) {
+      if (!quiet) {
+        setTimeseriesError(error instanceof Error ? error.message : "Revenue trend failed");
+        setTimeseries(null);
+      } else {
+        console.error(error);
+      }
+    } finally {
+      if (!quiet) setTimeseriesLoading(false);
+    }
   }, []);
 
   const refreshAll = useCallback(async () => {
     setRefreshing(true);
-    setRevenueLoading(true);
-    setPlaybooksLoading(true);
-    setTargetsLoading(true);
-    setAdvisorLoading(true);
-    setRevenueError(null);
-    setPlaybooksError(null);
-    setTargetsError(null);
-    setAdvisorError(null);
-
-    try {
-      await loadRevenue();
-    } catch (e) {
-      setRevenueError(e instanceof Error ? e.message : "Revenue failed");
-      setRevenue(null);
-    } finally {
-      setRevenueLoading(false);
-    }
-    try {
-      await loadPlaybooks();
-    } catch (e) {
-      setPlaybooksError(e instanceof Error ? e.message : "Playbooks failed");
-      setPlaybooks([]);
-    } finally {
-      setPlaybooksLoading(false);
-    }
-    try {
-      await loadTargets();
-    } catch (e) {
-      setTargetsError(e instanceof Error ? e.message : "Targets failed");
-      setTargets([]);
-    } finally {
-      setTargetsLoading(false);
-    }
-    try {
-      await loadAdvisor();
-    } catch (e) {
-      setAdvisorError(e instanceof Error ? e.message : "Advisor failed");
-      setAdvisor(null);
-    } finally {
-      setAdvisorLoading(false);
-    }
+    await Promise.all([
+      loadRevenue("full"),
+      loadPlaybooks("full"),
+      loadTargets("full"),
+      loadAdvisor("full"),
+      loadConversations("full"),
+      loadTimeseries("full"),
+    ]);
     setRefreshing(false);
-  }, [loadRevenue, loadPlaybooks, loadTargets, loadAdvisor]);
+  }, [loadRevenue, loadPlaybooks, loadTargets, loadAdvisor, loadConversations, loadTimeseries]);
 
   useEffect(() => {
     void refreshAll();
   }, [refreshAll]);
 
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void loadRevenue("quiet");
+      void loadTimeseries("quiet");
+    }, 30_000);
+    return () => window.clearInterval(id);
+  }, [loadRevenue, loadTimeseries]);
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      void loadPlaybooks("quiet");
+      void loadTargets("quiet");
+      void loadAdvisor("quiet");
+      void loadConversations("quiet");
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, [loadPlaybooks, loadTargets, loadAdvisor, loadConversations]);
+
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void loadRevenue("quiet");
+        void loadPlaybooks("quiet");
+        void loadTargets("quiet");
+        void loadAdvisor("quiet");
+        void loadConversations("quiet");
+        void loadTimeseries("quiet");
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [loadRevenue, loadPlaybooks, loadTargets, loadAdvisor, loadConversations, loadTimeseries]);
+
   const sortedPlaybooks = useMemo(() => sortPlaybooksByPriority(playbooks), [playbooks]);
   const bestPlaybook = sortedPlaybooks[0] ?? null;
-  const playbookBoard = sortedPlaybooks.slice(0, 4);
-
-  const pipelineCents = useMemo(() => targets.reduce((sum, t) => sum + t.estimatedRevenueCents, 0), [targets]);
+  const campaignBoard = sortedPlaybooks.slice(0, 3);
+  const advisorSuggestions = advisor?.suggestions?.slice(0, 3) ?? [];
 
   const urgentTargets = useMemo(() => {
     const urgencyByCampaign = campaignUrgencyMap(playbooks);
@@ -329,310 +641,527 @@ export default function CloseOsDashboardPage() {
       .slice(0, 5);
   }, [targets, playbooks]);
 
-  const gapCents = revenue?.remainingGapCents ?? 0;
-  const gapCoverage = gapCents > 0 ? Math.round((pipelineCents / gapCents) * 100) : 100;
-  const coverageLabel =
-    gapCents <= 0
-      ? "Goal already covered."
-      : pipelineCents < gapCents
-        ? "More pipeline needed."
-        : "Pipeline can cover the goal if converted.";
+  const draftTargets = useMemo(() => {
+    return [...targets]
+      .filter(
+        (target) =>
+          Boolean(target.recommendedMessage?.trim()) &&
+          (target.recommendedChannel ?? "").toLowerCase() !== "review_only" &&
+          hasUsablePhone(target.phone)
+      )
+      .sort((a, b) => knownPipelineForTarget(b) - knownPipelineForTarget(a))
+      .slice(0, 3);
+  }, [targets]);
 
-  const goalPct = Math.max(0, Math.min(100, revenue?.goalCoveragePercent ?? 0));
-  const businessName = revenue?.businessName ?? "Primetime Golf";
+  const sources = useMemo(() => sourceBreakdown(targets), [targets]);
+  const sourceTotal = sources.reduce((sum, source) => sum + source.count, 0);
 
-  const openCount = targets.length;
-  const convertedCount = targets.filter((t) => (t.status ?? "").toLowerCase() === "converted").length;
-  const excludedCount = targets.filter((t) => {
-    const st = (t.status ?? "").toLowerCase();
-    return st === "excluded" || st === "bad_data" || st === "not_interested";
-  }).length;
-  const manualReviewCount = targets.filter((t) => (t.recommendedChannel ?? "").toLowerCase() === "review_only").length;
-  const touchedTodayCount = Math.min(urgentTargets.length, 5);
-
-  const mailchimpSignal =
-    playbooks.some((pb) => Object.keys(pb.sourceMix ?? {}).some((k) => k.toLowerCase().includes("mailchimp"))) ||
-    targets.some((t) => {
-      const src = (t.opportunitySource ?? "").toLowerCase();
-      const lbl = (t.sourceDisplayLabel ?? "").toLowerCase();
-      return src.includes("mailchimp") || lbl.includes("mailchimp");
-    });
-  const calendarSignal = targets.some((t) => {
-    const src = (t.opportunitySource ?? "").toLowerCase();
-    const lbl = (t.sourceDisplayLabel ?? "").toLowerCase();
-    return src === "google_calendar_booking" || lbl.includes("booking");
-  });
-  const whooshSignal = targets.some((t) => (t.externalCustomerId ?? "").toLowerCase().startsWith("whoosh:"));
-
-  const integrationCards = [
-    {
-      name: "Square revenue",
-      status: revenue && !revenueError ? "Active" : revenueError ? "Needs review" : "No recent signal",
-    },
-    {
-      name: "Google Calendar bookings",
-      status: calendarSignal ? "Active" : "No recent signal",
-    },
-    {
-      name: "Whoosh roster",
-      status: whooshSignal ? "Active" : "No recent signal",
-    },
-    {
-      name: "Mailchimp",
-      status: mailchimpSignal ? "Active" : "No recent signal",
-    },
-  ] as const;
-
+  const actualRevenueCents = revenue?.actualRevenueCents ?? 0;
+  const goalConfigured = revenue?.goalStatus === "configured" && (revenue?.monthlyGoalCents ?? 0) > 0;
+  const goalPct = goalConfigured ? Math.max(0, Math.min(100, revenue?.goalCoveragePercent ?? 0)) : 0;
+  const gapCents = goalConfigured ? revenue?.remainingGapCents ?? 0 : 0;
+  const knownPipelineCents = revenue?.knownPipelineCents ?? targets.reduce((sum, target) => sum + knownPipelineForTarget(target), 0);
+  const pipelineCoverage = gapCents > 0 ? Math.min(100, Math.round((knownPipelineCents / gapCents) * 100)) : knownPipelineCents > 0 ? 100 : 0;
+  const openOpportunityCount = revenue?.openOpportunityCount ?? targets.length;
+  const recoveryPipelineCount = targets.filter((target) => target.recognizedOpportunity === "booking_cancelled_recovery").length;
   const loadingAny =
-    revenueLoading || playbooksLoading || targetsLoading || advisorLoading || refreshing;
+    revenueLoading ||
+    playbooksLoading ||
+    targetsLoading ||
+    advisorLoading ||
+    conversationsLoading ||
+    timeseriesLoading ||
+    refreshing;
+  const dateRange = formatDateRange(revenue?.reportingStart, revenue?.reportingEnd);
+  const businessName = revenue?.businessName ?? "Primetime Golf";
+  const chartLine = chartPoints(timeseries?.points ?? []);
+  const chartHasRevenue = (timeseries?.points ?? []).some((point) => point.revenueCents > 0);
+  const advisorPrimaryHref =
+    advisorSuggestions[0]?.actionHref ?? (bestPlaybook ? playbookHref(bestPlaybook.campaignName) : "/opportunities");
 
-  const advisorCards = useMemo(() => advisor?.suggestions?.slice(0, 5) ?? [], [advisor]);
+  const errors = [revenueError, playbooksError, targetsError, advisorError, conversationsError, timeseriesError].filter(Boolean);
 
   return (
-    <div className="bg-[#F8FAFC] pb-10 text-[#0F172A]">
-      <header className="flex flex-col gap-4 border-b border-slate-200 bg-white px-1 py-6 sm:flex-row sm:items-start sm:justify-between">
+    <div className="min-h-screen text-slate-900">
+      {errors.length > 0 ? (
+        <div className="mb-5 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {errors.join(" · ")}
+        </div>
+      ) : null}
+
+      <section className="relative mb-5 overflow-hidden rounded-3xl border border-emerald-100 bg-white p-5 shadow-sm md:p-6">
+        <div className="ambient-orb absolute -right-12 -top-16 h-40 w-40 rounded-full bg-emerald-100/70 blur-2xl" />
+        <div className="ambient-orb absolute -bottom-20 left-1/3 h-36 w-36 rounded-full bg-green-100/60 blur-2xl" />
+        <div className="relative flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-[#0F172A] md:text-3xl">
-            CloseOS Dashboard
-          </h1>
-          <p className="mt-2 text-sm text-[#475569]">Your revenue command center for today.</p>
-          <p className="mt-1 text-xs font-medium text-slate-500">Workspace: {businessName}</p>
+          <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.22em] text-emerald-700/70">
+            <span className="live-dot h-2 w-2 rounded-full bg-emerald-500 text-emerald-500" />
+            Revenue command
+          </p>
+          <h1 className="mt-2 text-3xl font-semibold tracking-[-0.05em] text-slate-950 md:text-4xl">Overview</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">
+            AI revenue operating system for golf businesses.
+          </p>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={() => void refreshAll()} disabled={loadingAny} className={btnSecondary}>
-            {loadingAny ? "Refreshing…" : "Refresh"}
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-xs font-semibold text-slate-800">
+            {dateRange}
+          </div>
+          <button
+            type="button"
+            onClick={() => void refreshAll()}
+            disabled={loadingAny}
+            className="rounded-full border border-emerald-300/30 bg-emerald-50 px-4 py-2 text-xs font-semibold text-emerald-900 transition hover:-translate-y-0.5 hover:bg-emerald-100 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:translate-y-0"
+          >
+            {loadingAny ? "Refreshing..." : "Refresh"}
           </button>
-          <Link href="/opportunities" className={btnPrimary}>
-            View Opportunities
-          </Link>
         </div>
-      </header>
-
-      {(revenueError || playbooksError || targetsError || advisorError) && (
-        <div className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
-          {[revenueError, playbooksError, targetsError, advisorError].filter(Boolean).join(" · ")}
         </div>
-      )}
+      </section>
 
-      <section className="mt-6 rounded-xl border border-indigo-200 bg-gradient-to-br from-white to-indigo-50/40 p-5 shadow-sm">
-        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-indigo-900/80">AI Sales Advisor</p>
-        {advisorLoading && <p className="mt-2 text-sm text-[#475569]">Reading your stack…</p>}
-        {!advisorLoading && advisor && (
-          <>
-            <h2 className="mt-2 text-lg font-semibold tracking-tight text-[#0F172A]">{advisor.headline}</h2>
-            <p className="mt-1 text-sm text-[#475569]">{advisor.summary}</p>
-            {advisorCards.length === 0 ? (
-              <p className="mt-3 text-sm text-[#475569]">No suggestions yet. Refresh after sync.</p>
+      <section className="mb-5 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        {[
+          {
+            label: "Actual Revenue",
+            value: revenueLoading && !revenue ? "..." : formatCurrency(actualRevenueCents / 100),
+            meta: revenue?.revenueEventCount ? `${revenue.revenueEventCount} live events` : "Live revenue feed",
+            icon: "$",
+          },
+          {
+            label: "Recovery Pipeline",
+            value: targetsLoading ? "..." : formatCompactNumber(recoveryPipelineCount),
+            meta: "Cancelled lesson targets",
+            icon: "B",
+          },
+          {
+            label: "New Conversations",
+            value: conversationsLoading ? "..." : conversations.length > 0 ? formatCompactNumber(conversations.length) : "—",
+            meta: conversations.length > 0 ? "Recent messages" : "No conversation data yet",
+            icon: "M",
+          },
+          {
+            label: "Open Opportunities",
+            value: targetsLoading && !revenue ? "..." : formatCompactNumber(openOpportunityCount),
+            meta: `${revenue?.revenueTbdCount ?? 0} revenue TBD`,
+            icon: "O",
+          },
+        ].map((item) => (
+          <Card key={item.label} className="p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-emerald-300/20 bg-emerald-50 text-sm font-bold text-emerald-700 transition group-hover:scale-105">
+                {item.icon}
+              </div>
+              <span className="text-xs font-semibold text-emerald-700">{item.meta}</span>
+            </div>
+            <p className="mt-4 text-xs font-medium text-slate-600">{item.label}</p>
+            <p className="mt-1 text-3xl font-semibold tracking-[-0.05em] text-slate-950">{item.value}</p>
+          </Card>
+        ))}
+      </section>
+
+      <Card className="mb-5 p-5">
+        <CardHeader
+          title="What To Do First"
+          eyebrow={advisorLoading ? "Seller advisor" : businessName}
+          action={<PanelButton href={advisorPrimaryHref}>Open focus</PanelButton>}
+        />
+        {advisorError ? (
+          <InlineError message="Unable to load advisor guidance." onRetry={() => void loadAdvisor("full")} />
+        ) : advisorLoading && !advisor ? (
+          <p className="mt-4 text-sm font-medium shimmer-text">Reading pipeline, gap, and urgency...</p>
+        ) : (
+          <div className="mt-4 grid gap-3 lg:grid-cols-[1.3fr_1fr]">
+            <div className="rounded-2xl border border-emerald-300/15 bg-emerald-50 p-4">
+              <p className="text-lg font-semibold tracking-[-0.03em] text-slate-950">
+                {advisor?.businessHeadline || advisor?.headline || bestPlaybook?.campaignName || "Review the opportunity queue"}
+              </p>
+              <p className="mt-2 text-sm leading-6 text-emerald-900/70">
+                {advisor?.summary ||
+                  (bestPlaybook
+                    ? firstSentence(bestPlaybook.strategicReason, 180)
+                    : "No advisor recommendation is available yet. Start with the highest-priority opportunities.")}
+              </p>
+            </div>
+            <div className="space-y-2">
+              {(advisorSuggestions.length > 0 ? advisorSuggestions : []).map((suggestion) => (
+                <Link
+                  key={suggestion.id}
+                  href={suggestion.actionHref}
+                  className="block rounded-2xl border border-slate-200 bg-slate-50 p-3 transition hover:bg-slate-100"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="text-sm font-semibold text-slate-950">{suggestion.title}</p>
+                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${priorityClass(suggestion.priority)}`}>
+                      {labelize(suggestion.priority)}
+                    </span>
+                  </div>
+                  <p className="mt-1 line-clamp-1 text-xs text-slate-500">{suggestion.recommendedAction}</p>
+                </Link>
+              ))}
+              {advisorSuggestions.length === 0 && bestPlaybook ? (
+                <Link
+                  href={playbookHref(bestPlaybook.campaignName)}
+                  className="block rounded-2xl border border-slate-200 bg-slate-50 p-3 transition hover:bg-slate-100"
+                >
+                  <p className="text-sm font-semibold text-slate-950">{bestPlaybook.campaignName}</p>
+                  <p className="mt-1 line-clamp-1 text-xs text-slate-500">{firstSentence(bestPlaybook.strategicReason, 120)}</p>
+                </Link>
+              ) : null}
+            </div>
+          </div>
+        )}
+      </Card>
+
+      <section className="grid gap-5 xl:grid-cols-[1.18fr_0.82fr]">
+        <div className="grid gap-5">
+          <Card className="p-5">
+            <CardHeader title="Revenue Goal Tracker" action={<PanelButton href="/opportunities">View pipeline</PanelButton>} />
+            {revenueLoading && !revenue ? (
+              <p className="mt-4 text-sm font-medium shimmer-text">Loading revenue status...</p>
+            ) : revenueError ? (
+              <InlineError message="Unable to load revenue summary." onRetry={() => void loadRevenue("full")} />
+            ) : goalConfigured ? (
+              <>
+                <div className="mt-5 grid gap-3 sm:grid-cols-4">
+                  <Metric label="Monthly Goal" value={formatCurrency((revenue?.monthlyGoalCents ?? 0) / 100)} />
+                  <Metric label="Actual Revenue" value={formatCurrency(actualRevenueCents / 100)} />
+                  <Metric label="Remaining Gap" value={formatCurrency(gapCents / 100)} />
+                  <Metric label="Known Pipeline" value={formatCurrency(knownPipelineCents / 100)} accent />
+                </div>
+                <div className="mt-5">
+                  <div className="mb-2 flex items-center justify-between text-xs font-semibold text-slate-600">
+                    <span>{Math.round(goalPct)}% of monthly goal</span>
+                    <span>{pipelineCoverage}% gap coverage</span>
+                  </div>
+                  <div className="h-2 overflow-hidden rounded-full bg-slate-100">
+                    <div className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-green-400 transition-[width] duration-700 ease-out" style={{ width: `${goalPct}%` }} />
+                  </div>
+                  <p className="mt-3 text-sm leading-6 text-slate-600">
+                    Known pipeline only includes opportunities with forecastable revenue. Qualified leads and review-only items stay out of pipeline dollars.
+                  </p>
+                  <p className="mt-2 text-xs text-slate-500">
+                    Last updated: {formatDateTime(revenue?.generatedAt)} · Latest revenue event: {formatDateTime(revenue?.latestRevenueEventAt)}
+                  </p>
+                </div>
+              </>
             ) : (
-              <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                {advisorCards.map((s) => (
-                  <div
-                    key={s.id}
-                    className="flex flex-col rounded-lg border border-slate-200 bg-white/90 p-4 shadow-sm"
-                  >
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${advisorPriorityBadgeClass(s.priority)}`}>
-                        {labelize(s.priority)}
-                      </span>
-                      <span className="text-[10px] font-medium text-slate-500">{s.targetCount} people</span>
-                    </div>
-                    <p className="mt-2 text-sm font-semibold text-[#0F172A]">{s.title}</p>
-                    <p className="mt-1 text-xs text-[#475569]">{reasoningAtMostTwoSentences(s.reasoning)}</p>
-                    <p className="mt-2 text-xs font-semibold text-[#0F172A]">Do next</p>
-                    <p className="text-xs text-[#475569]">{s.recommendedAction}</p>
-                    {s.suggestedMessageAngle ? (
-                      <>
-                        <p className="mt-2 text-xs font-semibold text-[#0F172A]">Angle</p>
-                        <p className="text-xs italic text-[#475569]">&ldquo;{s.suggestedMessageAngle}&rdquo;</p>
-                      </>
-                    ) : null}
-                    {s.caution ? (
-                      <p className="mt-2 text-[11px] font-medium text-amber-800">{s.caution}</p>
-                    ) : null}
-                    {s.actionHref ? (
-                      <div className="mt-3">
-                        <Link href={s.actionHref} className={btnPrimarySm}>
-                          Open
-                        </Link>
+              <div className="mt-5 rounded-2xl border border-emerald-300/20 bg-emerald-50 p-5">
+                <p className="text-lg font-semibold tracking-[-0.03em] text-emerald-900">Goal not configured</p>
+                <p className="mt-2 text-sm text-emerald-900/75">Set a monthly goal to track progress, remaining gap, and goal coverage.</p>
+                <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                  <Metric label="Actual Revenue" value={formatCurrency(actualRevenueCents / 100)} />
+                  <Metric label="Known Pipeline" value={formatCurrency(knownPipelineCents / 100)} accent />
+                </div>
+                <p className="mt-3 text-xs text-emerald-900/60">
+                  Last updated: {formatDateTime(revenue?.generatedAt)}
+                </p>
+              </div>
+            )}
+          </Card>
+
+          <Card className="p-5">
+            <CardHeader
+              title="AI Revenue Opportunities"
+              eyebrow={advisor?.summary ? "What to work first" : undefined}
+              action={<PanelButton href="/opportunities">View all</PanelButton>}
+            />
+            {playbooksError ? (
+              <InlineError message="Unable to load playbooks." onRetry={() => void loadPlaybooks("full")} />
+            ) : playbooksLoading ? (
+              <p className="mt-4 text-sm font-medium shimmer-text">Loading playbooks...</p>
+            ) : sortedPlaybooks.length === 0 ? (
+              <EmptyState title="No active playbooks" copy="Run a sync to surface lesson recovery, rebooking, membership, event, and nurture plays." />
+            ) : (
+              <div className="mt-4 divide-y divide-white/[0.06]">
+                {sortedPlaybooks.slice(0, 5).map((playbook) => {
+                  const knownPipeline = knownPipelineForPlaybook(playbook);
+                  const revenueLabel =
+                    knownPipeline > 0
+                      ? formatCurrency(knownPipeline / 100)
+                      : playbook.revenueTbdCount > 0
+                        ? "Revenue TBD"
+                        : "No known pipeline";
+                  return (
+                    <Link
+                      key={playbook.id}
+                      href={playbookHref(playbook.campaignName)}
+                      className="grid gap-3 py-3 transition hover:bg-slate-50 sm:grid-cols-[1fr_auto_auto]"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold text-slate-950">{playbook.campaignName}</p>
+                        <p className="mt-1 line-clamp-1 text-xs text-slate-600">{firstSentence(playbook.strategicReason, 120)}</p>
                       </div>
-                    ) : null}
+                      <div className="text-sm font-semibold text-slate-900 sm:text-right">{revenueLabel}</div>
+                      <span className={`h-fit rounded-full border px-2.5 py-1 text-[10px] font-semibold ${priorityClass(playbook.urgency)}`}>
+                        {labelize(playbook.urgency)}
+                      </span>
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
+          </Card>
+
+          <Card className="p-5">
+            <CardHeader title="Urgent Targets" action={<PanelButton href="/opportunities">View all opportunities</PanelButton>} />
+            {targetsError ? (
+              <InlineError message="Unable to load urgent targets." onRetry={() => void loadTargets("full")} />
+            ) : targetsLoading ? (
+              <p className="mt-4 text-sm font-medium shimmer-text">Loading urgent targets...</p>
+            ) : urgentTargets.length === 0 ? (
+              <EmptyState title="No urgent targets" copy="No reachable high-signal targets are available right now." />
+            ) : (
+              <div className="mt-4 grid gap-3 md:grid-cols-2">
+                {urgentTargets.slice(0, 4).map((target) => {
+                  const campaign = (target.recommendedCampaign ?? "").trim() || target.playbook || labelize(target.recognizedOpportunity);
+                  const whyNow = buildWhyNowLine({
+                    recognizedOpportunity: target.recognizedOpportunity,
+                    bookingStatus: target.bookingStatus ?? null,
+                    lastBookingType: target.lastBookingType ?? null,
+                    daysSinceBooking: target.daysSinceBooking ?? null,
+                    bookingTitle: target.bookingTitle ?? null,
+                  });
+                  return (
+                    <Link
+                      key={target.id}
+                      href={playbookHref(campaign)}
+                      className="rounded-2xl border border-slate-200 bg-slate-50 p-3 transition hover:bg-slate-100"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-semibold text-slate-950">{target.leadName}</p>
+                          <p className="mt-1 truncate text-xs text-slate-500">{campaign}</p>
+                        </div>
+                        <span className="text-xs font-semibold text-emerald-900">
+                          {knownPipelineForTarget(target) > 0 ? formatCurrency(knownPipelineForTarget(target) / 100) : "TBD"}
+                        </span>
+                      </div>
+                      <p className="mt-2 line-clamp-1 text-xs text-slate-600">{firstSentence(whyNow, 120)}</p>
+                    </Link>
+                  );
+                })}
+              </div>
+            )}
+          </Card>
+
+          <Card className="p-5">
+            <CardHeader title="Revenue Over Time" action={<span className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1.5 text-xs font-semibold text-slate-700">This month</span>} />
+            {timeseriesError ? (
+              <InlineError message="Unable to load revenue trend." onRetry={() => void loadTimeseries("full")} />
+            ) : timeseriesLoading && !timeseries ? (
+              <p className="mt-4 text-sm font-medium shimmer-text">Loading revenue trend...</p>
+            ) : !chartHasRevenue ? (
+              <EmptyState title="Revenue trend not available yet" copy="Revenue trend appears after completed revenue events sync into the last 30 days." />
+            ) : (
+              <div className="mt-5 h-56 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                <div className="relative h-full overflow-hidden rounded-xl">
+                  <div className="absolute inset-0 bg-[linear-gradient(rgba(148,163,184,0.08)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.08)_1px,transparent_1px)] bg-[size:100%_25%,20%_100%]" />
+                  <svg viewBox="0 0 500 180" className="relative h-full w-full">
+                    <defs>
+                      <linearGradient id="revenueLine" x1="0" x2="1" y1="0" y2="0">
+                        <stop stopColor="#10b981" />
+                        <stop offset="1" stopColor="#059669" />
+                      </linearGradient>
+                    </defs>
+                    <polyline
+                      className="draw-line"
+                      fill="none"
+                      points={chartLine}
+                      stroke="url(#revenueLine)"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth="4"
+                    />
+                  </svg>
+                  <div className="absolute right-3 top-3 rounded-xl border border-emerald-200 bg-white/90 px-3 py-2 shadow-sm">
+                    <p className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-emerald-700/70">
+                      <span className="live-dot h-1.5 w-1.5 rounded-full bg-emerald-500 text-emerald-500" />
+                      Live total
+                    </p>
+                    <p className="text-sm font-semibold text-slate-950">{formatCurrency(actualRevenueCents / 100)}</p>
+                  </div>
+                </div>
+              </div>
+            )}
+            <p className="mt-3 text-xs text-slate-500">
+              Protected 30-day revenue trend from completed revenue events. No customer-level data is returned.
+            </p>
+          </Card>
+        </div>
+
+        <div className="grid gap-5">
+          <Card className="p-5">
+            <CardHeader title="Opportunities by Source" />
+            <div className="mt-5 grid gap-5 sm:grid-cols-[160px_1fr]">
+              <div className="relative mx-auto h-40 w-40 rounded-full" style={{ background: donutBackground(sources) }}>
+                <div className="absolute inset-6 flex flex-col items-center justify-center rounded-full border border-slate-200 bg-white text-center">
+                  <span className="text-3xl font-semibold tracking-[-0.05em] text-slate-950">{sourceTotal}</span>
+                  <span className="text-xs text-slate-500">signals</span>
+                </div>
+              </div>
+              <div className="space-y-3">
+                {sources.length === 0 ? (
+                  <p className="text-sm text-slate-600">No source mix yet.</p>
+                ) : (
+                  sources.map((source) => (
+                    <div key={source.label} className="flex items-center justify-between gap-3 text-sm">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: source.color }} />
+                        <span className="truncate text-slate-700">{source.label}</span>
+                      </div>
+                      <span className="font-semibold text-slate-950">{source.count}</span>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          </Card>
+
+          <Card className="p-5">
+            <CardHeader title="Recent Conversations" action={<PanelButton href="/conversations">View all</PanelButton>} />
+            {conversationsError ? (
+              <InlineError message="Unable to load conversations." onRetry={() => void loadConversations("full")} />
+            ) : conversationsLoading ? (
+              <p className="mt-4 text-sm font-medium shimmer-text">Loading conversations...</p>
+            ) : conversations.length === 0 ? (
+              <EmptyState title="No recent conversations yet" copy="Customer messages will appear here after inbound or reviewed outbound activity exists." />
+            ) : (
+              <div className="mt-4 space-y-3">
+                {conversations.map((conversation, index) => (
+                  <Link key={`${conversation.id}:${conversation.lastMessageAt ?? "unknown"}:${index}`} href="/conversations" className="flex items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 transition hover:bg-slate-100">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-emerald-100 text-xs font-bold text-emerald-700">
+                      {initials(conversation.contactName)}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-semibold text-slate-950">{conversation.contactName}</p>
+                      <p className="truncate text-xs text-slate-600">{conversation.preview || "No message preview"}</p>
+                    </div>
+                    <span className="text-[11px] font-semibold text-slate-500">{formatDateTime(conversation.lastMessageAt)}</span>
+                  </Link>
+                ))}
+              </div>
+            )}
+            <div className="mt-4">
+              <PanelButton href="/conversations">Go to conversations</PanelButton>
+            </div>
+          </Card>
+
+          <Card className="p-5">
+            <CardHeader title="AI Drafts Awaiting Approval" action={<PanelButton href="/outbound">View all</PanelButton>} />
+            <p className="mt-2 text-xs text-slate-500">Drafts generated from top opportunities. Nothing sends automatically.</p>
+            {targetsLoading ? (
+              <p className="mt-4 text-sm font-medium shimmer-text">Loading drafts...</p>
+            ) : draftTargets.length === 0 ? (
+              <EmptyState title="No drafts waiting" copy="Drafts appear after opportunities have a recommended message. Nothing sends automatically." />
+            ) : (
+              <div className="mt-4 space-y-3">
+                {draftTargets.map((target) => (
+                  <div key={target.id} className="grid gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 sm:grid-cols-[1fr_auto]">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-950">{(target.recommendedCampaign ?? "").trim() || target.playbook}</p>
+                      <p className="mt-1 line-clamp-1 text-xs text-slate-600">{concisePreview(target.recommendedMessage)}</p>
+                    </div>
+                    <PanelButton href={targetDraftHref(target)}>Review</PanelButton>
                   </div>
                 ))}
               </div>
             )}
-          </>
-        )}
-      </section>
+          </Card>
 
-      <section className="mt-6 grid gap-4 xl:grid-cols-2">
-        <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#475569]">Revenue Goal Tracker</p>
-          <div className="mt-3 grid grid-cols-2 gap-3 text-sm">
-            <div className="rounded-lg border border-slate-200 bg-[#F8FAFC] p-3">
-              <p className="text-xs text-[#475569]">Monthly goal</p>
-              <p className="mt-1 font-semibold text-[#0F172A]">{revenueLoading ? "…" : formatCurrency((revenue?.monthlyGoalCents ?? 0) / 100)}</p>
-            </div>
-            <div className="rounded-lg border border-slate-200 bg-[#F8FAFC] p-3">
-              <p className="text-xs text-[#475569]">Actual revenue</p>
-              <p className="mt-1 font-semibold text-[#0F172A]">{revenueLoading ? "…" : formatCurrency((revenue?.actualRevenueCents ?? 0) / 100)}</p>
-            </div>
-            <div className="rounded-lg border border-slate-200 bg-[#F8FAFC] p-3">
-              <p className="text-xs text-[#475569]">Remaining gap</p>
-              <p className="mt-1 font-semibold text-[#0F172A]">{revenueLoading ? "…" : formatCurrency(gapCents / 100)}</p>
-            </div>
-            <div className="rounded-lg border border-slate-200 bg-[#F8FAFC] p-3">
-              <p className="text-xs text-[#475569]">Open pipeline</p>
-              <p className="mt-1 font-semibold text-[#0F172A]">{targetsLoading ? "…" : formatCurrency(pipelineCents / 100)}</p>
-            </div>
-          </div>
-
-          <div className="mt-3 rounded-lg border border-slate-200 bg-white p-3">
-            <div className="flex items-center justify-between text-xs font-semibold text-[#475569]">
-              <span>Goal progress</span>
-              <span>{Math.round(goalPct)}%</span>
-            </div>
-            <div className="mt-2 h-2 overflow-hidden rounded-full bg-slate-200">
-              <div className="h-full rounded-full bg-emerald-600" style={{ width: `${goalPct}%` }} />
-            </div>
-          </div>
-
-          <p className="mt-3 text-sm text-[#475569]">
-            You are {formatCurrency(gapCents / 100)} away from goal. Current open pipeline covers {Math.max(0, gapCoverage)}% of the gap.
-          </p>
-          <p className={`mt-1 text-sm font-semibold ${pipelineCents < gapCents ? "text-amber-700" : "text-emerald-700"}`}>{coverageLabel}</p>
-        </article>
-
-        <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#475569]">Today&apos;s Closing Focus</p>
-          {playbooksLoading && <p className="mt-3 text-sm text-[#475569]">Loading best play…</p>}
-          {!playbooksLoading && !bestPlaybook && (
-            <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-              No active playbooks. Run syncs or refresh opportunities.
-            </p>
-          )}
-          {!playbooksLoading && bestPlaybook && (
-            <>
-              <p className="mt-3 text-base font-semibold text-[#0F172A]">Best play today: {bestPlaybook.campaignName}</p>
-              <p className="mt-1 text-sm text-[#475569]">Close this first. {firstSentence(bestPlaybook.strategicReason, 210)}</p>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${urgencyBadgeClass(bestPlaybook.urgency)}`}>{labelize(bestPlaybook.urgency)}</span>
-                <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-700">{bestPlaybook.targetCount} targets</span>
-                <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-700">{formatCurrency(bestPlaybook.estimatedRevenueCents / 100)} pipeline</span>
-                <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-semibold text-slate-700">{formatRecommendedChannel(bestPlaybook.recommendedChannel)}</span>
-              </div>
-              <div className="mt-4 flex flex-wrap gap-2">
-                <Link href={playbookHref(bestPlaybook.campaignName)} className={btnPrimarySm}>Review targets</Link>
-                <Link href={buildDraftCampaignHref(bestPlaybook)} className={btnSecondary}>Draft campaign</Link>
-              </div>
-            </>
-          )}
-        </article>
-      </section>
-
-      <section className="mt-8 grid gap-4 xl:grid-cols-[1.25fr_1fr]">
-        <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#475569]">Deal Queue</p>
-          <p className="mt-1 text-sm text-[#475569]">Ready to contact now.</p>
-          {targetsLoading && <p className="mt-3 text-sm text-[#475569]">Loading deal queue…</p>}
-          {!targetsLoading && urgentTargets.length === 0 && (
-            <p className="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-[#475569]">
-              No urgent deals yet. Refresh after sync.
-            </p>
-          )}
-          {urgentTargets.length > 0 && (
-            <div className="mt-3 space-y-2">
-              {urgentTargets.map((t) => {
-                const campaign = (t.recommendedCampaign ?? "").trim() || t.playbook;
-                const href = playbookHref(campaign);
-                const whyNow = buildWhyNowLine({
-                  recognizedOpportunity: t.recognizedOpportunity,
-                  bookingStatus: t.bookingStatus ?? null,
-                  lastBookingType: t.lastBookingType ?? null,
-                  daysSinceBooking: t.daysSinceBooking ?? null,
-                  bookingTitle: t.bookingTitle ?? null,
-                });
-                return (
-                  <div key={t.id} className="flex items-start justify-between gap-3 rounded-lg border border-slate-200 bg-[#F8FAFC] p-3">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        {t.sourceDisplayLabel ? <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${sourceBadgeClass(t.sourceDisplayLabel)}`}>{t.sourceDisplayLabel}</span> : null}
-                        <span className="text-[10px] font-semibold text-slate-500">{campaign}</span>
-                      </div>
-                      <p className="mt-1 truncate text-sm font-semibold text-[#0F172A]">{t.leadName}</p>
-                      <p className="font-mono text-xs text-[#475569]">{t.phone}</p>
-                      <p className="mt-1 line-clamp-1 text-xs text-[#475569]"><span className="font-semibold text-[#0F172A]">Why now: </span>{whyNow}</p>
-                      <p className="line-clamp-1 text-xs text-[#475569]"><span className="font-semibold text-[#0F172A]">Draft: </span>{draftPreview(t.recommendedMessage)}</p>
-                      <p className="mt-1 text-xs font-semibold text-[#0F172A]">{formatCurrency(t.estimatedRevenueCents / 100)}</p>
+          <Card className="p-5">
+            <CardHeader title="Campaign Readiness" action={<PanelButton href="/opportunities">View all</PanelButton>} />
+            <div className="mt-4 space-y-3">
+              {playbooksError ? (
+                <InlineError message="Unable to load campaign readiness." onRetry={() => void loadPlaybooks("full")} />
+              ) : playbooksLoading ? (
+                <p className="text-sm font-medium shimmer-text">Loading campaigns...</p>
+              ) : campaignBoard.length === 0 ? (
+                <EmptyState title="No campaign readiness yet" copy="Campaign performance will appear after outreach launches. Until then, this panel uses real playbook readiness only." />
+              ) : (
+                campaignBoard.map((playbook) => (
+                  <Link key={playbook.id} href={playbookHref(playbook.campaignName)} className="grid grid-cols-[1fr_auto] items-center gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 transition hover:bg-slate-100">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-slate-950">{playbook.campaignName}</p>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {playbook.targetCount} targets · {playbook.qualifiedLeadCount} qualified · {playbook.knownPipelineCents > 0 ? `${formatCurrency(playbook.knownPipelineCents / 100)} known` : `${playbook.revenueTbdCount} revenue TBD`}
+                      </p>
                     </div>
-                    <Link href={href} className={`${btnPrimarySm} shrink-0`}>Open review</Link>
-                  </div>
-                );
-              })}
+                    <span className={`rounded-full border px-2.5 py-1 text-[10px] font-semibold ${priorityClass(playbook.urgency)}`}>
+                      {labelize(playbook.urgency)}
+                    </span>
+                  </Link>
+                ))
+              )}
             </div>
-          )}
-        </article>
-
-        <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#475569]">Playbook Board</p>
-          <div className="mt-3 space-y-2">
-            {playbookBoard.map((pb) => (
-              <div key={pb.id} className="rounded-lg border border-slate-200 bg-[#F8FAFC] p-3">
-                <div className="flex items-start justify-between gap-2">
-                  <p className="text-sm font-semibold text-[#0F172A]">{pb.campaignName}</p>
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${urgencyBadgeClass(pb.urgency)}`}>{labelize(pb.urgency)}</span>
-                </div>
-                <p className="mt-2 text-xs text-[#475569]">
-                  {pb.targetCount} targets · {formatCurrency(pb.estimatedRevenueCents / 100)} · {pb.averageConfidence}% confidence · {formatRecommendedChannel(pb.recommendedChannel)}
-                </p>
-                <div className="mt-2"><Link href={playbookHref(pb.campaignName)} className={btnPrimarySm}>View targets</Link></div>
-              </div>
-            ))}
-            {!playbooksLoading && playbookBoard.length === 0 && <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-[#475569]">No campaign board yet.</p>}
-          </div>
-        </article>
-      </section>
-
-      <section className="mt-8 grid gap-4 xl:grid-cols-2">
-        <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#475569]">Goal Action Plan</p>
-          <p className="mt-2 text-sm text-[#475569]">
-            Gap is {formatCurrency(gapCents / 100)}. Prioritize {bestPlaybook?.campaignName ?? "the top playbook"} ({formatCurrency((bestPlaybook?.estimatedRevenueCents ?? 0) / 100)}), then work the deal queue to increase conversion pace.
-          </p>
-          <ul className="mt-3 list-inside list-disc space-y-1 text-sm text-[#475569]">
-            <li>Review urgent playbook first.</li>
-            <li>Launch manual draft for the best campaign.</li>
-            <li>Follow up top 5 deals before adding lower-priority pipeline.</li>
-          </ul>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {bestPlaybook && <Link href={playbookHref(bestPlaybook.campaignName)} className={btnPrimarySm}>Review urgent playbook</Link>}
-            {bestPlaybook && <Link href={buildDraftCampaignHref(bestPlaybook)} className={btnSecondary}>Draft best campaign</Link>}
-            <Link href="/opportunities" className={btnSecondary}>Follow up deal queue</Link>
-          </div>
-        </article>
-
-        <article className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#475569]">Activity / Progress Tracker</p>
-          <div className="mt-3 grid grid-cols-2 gap-3">
-            <div className="rounded-lg border border-slate-200 bg-[#F8FAFC] p-3"><p className="text-xs text-[#475569]">Open opportunities</p><p className="mt-1 text-lg font-semibold text-[#0F172A]">{openCount}</p></div>
-            <div className="rounded-lg border border-slate-200 bg-[#F8FAFC] p-3"><p className="text-xs text-[#475569]">Converted</p><p className="mt-1 text-lg font-semibold text-[#0F172A]">{convertedCount}</p></div>
-            <div className="rounded-lg border border-slate-200 bg-[#F8FAFC] p-3"><p className="text-xs text-[#475569]">Excluded</p><p className="mt-1 text-lg font-semibold text-[#0F172A]">{excludedCount}</p></div>
-            <div className="rounded-lg border border-slate-200 bg-[#F8FAFC] p-3"><p className="text-xs text-[#475569]">Manual review required</p><p className="mt-1 text-lg font-semibold text-[#0F172A]">{manualReviewCount}</p></div>
-          </div>
-          <p className="mt-3 text-sm text-[#475569]">Pipeline touched today: {touchedTodayCount}</p>
-        </article>
-      </section>
-
-      <section className="mt-8">
-        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-[#475569]">Data Health</p>
-        <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
-          {integrationCards.map((card) => (
-            <div key={card.name} className="rounded-lg border border-slate-200 bg-white p-3 shadow-sm">
-              <p className="text-xs font-semibold text-[#0F172A]">{card.name}</p>
-              <p className={`mt-1 text-xs font-semibold ${card.status === "Active" ? "text-emerald-700" : card.status === "Needs review" ? "text-amber-700" : "text-slate-500"}`}>{card.status}</p>
-            </div>
-          ))}
+          </Card>
         </div>
       </section>
+
+      <section className="mt-5">
+        <Card className="p-5">
+          <CardHeader title="Operator Focus" eyebrow={businessName} />
+          <div className="mt-4 grid gap-3 md:grid-cols-3">
+            <FocusItem
+              label="Do first"
+              value={bestPlaybook?.campaignName ?? "Review opportunity queue"}
+              copy={bestPlaybook ? firstSentence(bestPlaybook.strategicReason, 120) : "No top playbook is available yet."}
+            />
+            <FocusItem
+              label="Money likely"
+              value={knownPipelineCents > 0 ? formatCurrency(knownPipelineCents / 100) : "Revenue TBD"}
+              copy="Known pipeline excludes weak or unpriced opportunities."
+            />
+            <FocusItem
+              label="Needs review"
+              value={`${revenue?.revenueTbdCount ?? 0} TBD · ${revenue?.reviewOnlyCount ?? 0} review-only`}
+              copy="Set firm offer amounts before counting unpriced plays as pipeline."
+            />
+          </div>
+        </Card>
+      </section>
+    </div>
+  );
+}
+
+function Metric({ label, value, accent = false }: { label: string; value: string; accent?: boolean }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+      <p className="text-[11px] font-medium text-slate-500">{label}</p>
+      <p className={`mt-2 text-lg font-semibold tracking-[-0.03em] ${accent ? "text-emerald-900" : "text-slate-950"}`}>{value}</p>
+    </div>
+  );
+}
+
+function EmptyState({ title, copy }: { title: string; copy: string }) {
+  return (
+    <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+      <p className="text-sm font-semibold text-slate-800">{title}</p>
+      <p className="mt-1 text-xs leading-5 text-slate-500">{copy}</p>
+    </div>
+  );
+}
+
+function InlineError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-4">
+      <p className="text-sm font-semibold text-red-700">{message}</p>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="mt-3 rounded-full border border-red-200 bg-white px-3 py-1.5 text-xs font-semibold text-red-700 transition hover:bg-red-100"
+      >
+        Retry
+      </button>
+    </div>
+  );
+}
+
+function FocusItem({ label, value, copy }: { label: string; value: string; copy: string }) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-emerald-700/60">{label}</p>
+      <p className="mt-2 text-base font-semibold tracking-[-0.03em] text-slate-950">{value}</p>
+      <p className="mt-2 text-xs leading-5 text-slate-500">{copy}</p>
     </div>
   );
 }

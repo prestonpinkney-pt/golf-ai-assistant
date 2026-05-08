@@ -1,8 +1,12 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/admin";
+import { gateBusinessUser } from "../../lib/require-auth";
 import { VALID_LEAD_STATUSES } from "../_shared";
 
 export async function POST(req: Request) {
+  const denied = await gateBusinessUser();
+  if (denied) return denied;
+
   try {
     const body = await req.json();
     const { id, status } = body;

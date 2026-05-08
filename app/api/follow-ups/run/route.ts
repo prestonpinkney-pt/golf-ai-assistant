@@ -1,6 +1,18 @@
 import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import { gateCron } from "../../lib/require-auth";
+
+/**
+ * Legacy filesystem-backed follow-up runner.
+ *
+ * This route mutates `data/leads.json` and predates the Supabase-backed
+ * follow-up flow at `/api/leads/run-due-follow-ups`. It is retained only
+ * so any older cron caller does not 404, but it is now hard-gated behind
+ * `CRON_SECRET` and disabled entirely in production.
+ *
+ * Prefer `/api/leads/run-due-follow-ups`.
+ */
 
 const filePath = path.join(process.cwd(), "data", "leads.json");
 
@@ -45,9 +57,22 @@ function buildFollowUpMessage(lead: any) {
 }
 
 export async function POST(req: Request) {
+  if (process.env.NODE_ENV === "production") {
+    return NextResponse.json(
+      {
+        error:
+          "Disabled. Use /api/leads/run-due-follow-ups (Supabase-backed) instead.",
+      },
+      { status: 410 }
+    );
+  }
+
+  const denied = gateCron(req);
+  if (denied) return denied;
+
   try {
-    const body = await req.json();
-    const { id } = body;
+    const body = await req.json().catch(() => ({}));
+    const { id } = (body ?? {}) as { id?: string };
 
     if (!id) {
       return NextResponse.json(

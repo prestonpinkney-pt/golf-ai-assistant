@@ -15,10 +15,67 @@ export class ApiAuthError extends Error {
   }
 }
 
-export function isCronAuthorizedRequest(request: NextRequest): boolean {
+function timingSafeEqualStrings(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; i++) {
+    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return mismatch === 0;
+}
+
+export function isCronAuthorizedRequest(request: NextRequest | Request): boolean {
   const secret = process.env.CRON_SECRET;
   if (!secret) return false;
-  return request.headers.get("authorization") === `Bearer ${secret}`;
+  const header = request.headers.get("authorization");
+  if (!header) return false;
+  return timingSafeEqualStrings(header, `Bearer ${secret}`);
+}
+
+export function isInternalSecretAuthorizedRequest(
+  request: NextRequest | Request
+): boolean {
+  const internal = process.env.INTERNAL_API_SECRET;
+  const cron = process.env.CRON_SECRET;
+  const header = request.headers.get("authorization");
+  if (!header || !header.startsWith("Bearer ")) return false;
+  if (internal && timingSafeEqualStrings(header, `Bearer ${internal}`)) return true;
+  if (cron && timingSafeEqualStrings(header, `Bearer ${cron}`)) return true;
+  return false;
+}
+
+/**
+ * Gate that allows only callers presenting CRON_SECRET as `Authorization: Bearer`.
+ * Returns a JSON 401 response when unauthorized, otherwise null.
+ */
+export function gateCron(request: NextRequest | Request): NextResponse | null {
+  if (!process.env.CRON_SECRET) {
+    return NextResponse.json(
+      { error: "CRON_SECRET is not configured on the server" },
+      { status: 500 }
+    );
+  }
+  if (isCronAuthorizedRequest(request)) return null;
+  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+}
+
+/**
+ * Gate for internal/server-to-server calls. Allows INTERNAL_API_SECRET, CRON_SECRET,
+ * or an authenticated dashboard user.
+ */
+export async function gateInternalOrBusinessUser(
+  request: NextRequest | Request
+): Promise<NextResponse | null> {
+  if (isInternalSecretAuthorizedRequest(request)) return null;
+  try {
+    await requireBusinessUser();
+    return null;
+  } catch (e) {
+    if (e instanceof ApiAuthError) {
+      return NextResponse.json({ error: e.message }, { status: e.statusCode });
+    }
+    throw e;
+  }
 }
 
 export type BusinessUserContext = {
@@ -104,7 +161,7 @@ export async function gateBusinessUser(): Promise<NextResponse | null> {
 
 /** Cron / internal jobs may use `Authorization: Bearer ${CRON_SECRET}` instead of a user session. */
 export async function gateBusinessUserOrCron(
-  request: NextRequest
+  request: NextRequest | Request
 ): Promise<NextResponse | null> {
   if (isCronAuthorizedRequest(request)) return null;
   try {

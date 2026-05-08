@@ -8,6 +8,14 @@ import {
 } from "../../lib/closeos-sales-advisor";
 import { buildPlaybooksFromTargets } from "../../lib/closeos-playbook-engine";
 import { loadOutboundOpportunityTargets } from "../../lib/opportunity-eligible-targets";
+import {
+  buildAdvisorRevenueSummary,
+  getReportingRangeLa,
+  loadPipelineHonestyAggregate,
+  loadRevenueEventsMonthAggregate,
+  loadRevenueViewRowForSlug,
+  resolveReportingMonthKey,
+} from "../../lib/revenue-summary";
 
 function getSupabaseAdmin() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -25,27 +33,29 @@ function getSupabaseAdmin() {
 async function loadRevenueSummary(
   supabase: ReturnType<typeof getSupabaseAdmin>
 ): Promise<AdvisorRevenueSummary | null> {
-  const { data, error } = await supabase
-    .from("revenue_summary_current_month")
-    .select(
-      `
-      monthly_goal_cents,
-      actual_revenue_cents,
-      remaining_gap_cents,
-      goal_coverage_percent
-    `
-    )
-    .eq("business_slug", BUSINESS_SLUG)
-    .single();
+  const monthKey = resolveReportingMonthKey();
+  const range = getReportingRangeLa(monthKey);
 
-  if (error || !data) return null;
+  const [viewRes, aggRes, pipeRes] = await Promise.allSettled([
+    loadRevenueViewRowForSlug(supabase, BUSINESS_SLUG),
+    loadRevenueEventsMonthAggregate(
+      supabase,
+      BUSINESS_ID,
+      range.reportingStart,
+      range.reportingEnd
+    ),
+    loadPipelineHonestyAggregate(supabase, BUSINESS_ID),
+  ]);
 
-  return {
-    monthlyGoalCents: data.monthly_goal_cents,
-    actualRevenueCents: data.actual_revenue_cents,
-    remainingGapCents: data.remaining_gap_cents,
-    goalCoveragePercent: data.goal_coverage_percent,
-  };
+  const row = viewRes.status === "fulfilled" ? viewRes.value.row : null;
+  const goalStatus =
+    viewRes.status === "fulfilled" ? viewRes.value.goalStatus : "missing";
+  const live =
+    aggRes.status === "fulfilled" ? aggRes.value.sumCents : 0;
+  const pipe =
+    pipeRes.status === "fulfilled" ? pipeRes.value : null;
+
+  return buildAdvisorRevenueSummary(row, live, pipe, goalStatus);
 }
 
 /**

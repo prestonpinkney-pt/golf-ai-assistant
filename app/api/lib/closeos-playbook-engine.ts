@@ -14,7 +14,14 @@ export type CloseOsPlaybookSummary = {
   sourceMix: Record<string, number>;
   opportunityTypes: string[];
   targetCount: number;
+  /** Sum of known-pipeline cents only (configured / honest estimates). */
+  knownPipelineCents: number;
+  qualifiedLeadCount: number;
+  revenueTbdCount: number;
+  /** Same as knownPipelineCents; legacy clients used this field name. */
   estimatedRevenueCents: number;
+  /** When the playbook has TBD revenue targets but no known dollars. */
+  pipelineRevenueLabel?: string;
   averageConfidence: number;
   averagePriority: number;
   recommendedChannel: string;
@@ -59,7 +66,11 @@ export type PlaybookTargetsSummary = {
   campaignName: string;
   campaignSlug: string;
   targetCount: number;
+  knownPipelineCents: number;
+  qualifiedLeadCount: number;
+  revenueTbdCount: number;
   estimatedRevenueCents: number;
+  pipelineRevenueLabel?: string;
   averageConfidence: number;
   averagePriority: number;
   recommendedChannel: string;
@@ -80,11 +91,15 @@ export function summarizePlaybookFromTargets(
     humanizeCampaignSlug(campaignSlug);
 
   const n = filtered.length;
-  let revenue = 0;
+  let knownPipelineCents = 0;
+  let qualifiedLeadCount = 0;
+  let revenueTbdCount = 0;
   let confSum = 0;
   let priSum = 0;
   for (const t of filtered) {
-    revenue += t.estimatedRevenueCents;
+    knownPipelineCents += t.knownPipelineContributionCents;
+    if (t.pipelineCategory === "qualified_lead") qualifiedLeadCount += 1;
+    if (t.revenueReviewRequired) revenueTbdCount += 1;
     confSum += t.confidence;
     priSum += t.targetScore;
   }
@@ -92,11 +107,18 @@ export function summarizePlaybookFromTargets(
   const pbScore = playbookUrgencyScore(filtered);
   const channel = aggregateChannel(filtered);
 
+  const pipelineRevenueLabel =
+    revenueTbdCount > 0 && knownPipelineCents === 0 ? "Revenue TBD" : undefined;
+
   return {
     campaignName,
     campaignSlug: slugifyCampaignName(campaignName),
     targetCount: n,
-    estimatedRevenueCents: revenue,
+    knownPipelineCents,
+    qualifiedLeadCount,
+    revenueTbdCount,
+    estimatedRevenueCents: knownPipelineCents,
+    pipelineRevenueLabel,
     averageConfidence: n ? Math.round(confSum / n) : 0,
     averagePriority: n ? Math.round(priSum / n) : 0,
     recommendedChannel: channel,
@@ -268,14 +290,18 @@ export function buildPlaybooksFromTargets(
   for (const [campaignName, group] of byCampaign) {
     const sourceMix: Record<string, number> = {};
     const typeSet = new Set<string>();
-    let revenue = 0;
+    let knownPipelineCents = 0;
+    let qualifiedLeadCount = 0;
+    let revenueTbdCount = 0;
     let confSum = 0;
     let priSum = 0;
 
     for (const t of group) {
       sourceMix[t.sourceDisplayLabel] = (sourceMix[t.sourceDisplayLabel] ?? 0) + 1;
       typeSet.add(t.opportunityType || "unknown");
-      revenue += t.estimatedRevenueCents;
+      knownPipelineCents += t.knownPipelineContributionCents;
+      if (t.pipelineCategory === "qualified_lead") qualifiedLeadCount += 1;
+      if (t.revenueReviewRequired) revenueTbdCount += 1;
       confSum += t.confidence;
       priSum += t.targetScore;
     }
@@ -284,13 +310,20 @@ export function buildPlaybooksFromTargets(
     const pbScore = playbookUrgencyScore(group);
     const channel = aggregateChannel(group);
 
+    const pipelineRevenueLabel =
+      revenueTbdCount > 0 && knownPipelineCents === 0 ? "Revenue TBD" : undefined;
+
     playbooks.push({
       id: slugifyCampaignName(campaignName),
       campaignName,
       sourceMix,
       opportunityTypes: [...typeSet].sort(),
       targetCount: n,
-      estimatedRevenueCents: revenue,
+      knownPipelineCents,
+      qualifiedLeadCount,
+      revenueTbdCount,
+      estimatedRevenueCents: knownPipelineCents,
+      pipelineRevenueLabel,
       averageConfidence: n ? Math.round(confSum / n) : 0,
       averagePriority: n ? Math.round(priSum / n) : 0,
       recommendedChannel: channel,
@@ -311,7 +344,7 @@ export function buildPlaybooksFromTargets(
     const score = (p: CloseOsPlaybookSummary) => {
       const targetsInPlaybook = byCampaign.get(p.campaignName) ?? [];
       const u = playbookUrgencyScore(targetsInPlaybook);
-      const rev = p.estimatedRevenueCents;
+      const rev = p.knownPipelineCents;
       const conf = p.averageConfidence;
       const cnt = p.targetCount;
       const src = playbookSourceQualityScore(targetsInPlaybook);

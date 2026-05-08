@@ -1,8 +1,12 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/admin";
+import { gateBusinessUser } from "../lib/require-auth";
 import { toInboxLead } from "./_shared";
 
 export async function GET() {
+  const denied = await gateBusinessUser();
+  if (denied) return denied;
+
   try {
     const { data, error } = await supabaseAdmin
       .from("leads")

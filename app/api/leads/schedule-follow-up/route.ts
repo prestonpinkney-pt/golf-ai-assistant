@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/admin";
+import { gateBusinessUser } from "../../lib/require-auth";
 
 function getFutureISO(hoursFromNow: number) {
   const d = new Date();
@@ -8,6 +9,9 @@ function getFutureISO(hoursFromNow: number) {
 }
 
 export async function POST(req: Request) {
+  const denied = await gateBusinessUser();
+  if (denied) return denied;
+
   try {
     const body = await req.json();
     const { id, channel, hoursFromNow } = body;

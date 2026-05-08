@@ -5,6 +5,10 @@ import {
   type BookingReservationLite,
 } from "./booking-context-for-opportunity";
 import { buildCloseOsAiRecommendation } from "./closeos-ai-intelligence";
+import {
+  effectiveOpportunityTruth,
+  knownPipelineDollarsFromTruth,
+} from "./closeos-opportunity-truth";
 import { dedupeOpportunitiesAcrossCustomers } from "./opportunity-target-ranking";
 
 export type CustomerProfileJoin = {
@@ -32,6 +36,10 @@ export type OpportunityRowForTargets = {
   priority: number;
   confidence: number;
   estimated_revenue_cents: number;
+  revenue_review_required?: boolean | null;
+  counts_toward_pipeline?: boolean | null;
+  offer_key?: string | null;
+  pipeline_category?: string | null;
   signal_summary: string | null;
   next_best_action: string | null;
   reply_handling_goal: string | null;
@@ -88,6 +96,12 @@ export type OutboundOpportunityTarget = {
   bookingStatus: string | null;
   bookingTitle: string | null;
   daysSinceBooking: number | null;
+
+  revenueReviewRequired: boolean;
+  countsTowardPipeline: boolean;
+  pipelineCategory: string;
+  offerKey: string | null;
+  knownPipelineContributionCents: number;
 };
 
 function getCustomer(row: OpportunityRowForTargets) {
@@ -147,42 +161,65 @@ export async function loadOutboundOpportunityTargets(input: {
 }): Promise<OutboundOpportunityTarget[]> {
   const { supabase, businessId } = input;
 
+  const probe = await supabase
+    .from("ai_opportunities")
+    .select("pipeline_category")
+    .eq("business_id", businessId)
+    .limit(1);
+
+  const customerJoin =
+    "customer_profiles(id,external_customer_id,first_name,last_name,email,phone,total_spend_cents,visit_count,last_purchase_at,is_member,exclude_from_ai_targeting)";
+
+  const selectColumns =
+    probe.error == null
+      ? [
+          "id",
+          "customer_profile_id",
+          "targeting_profile_id",
+          "recognized_opportunity",
+          "opportunity_type",
+          "playbook",
+          "status",
+          "priority",
+          "confidence",
+          "estimated_revenue_cents",
+          "revenue_review_required",
+          "counts_toward_pipeline",
+          "offer_key",
+          "pipeline_category",
+          "signal_summary",
+          "next_best_action",
+          "reply_handling_goal",
+          "recommended_message",
+          "created_at",
+          "updated_at",
+          "source",
+          customerJoin,
+        ].join(",")
+      : [
+          "id",
+          "customer_profile_id",
+          "targeting_profile_id",
+          "recognized_opportunity",
+          "opportunity_type",
+          "playbook",
+          "status",
+          "priority",
+          "confidence",
+          "estimated_revenue_cents",
+          "signal_summary",
+          "next_best_action",
+          "reply_handling_goal",
+          "recommended_message",
+          "created_at",
+          "updated_at",
+          "source",
+          customerJoin,
+        ].join(",");
+
   const { data, error } = await supabase
     .from("ai_opportunities")
-    .select(
-      `
-        id,
-        customer_profile_id,
-        targeting_profile_id,
-        recognized_opportunity,
-        opportunity_type,
-        playbook,
-        status,
-        priority,
-        confidence,
-        estimated_revenue_cents,
-        signal_summary,
-        next_best_action,
-        reply_handling_goal,
-        recommended_message,
-        created_at,
-        updated_at,
-        source,
-        customer_profiles (
-          id,
-          external_customer_id,
-          first_name,
-          last_name,
-          email,
-          phone,
-          total_spend_cents,
-          visit_count,
-          last_purchase_at,
-          is_member,
-          exclude_from_ai_targeting
-        )
-      `
-    )
+    .select(selectColumns)
     .eq("business_id", businessId)
     .in("status", ["open", "queued"])
     .order("priority", { ascending: false })
@@ -192,10 +229,13 @@ export async function loadOutboundOpportunityTargets(input: {
     throw new Error(error.message);
   }
 
-  const rows = (data ?? []) as OpportunityRowForTargets[];
+  const rows = (data ?? []) as unknown as OpportunityRowForTargets[];
 
   const filtered = rows.filter((row) => {
     if (row.recognized_opportunity === "booked_but_no_square_match") {
+      return false;
+    }
+    if (row.pipeline_category === "data_quality") {
       return false;
     }
 
@@ -276,6 +316,17 @@ export async function loadOutboundOpportunityTargets(input: {
 
       const daysSinceBooking = computeDaysSinceBooking(bookingRow);
 
+      const eff = effectiveOpportunityTruth({
+        recognized_opportunity: row.recognized_opportunity,
+        pipeline_category: row.pipeline_category ?? null,
+        counts_toward_pipeline: row.counts_toward_pipeline ?? null,
+        revenue_review_required: row.revenue_review_required ?? null,
+        offer_key: row.offer_key ?? null,
+        estimated_revenue_cents: row.estimated_revenue_cents,
+      });
+      const knownPipelineContributionCents =
+        knownPipelineDollarsFromTruth(eff);
+
       const ai = buildCloseOsAiRecommendation({
         opportunity: {
           id: row.id,
@@ -284,7 +335,7 @@ export async function loadOutboundOpportunityTargets(input: {
           opportunity_type: row.opportunity_type,
           source: row.source,
           confidence: row.confidence,
-          estimated_revenue_cents: row.estimated_revenue_cents,
+          estimated_revenue_cents: eff.storedEstimatedCents,
           signal_summary: row.signal_summary,
           next_best_action: row.next_best_action,
           reply_handling_goal: row.reply_handling_goal,
@@ -336,7 +387,7 @@ export async function loadOutboundOpportunityTargets(input: {
         targetScore: row.priority,
         confidence: row.confidence,
         opportunityType: row.opportunity_type,
-        estimatedRevenueCents: row.estimated_revenue_cents,
+        estimatedRevenueCents: eff.storedEstimatedCents,
         playbook: row.playbook,
         status: row.status,
 
@@ -362,6 +413,12 @@ export async function loadOutboundOpportunityTargets(input: {
         bookingStatus: bookingRow?.status ?? null,
         bookingTitle: bookingRow?.title ?? null,
         daysSinceBooking,
+
+        revenueReviewRequired: eff.revenueReviewRequired,
+        countsTowardPipeline: eff.countsTowardPipeline,
+        pipelineCategory: eff.pipelineCategory,
+        offerKey: eff.offerKey,
+        knownPipelineContributionCents,
       };
       return target;
     })

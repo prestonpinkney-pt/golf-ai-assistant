@@ -45,7 +45,7 @@ export function LoginForm() {
   return (
     <form className="mt-6 space-y-4" onSubmit={onSubmit}>
       <div>
-        <label htmlFor="email" className="block text-xs font-medium text-slate-700">
+        <label htmlFor="email" className="block text-xs font-semibold text-slate-700">
           Email
         </label>
         <input
@@ -56,11 +56,11 @@ export function LoginForm() {
           required
           value={email}
           onChange={(e) => setEmail(e.target.value)}
-          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none ring-slate-400 focus:ring-2"
+          className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm outline-none ring-emerald-500 transition focus:border-emerald-500 focus:ring-2"
         />
       </div>
       <div>
-        <label htmlFor="password" className="block text-xs font-medium text-slate-700">
+        <label htmlFor="password" className="block text-xs font-semibold text-slate-700">
           Password
         </label>
         <input
@@ -71,7 +71,7 @@ export function LoginForm() {
           required
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm outline-none ring-slate-400 focus:ring-2"
+          className="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2.5 text-sm outline-none ring-emerald-500 transition focus:border-emerald-500 focus:ring-2"
         />
       </div>
       {error ? (
@@ -82,7 +82,7 @@ export function LoginForm() {
       <button
         type="submit"
         disabled={loading}
-        className="w-full rounded-lg bg-slate-900 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-50"
+        className="w-full rounded-xl bg-emerald-600 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700 disabled:opacity-50"
       >
         {loading ? "Signing in…" : "Sign in"}
       </button>

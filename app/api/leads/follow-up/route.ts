@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import OpenAI from "openai";
 import { supabaseAdmin } from "@/lib/supabase/admin";
+import { gateBusinessUserOrCron } from "../../lib/require-auth";
 import { fetchLeadById } from "../_shared";
 
 const openai = new OpenAI({
@@ -8,6 +9,9 @@ const openai = new OpenAI({
 });
 
 export async function POST(req: Request) {
+  const denied = await gateBusinessUserOrCron(req);
+  if (denied) return denied;
+
   try {
     const body = await req.json();
     const { id } = body;

@@ -3,6 +3,7 @@ import { type NextRequest, NextResponse } from "next/server";
 import { gateBusinessUserOrCron } from "../../../lib/require-auth";
 import { decryptToken } from "@/lib/square-token-crypto";
 import { BUSINESS_ID } from "../../../config";
+import { truthFieldsForDb } from "../../../lib/closeos-opportunity-truth";
 
 const PRIMETIME_GOLF_BUSINESS_ID = BUSINESS_ID;
 const SQUARE_VERSION = "2025-01-23";
@@ -172,6 +173,10 @@ type AiOpportunityWriteRow = {
   priority: number;
   confidence: number;
   estimated_revenue_cents: number;
+  offer_key: string | null;
+  revenue_review_required: boolean;
+  counts_toward_pipeline: boolean;
+  pipeline_category: string;
   signal_summary: string;
   next_best_action: string;
   reply_handling_goal: string;
@@ -1062,6 +1067,7 @@ async function upsertOpenOpportunities(input: {
   let skippedActive = 0;
 
   for (const opportunity of input.opportunities) {
+    const truth = truthFieldsForDb(opportunity.recognized_opportunity);
     const { data: existingRows, error: existingError } = await supabase
       .from("ai_opportunities")
       .select("id, status")
@@ -1088,7 +1094,7 @@ async function upsertOpenOpportunities(input: {
         .update({
           confidence: opportunity.confidence,
           priority: opportunity.priority,
-          estimated_revenue_cents: opportunity.estimated_revenue_cents,
+          ...truth,
           signal_summary: opportunity.signal_summary,
           next_best_action: opportunity.next_best_action,
           reply_handling_goal: opportunity.reply_handling_goal,
@@ -1114,7 +1120,7 @@ async function upsertOpenOpportunities(input: {
           targeting_profile_id: opportunity.targeting_profile_id,
           priority: opportunity.priority,
           confidence: opportunity.confidence,
-          estimated_revenue_cents: opportunity.estimated_revenue_cents,
+          ...truth,
           signal_summary: opportunity.signal_summary,
           next_best_action: opportunity.next_best_action,
           reply_handling_goal: opportunity.reply_handling_goal,
@@ -1722,26 +1728,34 @@ const squareCustomersById = await fetchSquareCustomersByIds(
       const now = new Date().toISOString();
 
       const opportunityRows: AiOpportunityWriteRow[] = targetingRows.map(
-        (row) => ({
-          business_id: PRIMETIME_GOLF_BUSINESS_ID,
-          customer_profile_id: row.customer_profile_id,
-          targeting_profile_id:
-            targetingIdByCustomerProfileId.get(row.customer_profile_id) ?? null,
-          recognized_opportunity: row.recognized_opportunity,
-          opportunity_type: row.opportunity_type,
-          playbook: row.recommended_playbook,
-          status: "open",
-          priority: row.target_score,
-          confidence: row.confidence,
-          estimated_revenue_cents: row.estimated_revenue_cents,
-          signal_summary: row.opportunity_signal_summary,
-          next_best_action: row.next_best_action,
-          reply_handling_goal: row.reply_handling_goal,
-          recommended_message: row.recommended_message,
-          source: "closeos",
-          last_evaluated_at: now,
-          updated_at: now,
-        })
+        (row) => {
+          const truth = truthFieldsForDb(row.recognized_opportunity);
+          return {
+            business_id: PRIMETIME_GOLF_BUSINESS_ID,
+            customer_profile_id: row.customer_profile_id,
+            targeting_profile_id:
+              targetingIdByCustomerProfileId.get(row.customer_profile_id) ??
+              null,
+            recognized_opportunity: row.recognized_opportunity,
+            opportunity_type: row.opportunity_type,
+            playbook: row.recommended_playbook,
+            status: "open",
+            priority: row.target_score,
+            confidence: row.confidence,
+            estimated_revenue_cents: truth.estimated_revenue_cents,
+            offer_key: truth.offer_key,
+            revenue_review_required: truth.revenue_review_required,
+            counts_toward_pipeline: truth.counts_toward_pipeline,
+            pipeline_category: truth.pipeline_category,
+            signal_summary: row.opportunity_signal_summary,
+            next_best_action: row.next_best_action,
+            reply_handling_goal: row.reply_handling_goal,
+            recommended_message: row.recommended_message,
+            source: "closeos",
+            last_evaluated_at: now,
+            updated_at: now,
+          };
+        }
       );
 
       const opportunityResult = await upsertOpenOpportunities({

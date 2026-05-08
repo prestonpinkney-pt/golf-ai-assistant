@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 import { BUSINESS_ID } from "../../../config";
+import { truthFieldsForDb } from "../../../lib/closeos-opportunity-truth";
 import { gateBusinessUser } from "../../../lib/require-auth";
 
 type MailchimpMember = {
@@ -601,6 +602,7 @@ async function upsertMailchimpOpportunity(input: {
 }) {
   const supabase = input.supabase as any;
   const now = new Date().toISOString();
+  const truth = truthFieldsForDb(input.opportunity.recognizedOpportunity);
 
   const { data: existingRows, error: existingError } = await supabase
     .from("ai_opportunities")
@@ -628,7 +630,7 @@ async function upsertMailchimpOpportunity(input: {
       .update({
         priority: input.opportunity.priority,
         confidence: input.opportunity.confidence,
-        estimated_revenue_cents: input.opportunity.estimatedRevenueCents,
+        ...truth,
         signal_summary: input.opportunity.signalSummary,
         next_best_action: input.opportunity.nextBestAction,
         reply_handling_goal: input.opportunity.replyHandlingGoal,
@@ -652,7 +654,7 @@ async function upsertMailchimpOpportunity(input: {
       .update({
         priority: input.opportunity.priority,
         confidence: input.opportunity.confidence,
-        estimated_revenue_cents: input.opportunity.estimatedRevenueCents,
+        ...truth,
         signal_summary: input.opportunity.signalSummary,
         next_best_action: input.opportunity.nextBestAction,
         reply_handling_goal: input.opportunity.replyHandlingGoal,
@@ -682,7 +684,7 @@ async function upsertMailchimpOpportunity(input: {
     status: "open",
     priority: input.opportunity.priority,
     confidence: input.opportunity.confidence,
-    estimated_revenue_cents: input.opportunity.estimatedRevenueCents,
+    ...truth,
     signal_summary: input.opportunity.signalSummary,
     next_best_action: input.opportunity.nextBestAction,
     reply_handling_goal: input.opportunity.replyHandlingGoal,

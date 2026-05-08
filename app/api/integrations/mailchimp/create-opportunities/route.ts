@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
 import { BUSINESS_ID } from "../../../config";
+import { truthFieldsForDb } from "../../../lib/closeos-opportunity-truth";
 import { gateBusinessUser } from "../../../lib/require-auth";
 
 type MailchimpContactRow = {
@@ -282,6 +283,7 @@ async function upsertOpportunity(input: {
   opportunity: LeadOpportunity;
 }) {
   const now = new Date().toISOString();
+  const truth = truthFieldsForDb(input.opportunity.recognizedOpportunity);
 
   const { data: existingRows, error: existingError } = await input.supabase
     .from("ai_opportunities")
@@ -301,13 +303,38 @@ async function upsertOpportunity(input: {
     | { id: string; status: string }
     | undefined;
 
+  if (existing?.status === "launched" || existing?.status === "replied") {
+    // Once a Mailchimp opportunity has been launched or replied to, freeze the
+    // sent copy: only refresh metadata, never overwrite recommended_message or
+    // sent-copy fields.
+    const { error: refreshError } = await input.supabase
+      .from("ai_opportunities")
+      .update({
+        priority: input.opportunity.priority,
+        confidence: input.opportunity.confidence,
+        ...truth,
+        signal_summary: input.opportunity.signalSummary,
+        next_best_action: input.opportunity.nextBestAction,
+        reply_handling_goal: input.opportunity.replyHandlingGoal,
+        last_evaluated_at: now,
+        updated_at: now,
+      })
+      .eq("id", existing.id);
+
+    if (refreshError) {
+      throw new Error(refreshError.message);
+    }
+
+    return "refreshed";
+  }
+
   if (existing) {
     const { error: updateError } = await input.supabase
       .from("ai_opportunities")
       .update({
         priority: input.opportunity.priority,
         confidence: input.opportunity.confidence,
-        estimated_revenue_cents: input.opportunity.estimatedRevenueCents,
+        ...truth,
         signal_summary: input.opportunity.signalSummary,
         next_best_action: input.opportunity.nextBestAction,
         reply_handling_goal: input.opportunity.replyHandlingGoal,
@@ -337,7 +364,7 @@ async function upsertOpportunity(input: {
       status: "open",
       priority: input.opportunity.priority,
       confidence: input.opportunity.confidence,
-      estimated_revenue_cents: input.opportunity.estimatedRevenueCents,
+      ...truth,
       signal_summary: input.opportunity.signalSummary,
       next_best_action: input.opportunity.nextBestAction,
       reply_handling_goal: input.opportunity.replyHandlingGoal,
@@ -362,25 +389,44 @@ export async function POST() {
 
     const supabase = getSupabaseAdmin() as any;
 
-    const { data, error } = await supabase
-      .from("mailchimp_contacts")
-      .select(
-        "id, mailchimp_member_id, email, phone, first_name, last_name, tags, status, raw_payload"
-      )
-      .eq("business_id", BUSINESS_ID)
-      .limit(2000);
+    const PAGE_SIZE = 500;
+    const MAX_CONTACTS = 5000;
+    const contacts: MailchimpContactRow[] = [];
+    let lastId: string | null = null;
 
-    if (error) {
-      return NextResponse.json(
-        {
-          error: "Failed to load Mailchimp contacts",
-          details: error.message,
-        },
-        { status: 500 }
-      );
+    while (contacts.length < MAX_CONTACTS) {
+      let query = supabase
+        .from("mailchimp_contacts")
+        .select(
+          "id, mailchimp_member_id, email, phone, first_name, last_name, tags, status, raw_payload"
+        )
+        .eq("business_id", BUSINESS_ID)
+        .order("id", { ascending: true })
+        .limit(PAGE_SIZE);
+
+      if (lastId) {
+        query = query.gt("id", lastId);
+      }
+
+      const { data: pageRows, error: pageError } = await query;
+
+      if (pageError) {
+        return NextResponse.json(
+          {
+            error: "Failed to load Mailchimp contacts",
+            details: pageError.message,
+          },
+          { status: 500 }
+        );
+      }
+
+      const rows = (pageRows ?? []) as MailchimpContactRow[];
+      if (rows.length === 0) break;
+
+      contacts.push(...rows);
+      lastId = rows[rows.length - 1].id;
+      if (rows.length < PAGE_SIZE) break;
     }
-
-    const contacts = (data ?? []) as MailchimpContactRow[];
 
     let checked = 0;
     let skippedNoPhone = 0;
@@ -388,6 +434,7 @@ export async function POST() {
     let profilesCreatedOrUpdated = 0;
     let opportunitiesCreated = 0;
     let opportunitiesUpdated = 0;
+    let opportunitiesRefreshed = 0;
 
     for (const contact of contacts) {
       checked += 1;
@@ -459,6 +506,10 @@ export async function POST() {
       if (result === "updated") {
         opportunitiesUpdated += 1;
       }
+
+      if (result === "refreshed") {
+        opportunitiesRefreshed += 1;
+      }
     }
 
     return NextResponse.json({
@@ -470,6 +521,7 @@ export async function POST() {
       profilesCreatedOrUpdated,
       opportunitiesCreated,
       opportunitiesUpdated,
+      opportunitiesRefreshed,
     });
   } catch (error) {
     return NextResponse.json(

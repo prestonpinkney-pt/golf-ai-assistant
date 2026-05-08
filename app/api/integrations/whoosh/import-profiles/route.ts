@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { BUSINESS_ID } from "../../../config";
 import { gateBusinessUser } from "../../../lib/require-auth";
 import { readFile } from "fs/promises";
 import path from "path";
@@ -18,8 +19,6 @@ import {
   syncBookingReservationsFromWhoosh,
   type WhooshCsvRow,
 } from "../../../lib/whoosh-import";
-
-const BUSINESS_ID = "b381c0cc-4786-4032-8b22-5143aeaf3e30";
 
 export const maxDuration = 300;
 
@@ -231,6 +230,7 @@ export async function POST(request: NextRequest) {
     let ambiguous = 0;
     let created = 0;
     let nameOnly = 0;
+    let createFailed = 0;
 
     for (const row of whooshRows) {
       const ext = `csv-row-${row.lineIndex}`;
@@ -287,19 +287,34 @@ export async function POST(request: NextRequest) {
 
       if (row.email || row.phone) {
         const conf = row.email && row.phone ? 85 : row.email ? 75 : 70;
-        const newId = await createWhooshCustomerProfile({
-          supabase,
-          businessId,
-          externalId: ext,
-          whoosh: {
-            firstName: row.firstName,
-            lastName: row.lastName,
-            email: row.email,
-            phone: row.phone,
-            isMember,
-          },
-          confidence: conf,
-        });
+        let newId: string;
+        try {
+          newId = await createWhooshCustomerProfile({
+            supabase,
+            businessId,
+            externalId: ext,
+            whoosh: {
+              firstName: row.firstName,
+              lastName: row.lastName,
+              email: row.email,
+              phone: row.phone,
+              isMember,
+            },
+            confidence: conf,
+          });
+        } catch (err) {
+          createFailed += 1;
+          console.error(
+            `[whoosh/import-profiles] Failed to create profile for row ${row.lineIndex}:`,
+            err instanceof Error ? err.message : err
+          );
+          await updateWhooshMatch(supabase, businessId, ext, {
+            matched_customer_profile_id: null,
+            match_method: "create_failed",
+            match_confidence: null,
+          });
+          continue;
+        }
         created += 1;
         const newProfile: CustomerLite = {
           id: newId,
@@ -365,6 +380,7 @@ export async function POST(request: NextRequest) {
         ambiguous,
         createdNew: created,
         nameOnlyPending: nameOnly,
+        createFailed,
       },
       bookingReservationAttach: bookingStats,
       whooshCustomerBackfill: whooshBackfill,

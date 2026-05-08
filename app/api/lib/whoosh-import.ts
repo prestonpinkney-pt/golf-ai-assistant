@@ -526,6 +526,7 @@ export async function syncBookingReservationsFromWhoosh(input: {
   let attachedNew = 0;
   let repaired = 0;
   let createdFromBooking = 0;
+  let createFailed = 0;
   const now = new Date().toISOString();
   const createdWhooshExternals = new Set<string>();
 
@@ -610,7 +611,12 @@ export async function syncBookingReservationsFromWhoosh(input: {
 
               const phn = normalizeWhooshPhone(w.phone);
               if (phn) phoneToProfile.set(phn, targetId);
-            } catch {
+            } catch (err) {
+              createFailed += 1;
+              console.error(
+                `[whoosh-import] Failed to create profile from booking match (email path) for whoosh ${w.external_id}:`,
+                err instanceof Error ? err.message : err
+              );
               targetId = null;
             }
           }
@@ -660,7 +666,12 @@ export async function syncBookingReservationsFromWhoosh(input: {
                 emailToProfile.set(normalizeWhooshEmail(w.email)!, targetId);
               }
               phoneToProfile.set(bp, targetId);
-            } catch {
+            } catch (err) {
+              createFailed += 1;
+              console.error(
+                `[whoosh-import] Failed to create profile from booking match (phone path) for whoosh ${w.external_id}:`,
+                err instanceof Error ? err.message : err
+              );
               targetId = null;
             }
           }
@@ -692,6 +703,7 @@ export async function syncBookingReservationsFromWhoosh(input: {
     attachedNew,
     repaired,
     createdFromBooking,
+    createFailed,
     totalUpdated: attachedNew + repaired,
   };
 }

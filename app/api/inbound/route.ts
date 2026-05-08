@@ -6,6 +6,42 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
+
+type DbRow = Record<string, unknown>;
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+
+function timingSafeEqualStrings(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let mismatch = 0;
+  for (let i = 0; i < a.length; i++) {
+    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return mismatch === 0;
+}
+
+function getInboundSecret() {
+  return process.env.INTERNAL_API_SECRET || "";
+}
+
+function isAuthorizedInboundRequest(req: Request) {
+  const secret = getInboundSecret();
+  if (!secret) return false;
+
+  const sharedSecret =
+    req.headers.get("x-inbound-api-secret") ||
+    req.headers.get("x-internal-api-secret");
+  if (sharedSecret && timingSafeEqualStrings(sharedSecret, secret)) {
+    return true;
+  }
+
+  const authorization = req.headers.get("authorization");
+  if (!authorization?.startsWith("Bearer ")) return false;
+  return timingSafeEqualStrings(authorization, `Bearer ${secret}`);
+}
+
 function getLessonQualificationTemplate() {
   return {
     profile_type: "lesson",
@@ -235,6 +271,13 @@ function isUninterestedMessage(text: string): boolean {
 }
 
 export async function POST(req: Request) {
+  if (!isAuthorizedInboundRequest(req)) {
+    return NextResponse.json(
+      { success: false, error: "Unauthorized" },
+      { status: 401 }
+    );
+  }
+
   try {
     const body = await req.json();
 
@@ -277,11 +320,13 @@ export async function POST(req: Request) {
     }
 
     // 2. Find existing contact by phone
-    let { data: contact, error: contactLookupError } = await supabase
+    const contactLookupResult = await supabase
       .from("contacts")
       .select("*")
       .eq("phone", phone)
       .maybeSingle();
+    let contact = contactLookupResult.data;
+    const contactLookupError = contactLookupResult.error;
 
     if (contactLookupError) {
       await supabase
@@ -350,57 +395,151 @@ export async function POST(req: Request) {
       );
     }
 
-    // 4. Create lead
-    const { data: lead, error: leadError } = await supabase
-      .from("leads")
-      .insert({
-        contact_id: contact.id,
-        full_name: name || "",
-        phone,
-        message: messageText,
-        source: mappedLeadSource,
-        lead_type: mappedLeadType,
-        status: "new",
-        temperature: "cold",
-        priority: "medium",
-        estimated_value: 0,
-        stage: "new_inquiry",
-        objection_tags: [],
-        engagement_score: 0,
-        conversion_probability: 0,
-        responsiveness_score: 0,
-        value_sensitivity_score: 0,
-        urgency_score: 0,
-        follow_up_count: 0,
-      })
-      .select()
-      .single();
+    // 4. Find existing active conversation first. If one exists, reuse its
+    // lead instead of creating a duplicate lead for every SMS reply.
+    const conversationLookupResult = await supabase
+      .from("conversations")
+      .select("*")
+      .eq("contact_id", contact.id)
+      .in("status", ["new_inquiry", "qualifying", "ready_to_book"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    let conversation = conversationLookupResult.data;
+    const conversationLookupError = conversationLookupResult.error;
 
-    if (leadError || !lead) {
+    if (conversationLookupError) {
       await supabase
         .from("inbound_events")
         .update({
           status: "failed",
-          error_message: leadError?.message || "Lead insert returned null",
-          error_source: "lead_create",
+          error_message: conversationLookupError.message,
+          error_source: "conversation_lookup",
         })
         .eq("id", inboundEvent.id);
 
       return NextResponse.json(
         {
           success: false,
-          error: leadError?.message || "Lead insert returned null",
-          step: "lead_create",
+          error: conversationLookupError.message,
+          step: "conversation_lookup",
         },
         { status: 500 }
       );
     }
 
-    // 5. Create qualification profile
-    const template = getQualificationTemplateByLeadType(mappedLeadType);
+    let lead: DbRow | null = null;
+    let qualificationProfile: DbRow | null = null;
 
-    const { data: qualificationProfile, error: qualificationProfileError } =
-      await supabase
+    if (conversation?.lead_id) {
+      const { data: existingLead, error: existingLeadError } = await supabase
+        .from("leads")
+        .select("*")
+        .eq("id", conversation.lead_id)
+        .maybeSingle();
+
+      if (existingLeadError) {
+        await supabase
+          .from("inbound_events")
+          .update({
+            status: "failed",
+            error_message: existingLeadError.message,
+            error_source: "lead_lookup",
+          })
+          .eq("id", inboundEvent.id);
+
+        return NextResponse.json(
+          {
+            success: false,
+            error: existingLeadError.message,
+            step: "lead_lookup",
+          },
+          { status: 500 }
+        );
+      }
+
+      lead = existingLead;
+
+      if (lead?.id) {
+        const { data: existingQualificationProfile } = await supabase
+          .from("qualification_profiles")
+          .select("*")
+          .eq("lead_id", lead.id)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        qualificationProfile = existingQualificationProfile;
+      }
+    }
+
+    if (!lead) {
+      const { data: newLead, error: leadError } = await supabase
+        .from("leads")
+        .insert({
+          contact_id: contact.id,
+          full_name: name || "",
+          phone,
+          message: messageText,
+          source: mappedLeadSource,
+          lead_type: mappedLeadType,
+          status: "new",
+          temperature: "cold",
+          priority: "medium",
+          estimated_value: 0,
+          stage: "new_inquiry",
+          objection_tags: [],
+          engagement_score: 0,
+          conversion_probability: 0,
+          responsiveness_score: 0,
+          value_sensitivity_score: 0,
+          urgency_score: 0,
+          follow_up_count: 0,
+        })
+        .select()
+        .single();
+
+      if (leadError || !newLead) {
+        await supabase
+          .from("inbound_events")
+          .update({
+            status: "failed",
+            error_message: leadError?.message || "Lead insert returned null",
+            error_source: "lead_create",
+          })
+          .eq("id", inboundEvent.id);
+
+        return NextResponse.json(
+          {
+            success: false,
+            error: leadError?.message || "Lead insert returned null",
+            step: "lead_create",
+          },
+          { status: 500 }
+        );
+      }
+
+      lead = newLead;
+    }
+
+    if (!lead) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Lead is null after lookup/create",
+          step: "lead_final",
+        },
+        { status: 500 }
+      );
+    }
+
+    if (!qualificationProfile) {
+      const template = getQualificationTemplateByLeadType(mappedLeadType);
+
+      const {
+        data: newQualificationProfile,
+        error: qualificationProfileError,
+      } = await supabase
         .from("qualification_profiles")
         .insert({
           lead_id: lead.id,
@@ -418,55 +557,39 @@ export async function POST(req: Request) {
         .select()
         .single();
 
-    if (qualificationProfileError || !qualificationProfile) {
-      await supabase
-        .from("inbound_events")
-        .update({
-          status: "failed",
-          error_message:
-            qualificationProfileError?.message ||
-            "Qualification profile insert returned null",
-          error_source: "qualification_profile_create",
-        })
-        .eq("id", inboundEvent.id);
+      if (qualificationProfileError || !newQualificationProfile) {
+        await supabase
+          .from("inbound_events")
+          .update({
+            status: "failed",
+            error_message:
+              qualificationProfileError?.message ||
+              "Qualification profile insert returned null",
+            error_source: "qualification_profile_create",
+          })
+          .eq("id", inboundEvent.id);
 
-      return NextResponse.json(
-        {
-          success: false,
-          error:
-            qualificationProfileError?.message ||
-            "Qualification profile insert returned null",
-          step: "qualification_profile_create",
-        },
-        { status: 500 }
-      );
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              qualificationProfileError?.message ||
+              "Qualification profile insert returned null",
+            step: "qualification_profile_create",
+          },
+          { status: 500 }
+        );
+      }
+
+      qualificationProfile = newQualificationProfile;
     }
 
-    // 6. Find existing active conversation first
-    let { data: conversation, error: conversationLookupError } = await supabase
-      .from("conversations")
-      .select("*")
-      .eq("contact_id", contact.id)
-      .in("status", ["new_inquiry", "qualifying", "ready_to_book"])
-      .order("created_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (conversationLookupError) {
-      await supabase
-        .from("inbound_events")
-        .update({
-          status: "failed",
-          error_message: conversationLookupError.message,
-          error_source: "conversation_lookup",
-        })
-        .eq("id", inboundEvent.id);
-
+    if (!qualificationProfile) {
       return NextResponse.json(
         {
           success: false,
-          error: conversationLookupError.message,
-          step: "conversation_lookup",
+          error: "Qualification profile is null after lookup/create",
+          step: "qualification_profile_final",
         },
         { status: 500 }
       );
@@ -522,6 +645,13 @@ export async function POST(req: Request) {
         channel: source === "sms" ? "sms" : "web",
         message_text: messageText,
         status: "received",
+        provider: body.provider || null,
+        external_id: body.external_id || null,
+        delivery_status: "received",
+        metadata: {
+          inbound_event_id: inboundEvent.id,
+          raw_payload: body.raw_payload ?? body,
+        },
       })
       .select()
       .single();
@@ -546,6 +676,15 @@ export async function POST(req: Request) {
         { status: 500 }
       );
     }
+
+    const nowIso = new Date().toISOString();
+    await supabase
+      .from("conversations")
+      .update({
+        last_message_at: nowIso,
+        last_inbound_at: nowIso,
+      })
+      .eq("id", conversation.id);
 
     // 8. STOP handling
     if (isOptOutMessage(messageText)) {
@@ -622,15 +761,14 @@ export async function POST(req: Request) {
       .eq("id", inboundEvent.id);
 
     // 12. Trigger AI response
-    let aiResult: any = null;
+    let aiResult: unknown = null;
 
     try {
-      const appUrl = process.env.NEXT_PUBLIC_APP_URL || "http://localhost:3000";
-
-      const aiResponse = await fetch(`${appUrl}/api/ai/respond`, {
+      const aiResponse = await fetch(new URL("/api/ai/respond", req.url), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${getInboundSecret()}`,
         },
         body: JSON.stringify({
           conversation_id: conversation.id,
@@ -638,10 +776,10 @@ export async function POST(req: Request) {
       });
 
       aiResult = await aiResponse.json();
-    } catch (aiError: any) {
+    } catch (aiError: unknown) {
       aiResult = {
         success: false,
-        error: aiError?.message || "AI trigger failed",
+        error: errorMessage(aiError, "AI trigger failed"),
       };
     }
 
@@ -655,11 +793,11 @@ export async function POST(req: Request) {
       message_id: message.id,
       ai_result: aiResult,
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     return NextResponse.json(
       {
         success: false,
-        error: err?.message || "Unknown error",
+        error: errorMessage(err, "Unknown error"),
         step: "catch",
       },
       { status: 500 }

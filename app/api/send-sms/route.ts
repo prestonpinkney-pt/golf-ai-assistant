@@ -1,30 +1,76 @@
 import { NextResponse } from "next/server";
-import { sendSMS } from "../../../lib/twilio";
+import { sendMessage } from "../../../lib/send-message";
+import { gateInternalOrBusinessUser } from "../lib/require-auth";
+
+const MAX_MESSAGE_LENGTH = 1600;
+
+function isLikelyE164Phone(value: unknown): value is string {
+  return typeof value === "string" && /^\+[1-9]\d{7,14}$/.test(value.trim());
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
 
 export async function POST(req: Request) {
+  const denied = await gateInternalOrBusinessUser(req);
+  if (denied) return denied;
+
+  let body: unknown;
   try {
-    const body = await req.json();
-    const { to, message } = body;
+    body = await req.json();
+  } catch {
+    return NextResponse.json(
+      { error: "Invalid JSON body" },
+      { status: 400 }
+    );
+  }
 
-    if (!to || !message) {
-      return NextResponse.json(
-        { error: "to and message are required" },
-        { status: 400 }
-      );
-    }
+  const payload = (body ?? {}) as { to?: unknown; message?: unknown };
+  const to = typeof payload.to === "string" ? payload.to.trim() : "";
+  const message =
+    typeof payload.message === "string" ? payload.message.trim() : "";
 
-    const result = await sendSMS(to, message);
+  if (!isLikelyE164Phone(to)) {
+    return NextResponse.json(
+      { error: "`to` must be an E.164 phone number (e.g. +15551234567)" },
+      { status: 400 }
+    );
+  }
+
+  if (!message) {
+    return NextResponse.json(
+      { error: "`message` is required" },
+      { status: 400 }
+    );
+  }
+
+  if (message.length > MAX_MESSAGE_LENGTH) {
+    return NextResponse.json(
+      { error: `\`message\` must be <= ${MAX_MESSAGE_LENGTH} characters` },
+      { status: 400 }
+    );
+  }
+
+  try {
+    const result = await sendMessage({
+      channel: "sms",
+      to,
+      message,
+    });
 
     return NextResponse.json({
       success: true,
-      sid: result.sid,
+      provider: result.provider,
+      external_id: result.external_id,
+      status: result.status,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("SMS error:", error);
 
     return NextResponse.json(
       {
-        error: error?.message || "Failed to send SMS",
+        error: errorMessage(error, "Failed to send SMS"),
       },
       { status: 500 }
     );

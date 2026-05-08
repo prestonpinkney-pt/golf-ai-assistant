@@ -89,6 +89,7 @@ export async function POST(req: Request) {
         channel: "sms",
         to,
         message: smsBody,
+        name,
       });
 
       console.log("MESSAGE RESPONSE:", smsResult);
