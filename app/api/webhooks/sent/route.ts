@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import {
   generateCloseOSReply,
-  type CloseOSConversationMessage,
 } from "@/lib/ai/closeos-agent";
 import { sendSentMessage, type SentChannel } from "@/lib/messaging/sent";
 import { verifySentdmWebhookAuthenticity } from "@/lib/sentdm-webhook-auth";
