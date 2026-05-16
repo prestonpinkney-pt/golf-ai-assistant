@@ -4,6 +4,7 @@ import {
   type CloseOSConversationMessage,
 } from "@/lib/ai/closeos-agent";
 import { sendSentMessage, type SentChannel } from "@/lib/messaging/sent";
+import { verifySentdmWebhookAuthenticity } from "@/lib/sentdm-webhook-auth";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 
 type SentWebhookBody = Record<string, unknown>;
@@ -249,10 +250,22 @@ async function loadRecentMessages(contactPhone: string) {
 }
 
 export async function POST(req: Request) {
+  const rawBody = await req.text();
+  const verification = verifySentdmWebhookAuthenticity(req.headers, rawBody);
+  if (!verification.ok) {
+    console.warn(
+      `[CloseOS sent webhook] Rejected request: ${verification.reason}`
+    );
+    return NextResponse.json(
+      { ok: false, error: "Unauthorized" },
+      { status: 401 }
+    );
+  }
+
   let payload: SentWebhookBody;
 
   try {
-    payload = (await req.json()) as SentWebhookBody;
+    payload = rawBody ? (JSON.parse(rawBody) as SentWebhookBody) : {};
   } catch {
     return NextResponse.json(
       { ok: false, ignored: true, reason: "invalid_json" },
