@@ -5,6 +5,7 @@ import {
 } from "@/lib/ai/closeos-agent";
 import { sendSentMessage, type SentChannel } from "@/lib/messaging/sent";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
+import { createHmac, timingSafeEqual } from "crypto";
 
 type SentWebhookBody = Record<string, unknown>;
 
@@ -24,6 +25,50 @@ const SUPPORTED_INBOUND_EVENTS = new Set([
   "reply.inbound",
   "reply.received",
 ]);
+
+function timingSafeEqualStrings(a: string, b: string): boolean {
+  const aBuffer = Buffer.from(a);
+  const bBuffer = Buffer.from(b);
+  if (aBuffer.length !== bBuffer.length) return false;
+  return timingSafeEqual(aBuffer, bBuffer);
+}
+
+function verifySentWebhookAuthenticity(
+  req: Request,
+  rawBody: string
+): { ok: true } | { ok: false; reason: string } {
+  const secret = process.env.SENTDM_WEBHOOK_SECRET;
+  if (!secret) {
+    return {
+      ok: false,
+      reason: "SENTDM_WEBHOOK_SECRET is not configured on the server",
+    };
+  }
+
+  const signatureHeader =
+    req.headers.get("x-sentdm-signature") ??
+    req.headers.get("x-sent-dm-signature") ??
+    req.headers.get("x-sent-signature");
+
+  if (signatureHeader) {
+    const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+    const provided = signatureHeader.replace(/^sha256=/i, "").trim();
+    if (timingSafeEqualStrings(expected, provided)) {
+      return { ok: true };
+    }
+    return { ok: false, reason: "Invalid Sent.dm signature" };
+  }
+
+  const sharedHeader =
+    req.headers.get("x-sentdm-secret") ??
+    req.headers.get("x-sent-dm-secret") ??
+    req.headers.get("x-sent-secret");
+  if (sharedHeader && timingSafeEqualStrings(sharedHeader, secret)) {
+    return { ok: true };
+  }
+
+  return { ok: false, reason: "Missing Sent.dm signature" };
+}
 
 function readPath(source: SentWebhookBody, path: string): unknown {
   return path.split(".").reduce<unknown>((current, key) => {
@@ -249,10 +294,17 @@ async function loadRecentMessages(contactPhone: string) {
 }
 
 export async function POST(req: Request) {
+  const rawBody = await req.text();
+  const verification = verifySentWebhookAuthenticity(req, rawBody);
+  if (!verification.ok) {
+    console.warn(`[CloseOS sent webhook] Rejected request: ${verification.reason}`);
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   let payload: SentWebhookBody;
 
   try {
-    payload = (await req.json()) as SentWebhookBody;
+    payload = rawBody ? (JSON.parse(rawBody) as SentWebhookBody) : {};
   } catch {
     return NextResponse.json(
       { ok: false, ignored: true, reason: "invalid_json" },
