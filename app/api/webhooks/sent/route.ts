@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { createHmac, timingSafeEqual } from "crypto";
 import {
   generateCloseOSReply,
   type CloseOSConversationMessage,
@@ -65,6 +66,55 @@ function normalizePhone(value: string | null) {
 function normalizeChannel(value: string | null): SentChannel {
   const normalized = value?.toLowerCase();
   return normalized === "sms" ? "sms" : "rcs";
+}
+
+function timingSafeEqualStrings(a: string, b: string): boolean {
+  const bufA = Buffer.from(a);
+  const bufB = Buffer.from(b);
+  if (bufA.length !== bufB.length) return false;
+  return timingSafeEqual(bufA, bufB);
+}
+
+function getWebhookSecret() {
+  return (
+    process.env.SENTDM_WEBHOOK_SECRET?.trim() ||
+    process.env.SENT_WEBHOOK_SECRET?.trim() ||
+    ""
+  );
+}
+
+function verifySentWebhookAuthenticity(
+  req: Request,
+  rawBody: string
+): { ok: true } | { ok: false; reason: string } {
+  const secret = getWebhookSecret();
+  if (!secret) {
+    return { ok: false, reason: "Sent webhook secret is not configured" };
+  }
+
+  const signatureHeader =
+    req.headers.get("x-sentdm-signature") ??
+    req.headers.get("x-sent-dm-signature") ??
+    req.headers.get("x-sent-signature");
+
+  if (signatureHeader) {
+    const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
+    const provided = signatureHeader.replace(/^sha256=/i, "").trim();
+    if (timingSafeEqualStrings(expected, provided)) {
+      return { ok: true };
+    }
+    return { ok: false, reason: "Invalid Sent webhook signature" };
+  }
+
+  const sharedHeader =
+    req.headers.get("x-sentdm-secret") ??
+    req.headers.get("x-sent-dm-secret") ??
+    req.headers.get("x-sent-secret");
+  if (sharedHeader && timingSafeEqualStrings(sharedHeader, secret)) {
+    return { ok: true };
+  }
+
+  return { ok: false, reason: "Missing Sent webhook signature" };
 }
 
 function extractInboundMessage(body: SentWebhookBody) {
@@ -249,10 +299,17 @@ async function loadRecentMessages(contactPhone: string) {
 }
 
 export async function POST(req: Request) {
+  const rawBody = await req.text();
+  const verification = verifySentWebhookAuthenticity(req, rawBody);
+  if (!verification.ok) {
+    console.warn(`[CloseOS sent webhook] Rejected request: ${verification.reason}`);
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
   let payload: SentWebhookBody;
 
   try {
-    payload = (await req.json()) as SentWebhookBody;
+    payload = rawBody ? (JSON.parse(rawBody) as SentWebhookBody) : {};
   } catch {
     return NextResponse.json(
       { ok: false, ignored: true, reason: "invalid_json" },
