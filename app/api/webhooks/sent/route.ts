@@ -1,9 +1,6 @@
 import { NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "crypto";
-import {
-  generateCloseOSReply,
-  type CloseOSConversationMessage,
-} from "@/lib/ai/closeos-agent";
+import { generateCloseOSReply } from "@/lib/ai/closeos-agent";
 import { sendSentMessage, type SentChannel } from "@/lib/messaging/sent";
 import { createSupabaseServiceClient } from "@/lib/supabase/server";
 

@@ -202,11 +202,13 @@ export async function POST(req: Request) {
       failedCount,
       cutoff: dueBeforeIso,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Run due follow-ups error:", error);
+    const message =
+      error instanceof Error ? error.message : "Failed to run due follow-ups";
 
     return NextResponse.json(
-      { error: error?.message || "Failed to run due follow-ups" },
+      { error: message },
       { status: 500 }
     );
   }

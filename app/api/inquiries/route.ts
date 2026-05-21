@@ -14,7 +14,7 @@ function readInquiries() {
   return JSON.parse(fileData);
 }
 
-function writeInquiries(data: any) {
+function writeInquiries(data: unknown) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
@@ -31,7 +31,7 @@ export async function GET() {
   try {
     const inquiries = readInquiries();
     return NextResponse.json(inquiries);
-  } catch (error) {
+  } catch {
     return NextResponse.json(
       { error: "Failed to load inquiries" },
       { status: 500 }
@@ -92,7 +92,7 @@ export async function POST(req: Request) {
     writeInquiries(inquiries);
 
     return NextResponse.json(newInquiry);
-  } catch (error) {
+  } catch {
     return NextResponse.json(
       { error: "Failed to save inquiry" },
       { status: 500 }
