@@ -68,18 +68,30 @@ export async function POST(req: Request) {
       );
     }
 
-    const to =
-      process.env.CLOSEOS_LEAD_DEFAULT_TO_PHONE?.trim() ||
-      phone.trim();
+    const to = process.env.CLOSEOS_LEAD_DEFAULT_TO_PHONE?.trim();
+
+    if (!to) {
+      console.warn(
+        "[leads/save] Lead saved but SMS skipped: CLOSEOS_LEAD_DEFAULT_TO_PHONE is not configured"
+      );
+      return NextResponse.json({
+        success: true,
+        message: "Lead saved; SMS skipped because no lead notification phone is configured",
+        lead,
+        smsSkippedReason: "missing_configured_destination",
+      });
+    }
 
     if (!isLikelyE164Phone(to)) {
-      return NextResponse.json(
-        {
-          error:
-            "Invalid destination phone format. Expected E.164 format (example: +15551234567).",
-        },
-        { status: 400 }
+      console.error(
+        "[leads/save] Lead saved but SMS skipped: CLOSEOS_LEAD_DEFAULT_TO_PHONE is not E.164"
       );
+      return NextResponse.json({
+        success: true,
+        message: "Lead saved; SMS skipped because the configured destination phone is invalid",
+        lead,
+        smsSkippedReason: "invalid_configured_destination",
+      });
     }
 
     const smsBody = `Hey ${name}, thanks for reaching out to Primetime Golf. Got your inquiry and I’d be happy to help get you booked. What day are you looking to come in?`;
