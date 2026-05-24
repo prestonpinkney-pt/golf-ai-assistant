@@ -7,7 +7,11 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "lint:hardcoded": "node scripts/check-hardcoded-runtime-values.mjs"
+    "lint:hardcoded": "node scripts/check-hardcoded-runtime-values.mjs",
+    "test:sentdm": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/sentdm/**/*.test.ts",
+    "test:webhook": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/sentdm/webhook-queue.test.ts lib/sentdm/sentdm-inbound-eligibility.test.ts && node --import ./tests/stub-server-only.cjs --import ./tests/inbound-integration-preload.mjs --import tsx --test --experimental-test-module-mocks lib/sentdm/inbound-loop-integration.test.ts",
+    "test:booking": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/ai/sms-booking-flow.test.ts lib/sentdm/inbound-sms-booking-phase.test.ts",
+    "test:revenue-recovery": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/revenue-recovery/*.test.ts 2>nul || node --import ./tests/stub-server-only.cjs --import tsx --test lib/payments/process-square-booking-payment-hold.test.ts"
   },
   "dependencies": {
     "@supabase/ssr": "^0.6.1",
