@@ -369,7 +369,6 @@ export async function POST(req: Request) {
           to: contact.phone.trim(),
           message: responseText,
           name: contact.name,
-          businessName: businessConfig.name,
         });
         sendStatus = smsResult.status || "queued";
         providerMessageId = smsResult.external_id;

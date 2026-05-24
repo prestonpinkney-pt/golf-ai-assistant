@@ -1,5 +1,4 @@
 import { NextResponse } from "next/server";
-import { BUSINESS_NAME } from "@/app/api/config";
 import { ApiAuthError, requireBusinessUser } from "@/app/api/lib/require-auth";
 import { conversationAccessibleToBusiness } from "@/lib/conversations/conversation-tenant";
 import { postgrestMissingBusinessIdColumn } from "@/lib/supabase-postgrest-errors";
@@ -197,17 +196,6 @@ export async function POST(
 
     const leadId = (conversation.lead_id as string | null) ?? null;
 
-    const { data: bizRow } = await supabase
-      .from("businesses")
-      .select("name")
-      .eq("id", businessId)
-      .maybeSingle();
-    const rawBizName = (bizRow as { name?: string | null } | null)?.name;
-    const businessName =
-      typeof rawBizName === "string" && rawBizName.trim()
-        ? rawBizName.trim()
-        : BUSINESS_NAME;
-
     const { data: outboundMessage, error: insertError } = await supabase
       .from("messages")
       .insert({
@@ -243,7 +231,6 @@ export async function POST(
         to: toPhone,
         message: messageText,
         name: typeof contact.name === "string" ? contact.name : null,
-        businessName,
       });
 
       const sendStatus = result.status || "queued";

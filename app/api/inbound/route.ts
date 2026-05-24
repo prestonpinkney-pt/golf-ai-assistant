@@ -365,7 +365,6 @@ async function saveAndSendAutomatedReply(input: {
         to: contactPhone.trim(),
         message: input.text,
         name: typeof input.contact.name === "string" ? input.contact.name : null,
-        businessName: input.businessName,
       });
       sendStatus = result.status || "queued";
       providerMessageId = result.external_id;

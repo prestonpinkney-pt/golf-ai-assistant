@@ -1,4 +1,3 @@
-import { BUSINESS_NAME } from "@/app/api/config";
 import { ApiAuthError, requireBusinessUser } from "@/app/api/lib/require-auth";
 import { refreshCampaignRollup } from "@/lib/campaigns/rollup";
 import {
@@ -57,17 +56,6 @@ export async function POST(
       : null;
 
   const supabase = createSupabaseServiceRoleClient();
-
-  const { data: bizRow } = await supabase
-    .from("businesses")
-    .select("name")
-    .eq("id", businessId)
-    .maybeSingle();
-  const rawBizName = (bizRow as { name?: string | null } | null)?.name;
-  const businessName =
-    typeof rawBizName === "string" && rawBizName.trim()
-      ? rawBizName.trim()
-      : BUSINESS_NAME;
 
   const { data: campaign, error: cErr } = await supabase
     .from("campaigns")
@@ -387,7 +375,6 @@ export async function POST(
         to: toPhone,
         message: messageText,
         name: displayName,
-        businessName,
       });
 
       const sendStatus = result.status || "queued";
