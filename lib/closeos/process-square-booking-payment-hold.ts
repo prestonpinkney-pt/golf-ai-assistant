@@ -188,7 +188,6 @@ async function sendOutboundSmsPreferringContact(
       to: phone.trim(),
       message: message.trim(),
       name,
-      businessName: process.env.CLOSEOS_BUSINESS_SMS_DISPLAY_NAME?.trim() ?? null,
     });
     return true;
   } catch (e: unknown) {
