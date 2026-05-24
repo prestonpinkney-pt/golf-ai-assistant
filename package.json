@@ -14,7 +14,9 @@
     "test:booking": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/ai/sms-booking-flow.test.ts lib/sentdm/inbound-sms-booking-phase.test.ts",
     "test:revenue-recovery": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/payments/process-square-booking-payment-hold.test.ts",
     "test:ci": "npm run test:sentdm && npm run test:webhook && npm run test:booking && npm run test:revenue-recovery",
-    "verify:messaging-env": "node scripts/verify-messaging-env.mjs"
+    "verify:messaging-env": "node scripts/verify-messaging-env.mjs",
+    "sync:square-customers": "node --import tsx scripts/sync-square-customers.mjs",
+    "check:revenue-recovery": "node --import tsx scripts/check-revenue-recovery-reachability.mjs"
   },
   "dependencies": {
     "@supabase/ssr": "^0.6.1",

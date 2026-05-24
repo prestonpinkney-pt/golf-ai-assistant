@@ -153,6 +153,18 @@ export default async function SettingsPage() {
             API keys stay on the server — not in the browser or in webhook URLs.
           </p>
         </div>
+        <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-600">
+            Production onboarding
+          </p>
+          <p className="mt-2 text-sm leading-relaxed text-slate-600">
+            Migrations, env verification, Square sync, and Sent.dm webhook setup: see{" "}
+            <code className="rounded bg-slate-50 px-1.5 py-0.5 text-xs">
+              docs/closeos-operator-runbook.md
+            </code>{" "}
+            in the repository (no secrets in git).
+          </p>
+        </div>
       </section>
 
       <MessagingConfigForm initialConfig={initialConfig} />
