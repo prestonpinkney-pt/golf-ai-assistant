@@ -19,7 +19,9 @@ export async function sendMessage(input: {
   to: string;
   message: string;
   name?: string | null;
+  businessName?: string | null;
   templateId?: string;
+  idempotencyKey?: string;
 }): Promise<SendMessageResult> {
   const { channel, to, message, name, templateId } = input;
   const apiKey = process.env.SENT_DM_API_KEY;

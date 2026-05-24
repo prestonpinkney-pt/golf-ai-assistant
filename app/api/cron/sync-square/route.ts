@@ -1,30 +1,35 @@
-import { NextResponse } from "next/server";
+import { NextResponse, type NextRequest } from "next/server";
+import { gateCron } from "../../lib/require-auth";
+import { postCronInternalApi } from "@/lib/square/cron-internal-fetch";
 
-export async function GET(request: Request) {
-  const authHeader = request.headers.get("authorization");
-  const cronSecret = process.env.CRON_SECRET;
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
-  if (!cronSecret || authHeader !== `Bearer ${cronSecret}`) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+/**
+ * Legacy cron alias — runs Square customer directory sync (not legacy sync-customers).
+ * Prefer /api/cron/square-customer-directory for daily identity enrichment.
+ */
+export async function GET(request: NextRequest) {
+  const denied = gateCron(request);
+  if (denied) return denied;
+
+  try {
+    const directory = await postCronInternalApi(
+      "/api/integrations/square/sync-customer-directory"
+    );
+
+    return NextResponse.json({
+      success: directory.ok,
+      sync: directory.data,
+    });
+  } catch (error) {
+    console.error("[cron/sync-square]", error);
+    return NextResponse.json(
+      {
+        error: "Square directory cron failed",
+        details: error instanceof Error ? error.message : "Unknown error",
+      },
+      { status: 500 }
+    );
   }
-
-  const baseUrl =
-    process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
-
-  const response = await fetch(
-    `${baseUrl}/api/integrations/square/sync-customers`,
-    {
-      method: "POST",
-      headers: cronSecret
-        ? { Authorization: `Bearer ${cronSecret}` }
-        : undefined,
-    }
-  );
-
-  const data = await response.json();
-
-  return NextResponse.json({
-    success: response.ok,
-    sync: data,
-  });
 }

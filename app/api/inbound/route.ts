@@ -1,5 +1,11 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { logMessagingAudit } from "@/lib/messaging/audit";
+import { isInboundQuietHoursActive } from "@/lib/messaging/quiet-hours";
+import { resolveBusinessMessagingConfigFromDb, getHelpResponseForConfig, getOptInAcknowledgementForConfig } from "@/lib/business-messaging-config";
+import { postgrestMissingBusinessIdColumn } from "@/lib/supabase-postgrest-errors";
+import { getResolvedMessagingProvider } from "@/lib/messaging/provider-resolve";
+import { sendMessage } from "@/lib/send-message";
 
 
 const supabase = createClient(
@@ -251,8 +257,38 @@ function mapLeadType(message?: string): string {
 
 function isOptOutMessage(text: string): boolean {
   const normalized = text.trim().toLowerCase();
-  const stopWords = ["stop", "stop all", "unsubscribe", "cancel", "end", "quit"];
+  const stopWords = [
+    "stop",
+    "stop all",
+    "unsubscribe",
+    "cancel",
+    "end",
+    "quit",
+    "spam",
+  ];
   return stopWords.includes(normalized);
+}
+
+/** TCPA-style opt-in keywords (carrier resubscribe). */
+function isOptInMessage(text: string): boolean {
+  const normalized = text.trim().toLowerCase();
+  return (
+    normalized === "start" ||
+    normalized === "unstop" ||
+    normalized === "subscribe"
+  );
+}
+
+function isHumanHelpMessage(text: string): boolean {
+  return /\b(help|agent|support|person|human)\b/i.test(text.trim());
+}
+
+function isMenuMessage(text: string): boolean {
+  return /\b(menu|list|options|settings|preferences)\b/i.test(text.trim());
+}
+
+function isLikelyE164Phone(value: unknown): value is string {
+  return typeof value === "string" && /^\+[1-9]\d{7,14}$/.test(value.trim());
 }
 
 function isUninterestedMessage(text: string): boolean {
@@ -270,6 +306,134 @@ function isUninterestedMessage(text: string): boolean {
   return uninterestedPhrases.some((phrase) => normalized.includes(phrase));
 }
 
+async function saveAndSendAutomatedReply(input: {
+  conversation: DbRow;
+  contact: DbRow;
+  lead: DbRow;
+  inboundMessage: DbRow;
+  text: string;
+  businessName?: string | null;
+  escalationRequired?: boolean;
+  escalationReason?: string | null;
+  intent: string;
+}) {
+  const contactPhone = typeof input.contact.phone === "string" ? input.contact.phone : "";
+  const channel =
+    typeof input.inboundMessage.channel === "string" ? input.inboundMessage.channel : "web";
+  const shouldSend = channel === "sms" && isLikelyE164Phone(contactPhone);
+  const initialStatus = shouldSend ? "pending_send" : "needs_human";
+
+  const { data: outboundMessage, error: outboundError } = await supabase
+    .from("messages")
+    .insert({
+      conversation_id: input.conversation.id,
+      contact_id: input.contact.id,
+      lead_id: input.lead.id,
+      direction: "outbound",
+      channel,
+      message_text: input.text,
+      status: initialStatus,
+      delivery_status: "not_sent",
+      ai_generated: false,
+      intent: input.intent,
+      escalation_required: input.escalationRequired === true,
+      escalation_reason: input.escalationReason ?? null,
+      metadata: {
+        automated_control_reply: true,
+        inbound_message_id: input.inboundMessage.id,
+      },
+    })
+    .select()
+    .single();
+
+  if (outboundError || !outboundMessage) {
+    return {
+      success: false,
+      error: outboundError?.message || "Automated reply insert failed",
+      status: 500,
+    };
+  }
+
+  let sendStatus = initialStatus;
+  let providerMessageId: string | null = null;
+  let sendError: string | null = null;
+
+  if (shouldSend) {
+    try {
+      const result = await sendMessage({
+        channel: "sms",
+        to: contactPhone.trim(),
+        message: input.text,
+        name: typeof input.contact.name === "string" ? input.contact.name : null,
+        businessName: input.businessName,
+      });
+      sendStatus = result.status || "queued";
+      providerMessageId = result.external_id;
+
+      const { error: updateError } = await supabase
+        .from("messages")
+        .update({
+          status: sendStatus,
+          provider: result.provider,
+          external_id: providerMessageId,
+          provider_message_id: providerMessageId,
+          delivery_status: sendStatus,
+          sent_at: new Date().toISOString(),
+        })
+        .eq("id", outboundMessage.id);
+
+      if (updateError) sendError = updateError.message;
+    } catch (error: unknown) {
+      sendStatus = "failed";
+      sendError = errorMessage(error, "Automated reply send failed");
+
+      await supabase
+        .from("messages")
+        .update({
+          status: sendStatus,
+          delivery_status: "failed",
+          metadata: {
+            automated_control_reply: true,
+            inbound_message_id: input.inboundMessage.id,
+            send_error: sendError,
+          },
+        })
+        .eq("id", outboundMessage.id);
+
+      await logMessagingAudit(supabase, {
+        event_type: "messaging_provider_send_failed",
+        entity_type: "message",
+        entity_id: outboundMessage.id as string,
+        metadata: {
+          intent: input.intent,
+          provider: getResolvedMessagingProvider(),
+          error: sendError,
+          conversation_id: input.conversation.id,
+        },
+      });
+    }
+  }
+
+  await supabase
+    .from("conversations")
+    .update({
+      last_message_at: new Date().toISOString(),
+      last_outbound_at: new Date().toISOString(),
+      needs_human: input.escalationRequired === true,
+      human_reason: input.escalationReason ?? null,
+    })
+    .eq("id", input.conversation.id);
+
+  return {
+    success: true,
+    outbound_message_id: outboundMessage.id,
+    send_status: sendStatus,
+    provider_message_id: providerMessageId,
+    send_error: sendError,
+    status: 200,
+  };
+}
+
 export async function POST(req: Request) {
   if (!isAuthorizedInboundRequest(req)) {
     return NextResponse.json(
@@ -285,6 +449,19 @@ export async function POST(req: Request) {
     const name = body.name || null;
     const source = body.source || "website";
     const messageText = body.message || "";
+    const destinationNumber =
+      body.to ||
+      body.to_number ||
+      body.destination ||
+      body.destination_phone ||
+      body.raw_payload?.to ||
+      body.raw_payload?.to_number ||
+      null;
+    const businessConfig = await resolveBusinessMessagingConfigFromDb(supabase, {
+      businessId: body.business_id,
+      businessSlug: body.business_slug,
+      toNumber: destinationNumber,
+    });
 
     if (!phone) {
       return NextResponse.json(
@@ -301,7 +478,16 @@ export async function POST(req: Request) {
       .from("inbound_events")
       .insert({
         source,
-        raw_payload: body,
+        raw_payload: {
+          ...body,
+          business_context: {
+            business_id: businessConfig.id,
+            business_slug: businessConfig.slug,
+            business_name: businessConfig.name,
+            assistant_name: businessConfig.assistantName,
+            destination_number: destinationNumber,
+          },
+        },
         status: "received",
         retry_count: 0,
       })
@@ -397,14 +583,26 @@ export async function POST(req: Request) {
 
     // 4. Find existing active conversation first. If one exists, reuse its
     // lead instead of creating a duplicate lead for every SMS reply.
-    const conversationLookupResult = await supabase
-      .from("conversations")
-      .select("*")
-      .eq("contact_id", contact.id)
-      .in("status", ["new_inquiry", "qualifying", "ready_to_book"])
-      .order("created_at", { ascending: false })
-      .limit(1)
+    const conversationBase = () =>
+      supabase
+        .from("conversations")
+        .select("*")
+        .eq("contact_id", contact.id)
+        .in("status", ["new_inquiry", "qualifying", "ready_to_book"])
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+    let conversationLookupResult = await conversationBase()
+      .eq("business_id", businessConfig.id)
       .maybeSingle();
+
+    if (
+      conversationLookupResult.error &&
+      postgrestMissingBusinessIdColumn(conversationLookupResult.error.message)
+    ) {
+      conversationLookupResult = await conversationBase().maybeSingle();
+    }
+
     let conversation = conversationLookupResult.data;
     const conversationLookupError = conversationLookupResult.error;
 
@@ -596,8 +794,24 @@ export async function POST(req: Request) {
     }
 
     if (!conversation) {
-      const { data: newConversation, error: conversationCreateError } =
-        await supabase
+      let conversationCreateResult = await supabase
+        .from("conversations")
+        .insert({
+          contact_id: contact.id,
+          lead_id: lead.id,
+          status: "new_inquiry",
+          business_id: businessConfig.id,
+        })
+        .select()
+        .single();
+
+      if (
+        conversationCreateResult.error &&
+        postgrestMissingBusinessIdColumn(
+          conversationCreateResult.error.message
+        )
+      ) {
+        conversationCreateResult = await supabase
           .from("conversations")
           .insert({
             contact_id: contact.id,
@@ -606,6 +820,10 @@ export async function POST(req: Request) {
           })
           .select()
           .single();
+      }
+
+      const newConversation = conversationCreateResult.data;
+      const conversationCreateError = conversationCreateResult.error;
 
       if (conversationCreateError || !newConversation) {
         await supabase
@@ -650,6 +868,11 @@ export async function POST(req: Request) {
         delivery_status: "received",
         metadata: {
           inbound_event_id: inboundEvent.id,
+          business_id: businessConfig.id,
+          business_slug: businessConfig.slug,
+          business_name: businessConfig.name,
+          assistant_name: businessConfig.assistantName,
+          destination_number: destinationNumber,
           raw_payload: body.raw_payload ?? body,
         },
       })
@@ -686,7 +909,59 @@ export async function POST(req: Request) {
       })
       .eq("id", conversation.id);
 
-    // 8. STOP handling
+    // 8. START / UNSTOP (resubscribe)
+    if (isOptInMessage(messageText)) {
+      await supabase
+        .from("contacts")
+        .update({
+          sms_opt_out: false,
+          sms_opt_out_at: null,
+          sms_opt_out_reason: null,
+        })
+        .eq("id", contact.id);
+
+      await logMessagingAudit(supabase, {
+        event_type: "sms_opt_in_detected",
+        entity_type: "contact",
+        entity_id: contact.id as string,
+        metadata: {
+          message: messageText,
+          conversation_id: conversation.id,
+          inbound_event_id: inboundEvent.id,
+          business_id: businessConfig.id,
+        },
+      });
+
+      const autoReplyResult = await saveAndSendAutomatedReply({
+        conversation,
+        contact,
+        lead,
+        inboundMessage: message,
+        text: getOptInAcknowledgementForConfig(businessConfig),
+        businessName: businessConfig.name,
+        intent: "sms_opt_in",
+      });
+
+      await supabase
+        .from("inbound_events")
+        .update({ status: "processed" })
+        .eq("id", inboundEvent.id);
+
+      return NextResponse.json(
+        {
+          success: autoReplyResult.success,
+          control_reply: "opt_in",
+          contact_id: contact.id,
+          lead_id: lead.id,
+          conversation_id: conversation.id,
+          message_id: message.id,
+          automated_reply: autoReplyResult,
+        },
+        { status: autoReplyResult.status }
+      );
+    }
+
+    // 9. STOP handling
     if (isOptOutMessage(messageText)) {
       await supabase
         .from("contacts")
@@ -707,6 +982,148 @@ export async function POST(req: Request) {
           inbound_event_id: inboundEvent.id,
         },
       });
+
+      const autoReplyResult = await saveAndSendAutomatedReply({
+        conversation,
+        contact,
+        lead,
+        inboundMessage: message,
+        text: businessConfig.optOutResponse,
+        businessName: businessConfig.name,
+        intent: "sms_opt_out",
+      });
+
+      await supabase
+        .from("inbound_events")
+        .update({ status: "processed" })
+        .eq("id", inboundEvent.id);
+
+      return NextResponse.json(
+        {
+          success: autoReplyResult.success,
+          control_reply: "opt_out",
+          contact_id: contact.id,
+          lead_id: lead.id,
+          conversation_id: conversation.id,
+          message_id: message.id,
+          automated_reply: autoReplyResult,
+        },
+        { status: autoReplyResult.status }
+      );
+    }
+
+    // Contacts who have opted out: store the message but do not send HELP/menu/AI auto-replies.
+    if (Boolean(contact.sms_opt_out)) {
+      await logMessagingAudit(supabase, {
+        event_type: "inbound_suppressed_sms_opt_out",
+        entity_type: "contact",
+        entity_id: contact.id as string,
+        metadata: {
+          conversation_id: conversation.id,
+          inbound_event_id: inboundEvent.id,
+          message_id: message.id,
+          business_id: businessConfig.id,
+        },
+      });
+
+      await supabase
+        .from("inbound_events")
+        .update({ status: "processed" })
+        .eq("id", inboundEvent.id);
+
+      return NextResponse.json({
+        success: true,
+        blocked: true,
+        reason: "sms_opt_out_active",
+        contact_id: contact.id,
+        lead_id: lead.id,
+        conversation_id: conversation.id,
+        message_id: message.id,
+      });
+    }
+
+    if (isHumanHelpMessage(messageText)) {
+      const autoReplyResult = await saveAndSendAutomatedReply({
+        conversation,
+        contact,
+        lead,
+        inboundMessage: message,
+        text: getHelpResponseForConfig(businessConfig),
+        businessName: businessConfig.name,
+        escalationRequired: true,
+        escalationReason: "Customer requested a live agent.",
+        intent: "human_help_requested",
+      });
+
+      await supabase.from("audit_logs").insert({
+        event_type: "human_help_requested",
+        entity_type: "conversation",
+        entity_id: conversation.id,
+        metadata: {
+          inbound_event_id: inboundEvent.id,
+          message_id: message.id,
+          business_id: businessConfig.id,
+        },
+      });
+
+      await supabase
+        .from("inbound_events")
+        .update({ status: "processed" })
+        .eq("id", inboundEvent.id);
+
+      return NextResponse.json(
+        {
+          success: autoReplyResult.success,
+          control_reply: "human_help",
+          contact_id: contact.id,
+          lead_id: lead.id,
+          conversation_id: conversation.id,
+          message_id: message.id,
+          automated_reply: autoReplyResult,
+        },
+        { status: autoReplyResult.status }
+      );
+    }
+
+    if (isMenuMessage(messageText)) {
+      const autoReplyResult = await saveAndSendAutomatedReply({
+        conversation,
+        contact,
+        lead,
+        inboundMessage: message,
+        text: businessConfig.menuResponse,
+        businessName: businessConfig.name,
+        intent: "menu_requested",
+      });
+
+      await supabase.from("audit_logs").insert({
+        event_type: "menu_requested",
+        entity_type: "conversation",
+        entity_id: conversation.id,
+        metadata: {
+          inbound_event_id: inboundEvent.id,
+          message_id: message.id,
+          business_id: businessConfig.id,
+        },
+      });
+
+      await supabase
+        .from("inbound_events")
+        .update({ status: "processed" })
+        .eq("id", inboundEvent.id);
+
+      return NextResponse.json(
+        {
+          success: autoReplyResult.success,
+          control_reply: "menu",
+          contact_id: contact.id,
+          lead_id: lead.id,
+          conversation_id: conversation.id,
+          message_id: message.id,
+          automated_reply: autoReplyResult,
+        },
+        { status: autoReplyResult.status }
+      );
     }
 
     // 9. Cooling-off handling
@@ -760,27 +1177,45 @@ export async function POST(req: Request) {
       })
       .eq("id", inboundEvent.id);
 
-    // 12. Trigger AI response
+    // 12. Trigger AI response (skipped during configured quiet hours for SMS)
     let aiResult: unknown = null;
 
-    try {
-      const aiResponse = await fetch(new URL("/api/ai/respond", req.url), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${getInboundSecret()}`,
+    if (source === "sms" && isInboundQuietHoursActive()) {
+      await logMessagingAudit(supabase, {
+        event_type: "quiet_hours_ai_suppressed",
+        entity_type: "conversation",
+        entity_id: conversation.id as string,
+        metadata: {
+          inbound_event_id: inboundEvent.id,
+          message_id: message.id,
+          business_id: businessConfig.id,
         },
-        body: JSON.stringify({
-          conversation_id: conversation.id,
-        }),
       });
-
-      aiResult = await aiResponse.json();
-    } catch (aiError: unknown) {
       aiResult = {
         success: false,
-        error: errorMessage(aiError, "AI trigger failed"),
+        suppressed: true,
+        reason: "quiet_hours",
       };
+    } else {
+      try {
+        const aiResponse = await fetch(new URL("/api/ai/respond", req.url), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${getInboundSecret()}`,
+          },
+          body: JSON.stringify({
+            conversation_id: conversation.id,
+          }),
+        });
+
+        aiResult = await aiResponse.json();
+      } catch (aiError: unknown) {
+        aiResult = {
+          success: false,
+          error: errorMessage(aiError, "AI trigger failed"),
+        };
+      }
     }
 
     return NextResponse.json({

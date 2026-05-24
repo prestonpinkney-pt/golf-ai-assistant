@@ -1,5 +1,17 @@
 This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
 
+## CloseOS operator onboarding
+
+Production setup for Primetime Golf (Supabase migrations, env verification, Square sync, Sent.dm webhooks): see **[docs/closeos-operator-runbook.md](docs/closeos-operator-runbook.md)**.
+
+Quick ops scripts:
+
+```bash
+npm run verify:messaging-env
+npm run sync:square-customers
+npm run check:revenue-recovery
+```
+
 ## Getting Started
 
 First, run the development server:

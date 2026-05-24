@@ -1,381 +1,244 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { createClient } from '@supabase/supabase-js';
-import { createHmac, timingSafeEqual } from 'crypto';
+import { NextRequest, NextResponse, after } from "next/server";
+import { createClient } from "@supabase/supabase-js";
+import { logMessagingAudit } from "@/lib/messaging/audit";
+import { reconcileMessageDeliveryPatch } from "@/lib/messaging/delivery-status-update";
+import {
+  extractSentDmMessageExternalId,
+  isDeliveryFailureStatus,
+  looksLikeInboundMessage,
+  normalizeSentDmStatus,
+  sentDmWebhookSignatureHeaderPresence,
+  verifySentDmAuthenticity,
+} from "@/lib/messaging/sentdm-webhook";
+import { processSentDmWebhookJobFromPending } from "@/lib/sentdm/process-webhook-job";
+import { computeWebhookJobDedupeKey } from "@/lib/sentdm/webhook-job-dedupe";
+import { enqueueSentDmInboundWebhookJob } from "@/lib/sentdm/webhook-queue";
 
 /**
  * CloseOS — Sent.dm Webhook Receiver
  * POST /api/sentdm/webhook
  *
- * Receives delivery-status webhook events from Sent.dm,
- * logs them, stores the raw event in Supabase (webhook_events),
- * and updates messages.delivery_status using external_id.
- *
- * Tables used (existing schema):
- *   - webhook_events   — raw event log
- *   - messages          — canonical conversation messages updated first
- *   - lead_messages     — legacy fallback updated only when messages has no match
+ * Fast-acks Sent.dm: persists raw payload, enqueues inbound work to `webhook_jobs`,
+ * returns 200 immediately; enrich / AI / outbound run in `after()` (+ cron fallback).
  */
 
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? '';
-const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? '';
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? "";
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? "";
 
 function getSupabase() {
   if (!supabaseUrl || !supabaseServiceKey) {
-    throw new Error('Missing Supabase env vars: NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+    throw new Error(
+      "Missing Supabase env vars: NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY"
+    );
   }
   return createClient(supabaseUrl, supabaseServiceKey);
 }
 
-// Map Sent.dm status values to our internal delivery_status values.
-// Extend this map as Sent.dm documents additional statuses.
-const STATUS_MAP: Record<string, string> = {
-  delivered: 'delivered',
-  sent: 'sent',
-  failed: 'failed',
-  bounced: 'bounced',
-  opened: 'opened',
-  clicked: 'clicked',
-  unsubscribed: 'unsubscribed',
-  complained: 'complained',
-  rejected: 'rejected',
-};
-
-function normalizeStatus(raw: string | undefined): string {
-  if (!raw) return 'unknown';
-  const lower = raw.toLowerCase().trim();
-  return STATUS_MAP[lower] ?? lower;
-}
-
-function readPath(source: Record<string, unknown>, path: string): unknown {
-  return path.split('.').reduce<unknown>((current, key) => {
-    if (!current || typeof current !== 'object') return undefined;
-    return (current as Record<string, unknown>)[key];
-  }, source);
-}
-
-function firstString(
-  source: Record<string, unknown>,
-  paths: string[]
-): string | null {
-  for (const path of paths) {
-    const value = readPath(source, path);
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim();
+function scheduleInboundJob(jobId: string) {
+  after(async () => {
+    try {
+      const sb = getSupabase();
+      await processSentDmWebhookJobFromPending(sb, jobId);
+    } catch (err) {
+      console.error("[sentdm/webhook] deferred webhook_jobs processing:", err);
     }
-  }
-  return null;
-}
-
-function normalizePhone(value: string | null): string | null {
-  if (!value) return null;
-  const trimmed = value.trim();
-  if (/^\+[1-9]\d{7,14}$/.test(trimmed)) return trimmed;
-
-  const digits = trimmed.replace(/\D/g, '');
-  if (digits.length === 10) return `+1${digits}`;
-  if (digits.length === 11 && digits.startsWith('1')) return `+${digits}`;
-
-  return trimmed;
-}
-
-function looksLikeInboundMessage(body: Record<string, unknown>) {
-  const direction = firstString(body, [
-    'direction',
-    'message.direction',
-    'data.direction',
-    'payload.direction',
-  ])?.toLowerCase();
-  if (direction === 'inbound' || direction === 'incoming') return true;
-
-  const eventType = firstString(body, ['event', 'type', 'event_type'])
-    ?.toLowerCase()
-    .replace(/[_\s]/g, '.');
-
-  return [
-    'message.inbound',
-    'message.received',
-    'sms.inbound',
-    'sms.received',
-    'reply.received',
-    'reply.inbound',
-  ].includes(eventType ?? '');
-}
-
-async function forwardInboundMessage(
-  req: NextRequest,
-  body: Record<string, unknown>,
-  externalId: string
-) {
-  const secret = process.env.INTERNAL_API_SECRET;
-  if (!secret) {
-    return {
-      ok: false,
-      status: 500,
-      result: { error: 'Missing INTERNAL_API_SECRET' },
-    };
-  }
-
-  const phone = normalizePhone(
-    firstString(body, [
-      'from',
-      'from_number',
-      'fromNumber',
-      'sender',
-      'phone',
-      'msisdn',
-      'message.from',
-      'message.phone',
-      'from.phone',
-      'from.number',
-      'sender.phone',
-      'sender.number',
-      'contact.phone',
-      'contact.msisdn',
-      'data.from',
-      'data.phone',
-      'data.from.phone',
-      'data.from.number',
-      'payload.from',
-      'payload.phone',
-      'payload.from.phone',
-      'payload.from.number',
-    ])
-  );
-  const message = firstString(body, [
-    'text',
-    'body',
-    'content',
-    'message',
-    'message.text',
-    'message.body',
-    'message.content',
-    'data.text',
-    'data.body',
-    'data.message',
-    'data.message.text',
-    'data.message.body',
-    'data.content',
-    'payload.text',
-    'payload.body',
-    'payload.message',
-    'payload.message.text',
-    'payload.message.body',
-    'payload.content',
-  ]);
-  const name = firstString(body, [
-    'name',
-    'sender_name',
-    'contact.name',
-    'message.name',
-    'data.name',
-    'payload.name',
-  ]);
-
-  if (!phone || !message) {
-    return {
-      ok: false,
-      status: 400,
-      result: {
-        error: 'Inbound Sent.dm webhook missing phone or message text',
-        phone_found: Boolean(phone),
-        message_found: Boolean(message),
-      },
-    };
-  }
-
-  const inboundUrl = new URL('/api/inbound', req.url);
-  const response = await fetch(inboundUrl, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${secret}`,
-    },
-    body: JSON.stringify({
-      phone,
-      name,
-      source: 'sms',
-      message,
-      provider: 'sentdm',
-      external_id: externalId || null,
-      raw_payload: body,
-    }),
   });
-
-  const result = await response.json().catch(() => ({}));
-  return {
-    ok: response.ok,
-    status: response.status,
-    result,
-  };
-}
-
-function timingSafeEqualStrings(a: string, b: string): boolean {
-  const bufA = Buffer.from(a);
-  const bufB = Buffer.from(b);
-  if (bufA.length !== bufB.length) return false;
-  return timingSafeEqual(bufA, bufB);
-}
-
-/**
- * Validates the Sent.dm webhook authenticity. Supports either:
- *   - HMAC SHA256 signature in `x-sentdm-signature` (hex), keyed by SENTDM_WEBHOOK_SECRET
- *   - Shared secret in `x-sentdm-secret` header equal to SENTDM_WEBHOOK_SECRET
- */
-function verifySentdmAuthenticity(
-  req: NextRequest,
-  rawBody: string
-): { ok: true } | { ok: false; reason: string } {
-  const secret = process.env.SENTDM_WEBHOOK_SECRET;
-  if (!secret) {
-    return {
-      ok: false,
-      reason: 'SENTDM_WEBHOOK_SECRET is not configured on the server',
-    };
-  }
-
-  const signatureHeader =
-    req.headers.get('x-sentdm-signature') ??
-    req.headers.get('x-sent-dm-signature');
-
-  if (signatureHeader) {
-    const expected = createHmac('sha256', secret).update(rawBody).digest('hex');
-    const provided = signatureHeader.replace(/^sha256=/i, '').trim();
-    if (timingSafeEqualStrings(expected, provided)) {
-      return { ok: true };
-    }
-    return { ok: false, reason: 'Invalid Sent.dm signature' };
-  }
-
-  const sharedHeader =
-    req.headers.get('x-sentdm-secret') ?? req.headers.get('x-sent-dm-secret');
-  if (sharedHeader && timingSafeEqualStrings(sharedHeader, secret)) {
-    return { ok: true };
-  }
-
-  return { ok: false, reason: 'Missing Sent.dm signature' };
 }
 
 export async function POST(req: NextRequest) {
   const receivedAt = new Date().toISOString();
 
   const rawBody = await req.text();
+  const headerDiag = sentDmWebhookSignatureHeaderPresence(req);
 
-  const verification = verifySentdmAuthenticity(req, rawBody);
+  const verification = verifySentDmAuthenticity(req, rawBody);
   if (!verification.ok) {
-    console.warn(`[sentdm/webhook] Rejected request: ${verification.reason}`);
-    return NextResponse.json(
-      { error: 'Unauthorized' },
-      { status: 401 }
+    console.warn(
+      `[sentdm/webhook] Rejected: ${verification.reason}; headers_present=`,
+      headerDiag
     );
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
+
+  console.log("[sentdm/webhook] verified=", verification.mode, "headers=", headerDiag);
 
   let body: Record<string, unknown>;
   try {
     body = rawBody ? (JSON.parse(rawBody) as Record<string, unknown>) : {};
   } catch {
-    console.error('[sentdm/webhook] Invalid JSON body');
-    return NextResponse.json(
-      { error: 'Invalid JSON body' },
-      { status: 400 }
-    );
+    console.error("[sentdm/webhook] Invalid JSON body");
+    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
   }
 
-  // ── 2. Extract fields ─────────────────────────────────────────────
-  const eventType = (body.event ?? body.type ?? 'unknown') as string;
-  const externalId = (body.external_id ?? body.externalId ?? body.message_id ?? '') as string;
-  const status = normalizeStatus((body.status ?? body.delivery_status) as string | undefined);
+  const eventType = String(
+    body.sub_type ??
+      body.subtype ??
+      body.event ??
+      body.type ??
+      "unknown"
+  );
+  const externalId = extractSentDmMessageExternalId(body) ?? "";
+  const status = normalizeSentDmStatus(
+    (body.status ?? body.delivery_status) as string | undefined
+  );
   const timestamp = (body.timestamp ?? receivedAt) as string;
 
   console.log(
     `[sentdm/webhook] event=${eventType} external_id=${externalId} status=${status} ts=${timestamp}`
   );
 
-  // ── 3. Validate minimum payload ───────────────────────────────────
   if (!externalId) {
-    console.warn('[sentdm/webhook] Missing external_id — storing event but cannot reconcile delivery status');
+    console.warn(
+      "[sentdm/webhook] Missing external_id — storing event but cannot reconcile delivery status"
+    );
   }
 
-  // ── 4. Store raw event ────────────────────────────────────────────
   let supabase;
   try {
     supabase = getSupabase();
   } catch (err) {
-    console.error('[sentdm/webhook] Supabase init failed:', err);
+    console.error("[sentdm/webhook] Supabase init failed:", err);
     return NextResponse.json(
-      { error: 'Server configuration error' },
+      { error: "Server configuration error" },
       { status: 500 }
     );
   }
 
-  const { error: insertError } = await supabase
-    .from('webhook_events')
-    .insert({
-      source: 'sentdm',
-      event_type: eventType,
-      external_id: externalId || null,
-      status,
-      payload: body,
-      received_at: receivedAt,
-    });
+  const { error: insertError } = await supabase.from("webhook_events").insert({
+    source: "sentdm",
+    event_type: eventType,
+    external_id: externalId || null,
+    status,
+    payload: body,
+    received_at: receivedAt,
+  });
 
   if (insertError) {
-    console.error('[sentdm/webhook] Failed to insert webhook_events:', insertError.message);
-    // Continue — we still want to try updating message status even if
-    // the raw event log fails (e.g. table doesn't exist yet during dev).
+    console.error(
+      "[sentdm/webhook] Failed to insert webhook_events:",
+      insertError.message
+    );
   }
 
-  if (looksLikeInboundMessage(body)) {
-    const inboundResult = await forwardInboundMessage(req, body, externalId);
+  await logMessagingAudit(supabase, {
+    event_type: "webhook_received",
+    entity_type: "messaging",
+    entity_id: externalId || null,
+    metadata: {
+      provider: "sentdm",
+      route: "/api/sentdm/webhook",
+      event_type: eventType,
+      status,
+      external_id: externalId || null,
+      signature_mode: verification.mode,
+      webhook_events_saved: !insertError,
+    },
+  });
 
-    if (!inboundResult.ok) {
-      console.warn(
-        `[sentdm/webhook] Inbound forward failed status=${inboundResult.status}`
+  if (looksLikeInboundMessage(body)) {
+    const enqueued = await enqueueSentDmInboundWebhookJob(supabase, {
+      payload: body,
+      eventType,
+      ingestSource: "sentdm_webhook",
+    });
+
+    if (!enqueued.ok) {
+      console.error("[sentdm/webhook] webhook_jobs enqueue failed:", enqueued.error);
+      return NextResponse.json(
+        { received: false, error: enqueued.error },
+        { status: 503 }
       );
     }
+
+    if (enqueued.duplicate) {
+      await logMessagingAudit(supabase, {
+        event_type: "webhook_duplicate_ignored",
+        entity_type: "webhook_job",
+        entity_id: null,
+        metadata: {
+          provider: "sentdm",
+          dedupe_key: computeWebhookJobDedupeKey(body),
+          event_type: eventType,
+        },
+      });
+      return NextResponse.json(
+        {
+          received: true,
+          queued: false,
+          duplicate: true,
+          event_stored: !insertError,
+        },
+        { status: 200 }
+      );
+    }
+
+    await logMessagingAudit(supabase, {
+      event_type: "webhook_job_created",
+      entity_type: "webhook_job",
+      entity_id: enqueued.jobId,
+      metadata: {
+        provider: "sentdm",
+        event_type: eventType,
+      },
+    });
+
+    scheduleInboundJob(enqueued.jobId);
 
     return NextResponse.json(
       {
         received: true,
+        queued: true,
+        job_id: enqueued.jobId,
         event_stored: !insertError,
-        inbound_forwarded: inboundResult.ok,
-        inbound_status: inboundResult.status,
-        inbound_result: inboundResult.result,
       },
       { status: 200 }
     );
   }
 
-  // ── 5. Update canonical messages delivery_status first ────────────
   if (externalId) {
-    const { data: messageUpdateData, error: messageUpdateError } = await supabase
-      .from('messages')
-      .update({
-        delivery_status: status,
-        delivery_updated_at: receivedAt,
-        status,
-      })
-      .eq('external_id', externalId)
-      .select('id')
-      .maybeSingle();
+    const reconcileRes = await reconcileMessageDeliveryPatch(supabase, {
+      externalIdTrimmed: externalId.trim(),
+      deliveryStatus: status,
+      touchedAtIso: receivedAt,
+    });
 
-    if (messageUpdateError) {
-      console.error('[sentdm/webhook] Failed to update messages:', messageUpdateError.message);
+    if (reconcileRes.errorMessage) {
+      console.error(
+        "[sentdm/webhook] Failed to reconcile delivery on messages:",
+        reconcileRes.errorMessage
+      );
       return NextResponse.json(
         {
           received: true,
           event_stored: !insertError,
           message_updated: false,
           lead_updated: false,
-          error: messageUpdateError.message,
+          error: reconcileRes.errorMessage,
         },
         { status: 200 }
       );
     }
 
+    const messageUpdateData = reconcileRes.matchedMessage;
+
     if (messageUpdateData) {
       console.log(
         `[sentdm/webhook] Updated messages id=${messageUpdateData.id} -> ${status}`
       );
+
+      if (isDeliveryFailureStatus(status)) {
+        await logMessagingAudit(supabase, {
+          event_type: "messaging_delivery_failed",
+          entity_type: "message",
+          entity_id: messageUpdateData.id as string,
+          metadata: {
+            provider: "sentdm",
+            external_id: externalId,
+            delivery_status: status,
+            conversation_id: messageUpdateData.conversation_id,
+          },
+        });
+      }
 
       return NextResponse.json(
         {
@@ -390,17 +253,20 @@ export async function POST(req: NextRequest) {
     }
 
     const { data: legacyUpdateData, error: legacyUpdateError } = await supabase
-      .from('lead_messages')
+      .from("lead_messages")
       .update({
         delivery_status: status,
         delivery_updated_at: receivedAt,
       })
-      .eq('external_id', externalId)
-      .select('id')
+      .eq("external_id", externalId)
+      .select("id")
       .maybeSingle();
 
     if (legacyUpdateError) {
-      console.error('[sentdm/webhook] Failed to update lead_messages:', legacyUpdateError.message);
+      console.error(
+        "[sentdm/webhook] Failed to update lead_messages:",
+        legacyUpdateError.message
+      );
       return NextResponse.json(
         {
           received: true,
@@ -409,14 +275,17 @@ export async function POST(req: NextRequest) {
           lead_updated: false,
           error: legacyUpdateError.message,
         },
-        { status: 200 } // 200 so the webhook provider doesn't retry on our DB issues
+        { status: 200 }
       );
     }
 
     if (!legacyUpdateData) {
-      console.warn(
-        `[sentdm/webhook] No messages or lead_messages row found for external_id=${externalId}`
-      );
+      const likelyEarlyStatus = ["queued", "routed", "sent"].includes(status.toLowerCase());
+      const msg =
+        `[sentdm/webhook] Delivery callback not correlated yet for external_id=${externalId}; ` +
+        `status=${status}; row may be created shortly.`;
+      if (likelyEarlyStatus) console.info(msg);
+      else console.warn(msg);
     } else {
       console.log(
         `[sentdm/webhook] Updated legacy lead_messages id=${legacyUpdateData.id} -> ${status}`
@@ -435,7 +304,6 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── 6. No external_id — event stored only ─────────────────────────
   return NextResponse.json(
     {
       received: true,
@@ -448,10 +316,9 @@ export async function POST(req: NextRequest) {
   );
 }
 
-// Sent.dm may send a GET to verify the endpoint is alive.
 export async function GET() {
   return NextResponse.json(
-    { status: 'ok', handler: 'sentdm-webhook' },
+    { status: "ok", handler: "sentdm-webhook" },
     { status: 200 }
   );
 }

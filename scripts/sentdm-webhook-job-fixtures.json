@@ -1,0 +1,35 @@
+{
+  "README": "Fixture payloads for Sent.dm webhook queue + inbound-loop integration tests.",
+  "inbound_membership_question_envelope": {
+    "field": "message",
+    "sub_type": "message.received",
+    "payload": {
+      "inbound_number": "+15551234567",
+      "outbound_number": "+15559876543",
+      "channel": "sms",
+      "text": "Do you offer memberships?"
+    }
+  },
+  "duplicate_same_message_id": {
+    "field": "message",
+    "sub_type": "message.received",
+    "payload": {
+      "message_id": "fixture-duplicate-002",
+      "inbound_number": "+15551234567",
+      "outbound_number": "+15559876543",
+      "channel": "sms",
+      "text": "hello world"
+    }
+  },
+  "message_received_missing_text": {
+    "field": "message",
+    "sub_type": "message.received",
+    "payload": {
+      "message_id": "fixture-msg-no-text-001",
+      "inbound_number": "+15551234567",
+      "outbound_number": "+15559876543",
+      "channel": "sms",
+      "message_status": "received"
+    }
+  }
+}

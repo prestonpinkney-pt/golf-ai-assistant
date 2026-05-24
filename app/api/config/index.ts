@@ -1,5 +1,3 @@
-import { PHASE_PRODUCTION_BUILD } from "next/constants";
-
 type BusinessConfig = {
   id: string;
   slug: string;
@@ -49,28 +47,9 @@ function assertValidBusinessConfig(config: BusinessConfig) {
     throw new Error("Invalid CLOSEOS_WEBSITE_DOMAIN format");
   }
 
-  // During `next build`, NODE_ENV is production but env may be incomplete locally;
-  // require explicit CLOSEOS_* only at production runtime (not the compile/build phase).
-  const isProductionRuntime =
-    process.env.NODE_ENV === "production" &&
-    process.env.NEXT_PHASE !== PHASE_PRODUCTION_BUILD;
-
-  if (isProductionRuntime) {
-    const requiredEnv = [
-      "CLOSEOS_BUSINESS_ID",
-      "CLOSEOS_BUSINESS_SLUG",
-      "CLOSEOS_BUSINESS_NAME",
-      "CLOSEOS_WEBSITE_DOMAIN",
-    ];
-
-    const missing = requiredEnv.filter((key) => !process.env[key]?.trim());
-
-    if (missing.length > 0) {
-      throw new Error(
-        `Missing required CloseOS production config: ${missing.join(", ")}`
-      );
-    }
-  }
+  // Tenant identity, prompts, and handoff copy live in `businesses` /
+  // `business_messaging_configs` (see migrations). CLOSEOS_* env vars are optional
+  // overrides; defaults match the seeded first tenant for single-workspace deploys.
 }
 
 const businessConfig = getBusinessConfig();
