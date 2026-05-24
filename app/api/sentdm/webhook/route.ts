@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@supabase/supabase-js';
 import { createHmac, timingSafeEqual } from 'crypto';
+import { reconcileCampaignMessageDeliveryByExternalId } from '@/lib/messaging/delivery-status-update';
 
 /**
  * CloseOS — Sent.dm Webhook Receiver
@@ -377,6 +378,12 @@ export async function POST(req: NextRequest) {
         `[sentdm/webhook] Updated messages id=${messageUpdateData.id} -> ${status}`
       );
 
+      await reconcileCampaignMessageDeliveryByExternalId(supabase, {
+        externalIdTrimmed: externalId,
+        deliveryStatus: status,
+        touchedAtIso: receivedAt,
+      });
+
       return NextResponse.json(
         {
           received: true,
@@ -417,6 +424,24 @@ export async function POST(req: NextRequest) {
       console.warn(
         `[sentdm/webhook] No messages or lead_messages row found for external_id=${externalId}`
       );
+      const campaignSync = await reconcileCampaignMessageDeliveryByExternalId(supabase, {
+        externalIdTrimmed: externalId,
+        deliveryStatus: status,
+        touchedAtIso: receivedAt,
+      });
+      if (campaignSync.campaignId) {
+        return NextResponse.json(
+          {
+            received: true,
+            event_stored: !insertError,
+            message_updated: false,
+            lead_updated: false,
+            campaign_message_updated: true,
+            status,
+          },
+          { status: 200 }
+        );
+      }
     } else {
       console.log(
         `[sentdm/webhook] Updated legacy lead_messages id=${legacyUpdateData.id} -> ${status}`

@@ -83,3 +83,48 @@ export function buildWhyNowLine(input: WhyNowInput): string {
   }
   return "Ready for a short outbound touch.";
 }
+
+/** Operator-facing campaign batch status (approve-first flow). */
+export function campaignBatchExecutionLabel(status: string): string {
+  switch ((status ?? "").toLowerCase()) {
+    case "draft":
+      return "Draft — review before send";
+    case "approved":
+      return "Approved — ready to send";
+    case "sending":
+      return "Sending";
+    case "sent":
+      return "Sent";
+    case "failed":
+      return "Send failed";
+    default:
+      return status ? status.replace(/_/g, " ") : "Unknown";
+  }
+}
+
+/** Per-recipient campaign message + delivery rollup for UI badges. */
+export function campaignMessageExecutionLabel(
+  status: string,
+  deliveryStatus?: string | null
+): string {
+  const st = (status ?? "").toLowerCase();
+  const delivery = (deliveryStatus ?? "").toLowerCase();
+
+  if (st === "draft") return "Draft";
+  if (st === "approved") return "Approved";
+  if (st === "sending") return "Queued to send";
+
+  if (st === "failed") return "Failed to send";
+
+  if (st === "sent") {
+    if (delivery === "delivered") return "Delivered";
+    if (delivery === "failed" || delivery === "bounced" || delivery === "rejected") {
+      return "Delivery failed";
+    }
+    if (delivery === "sent" || delivery === "queued") return "Sent";
+    if (delivery) return delivery.replace(/_/g, " ");
+    return "Sent";
+  }
+
+  return st ? st.replace(/_/g, " ") : "Unknown";
+}
