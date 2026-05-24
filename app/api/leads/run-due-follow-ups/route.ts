@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "@/lib/supabase/admin";
+import { sendMessage } from "@/lib/send-message";
 import { gateCron } from "../../lib/require-auth";
 
 const FOLLOW_UP_INTERVAL_HOURS = 24;
@@ -33,6 +34,10 @@ function buildFollowUpMessage(lead: { primaryIntent: string }) {
   return "Just following up — if you still want help, send me a little more detail and I’ll keep it moving.";
 }
 
+function isLikelyE164Phone(value: string) {
+  return /^\+[1-9]\d{7,14}$/.test(value);
+}
+
 export async function POST(req: Request) {
   const denied = gateCron(req);
   if (denied) return denied;
@@ -44,7 +49,9 @@ export async function POST(req: Request) {
 
     const { data: leads, error } = await supabaseAdmin
       .from("leads")
-      .select("id, lead_type, status, follow_up_count, last_contacted_at")
+      .select(
+        "id, full_name, phone, lead_type, status, follow_up_count, last_contacted_at, preferred_contact_channel"
+      )
       .in("status", ["open", "contacted", "new"])
       .lt("follow_up_count", MAX_FOLLOW_UPS)
       .or(
@@ -87,11 +94,81 @@ export async function POST(req: Request) {
       const followUpMessage = buildFollowUpMessage({
         primaryIntent: lead.lead_type ?? "general",
       });
+      const to = typeof lead.phone === "string" ? lead.phone.trim() : "";
+      const channel = lead.preferred_contact_channel ?? "sms";
+
+      if (channel !== "sms") {
+        skippedCount += 1;
+        continue;
+      }
+
+      if (!isLikelyE164Phone(to)) {
+        failedCount += 1;
+        console.error(
+          `[run-due-follow-ups] Skipping lead ${lead.id}: missing valid E.164 phone`
+        );
+        continue;
+      }
+
       const newCount = previousCount + 1;
       const nextFollowUpAt =
         newCount >= MAX_FOLLOW_UPS
           ? null
           : `Follow up after ${getNextFollowUpDate(FOLLOW_UP_INTERVAL_HOURS)}`;
+      let smsResult: Awaited<ReturnType<typeof sendMessage>>;
+
+      try {
+        smsResult = await sendMessage({
+          channel: "sms",
+          to,
+          message: followUpMessage,
+          name: lead.full_name,
+        });
+      } catch (sendError) {
+        failedCount += 1;
+        const errorMessage =
+          sendError instanceof Error ? sendError.message : String(sendError);
+        console.error(
+          `[run-due-follow-ups] Failed to send follow-up for lead ${lead.id}: ${errorMessage}`
+        );
+        await supabaseAdmin.from("lead_messages").insert([
+          {
+            lead_id: lead.id,
+            direction: "outbound",
+            channel: "sms",
+            message_type: "follow_up",
+            body: followUpMessage,
+            delivery_status: "failed",
+            ai_generated: true,
+            sent_at: nowIso,
+            provider: "sentdm",
+          },
+        ]);
+        continue;
+      }
+
+      const { error: messageInsertError } = await supabaseAdmin
+        .from("lead_messages")
+        .insert([
+          {
+            lead_id: lead.id,
+            direction: "outbound",
+            channel: "sms",
+            message_type: "follow_up",
+            body: followUpMessage,
+            delivery_status: smsResult.status || "sent",
+            ai_generated: true,
+            sent_at: nowIso,
+            provider: smsResult.provider || "sentdm",
+            external_id: smsResult.external_id,
+          },
+        ]);
+
+      if (messageInsertError) {
+        console.error(
+          `[run-due-follow-ups] Failed to log follow-up for lead ${lead.id}: ${messageInsertError.message}`
+        );
+      }
 
       const { error: updateError } = await supabaseAdmin
         .from("leads")
@@ -125,11 +202,13 @@ export async function POST(req: Request) {
       failedCount,
       cutoff: dueBeforeIso,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Run due follow-ups error:", error);
+    const message =
+      error instanceof Error ? error.message : "Failed to run due follow-ups";
 
     return NextResponse.json(
-      { error: error?.message || "Failed to run due follow-ups" },
+      { error: message },
       { status: 500 }
     );
   }
