@@ -25,6 +25,7 @@ import {
   resolveBusinessMessagingConfigFromDb,
 } from "@/lib/business-messaging-config";
 import { detectCarrierComplianceKind } from "@/lib/sentdm/carrier-compliance";
+import { evaluateInboundLiveOutboundPolicy } from "@/lib/campaigns/send-eligibility";
 import { extractSentDmInboundPayload } from "@/lib/messaging/sentdm-webhook";
 import {
   loadSmsConversationHistoryAscending,
@@ -1538,12 +1539,41 @@ export async function runSentDmInboundConversationLoop(params: {
       metadata: { intent: reply.intent },
     });
 
-    const allowProviderSend =
+    const liveOutboundPolicy = await evaluateInboundLiveOutboundPolicy(supabase, {
+      contactId: contact!.id as string,
+      phone,
+      smsOptOut: Boolean(contact?.sms_opt_out),
+      humanTakeover: Boolean(conversation?.human_takeover),
+      automationDisabled: conversation?.automation_enabled === false,
+      highStakesOrSensitive:
+        escalationHuman || reply.riskLevel === "high" || reply.shouldEscalate,
+      autoSendEnabled: businessConfig.autoSendEnabled,
+      messageGoal: reply.intent || "inbound_reply",
+    });
+
+    const baseSendEligible =
       businessConfig.autoSendEnabled &&
       reply.shouldSend &&
       isLikelyE164Phone(phone) &&
       !deferOutboundSms &&
       !isInboundQuietHoursActive();
+
+    const allowProviderSend =
+      baseSendEligible && liveOutboundPolicy.maySendViaProvider;
+
+    if (baseSendEligible && !liveOutboundPolicy.maySendViaProvider) {
+      await audit(supabase, {
+        event_type: "sentdm_outbound_send_blocked_policy",
+        entity_type: "message",
+        entity_id: String(outboundMessage.id),
+        metadata: {
+          policy_mode: liveOutboundPolicy.decision.mode,
+          policy_reason_codes: liveOutboundPolicy.decision.reasonCodes,
+          detail: liveOutboundPolicy.blockDetail,
+          intent: reply.intent,
+        },
+      });
+    }
 
     if (allowProviderSend) {
       try {
@@ -1611,6 +1641,8 @@ export async function runSentDmInboundConversationLoop(params: {
           escalation: escalationHuman,
           defer_outbound_sms: deferOutboundSms,
           quiet_hours_active: isInboundQuietHoursActive(),
+          policy_blocked: baseSendEligible && !liveOutboundPolicy.maySendViaProvider,
+          policy_reason_codes: liveOutboundPolicy.decision.reasonCodes,
         },
       });
     }

@@ -9,7 +9,7 @@
     "lint": "eslint",
     "lint:hardcoded": "node scripts/check-hardcoded-runtime-values.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.ci.json",
-    "test:sentdm": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/sentdm/carrier-compliance.test.ts lib/sentdm/inbound-sms-booking-phase.test.ts lib/sentdm/live-sms-outbound-finalize.test.ts lib/sentdm/send-message.test.ts",
+    "test:sentdm": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/sentdm/carrier-compliance.test.ts lib/sentdm/inbound-sms-booking-phase.test.ts lib/sentdm/live-sms-outbound-finalize.test.ts lib/sentdm/send-message.test.ts lib/campaigns/send-eligibility.test.ts",
     "test:webhook": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/sentdm/webhook-queue.test.ts lib/sentdm/sentdm-inbound-eligibility.test.ts && node --import ./tests/stub-server-only.cjs --import ./tests/inbound-integration-preload.mjs --import tsx --test --experimental-test-module-mocks lib/sentdm/inbound-loop-integration.test.ts",
     "test:booking": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/ai/sms-booking-flow.test.ts lib/sentdm/inbound-sms-booking-phase.test.ts",
     "test:revenue-recovery": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/payments/process-square-booking-payment-hold.test.ts",

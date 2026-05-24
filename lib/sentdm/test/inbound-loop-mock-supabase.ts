@@ -45,6 +45,11 @@ export function createInboundLoopMockSupabase() {
           const arr = Array.isArray(f.value) ? f.value : [];
           return arr.includes(row[f.field]);
         }
+        if (f.op === "gte") {
+          const rowVal = row[f.field];
+          if (typeof rowVal !== "string" || typeof f.value !== "string") return true;
+          return rowVal >= f.value;
+        }
         return true;
       })
     );
@@ -92,6 +97,10 @@ export function createInboundLoopMockSupabase() {
       },
       in(field: string, value: unknown) {
         b.filters.push({ field, op: "in", value });
+        return api;
+      },
+      gte(field: string, value: unknown) {
+        b.filters.push({ field, op: "gte", value });
         return api;
       },
       order(field: string, opts?: { ascending?: boolean }) {

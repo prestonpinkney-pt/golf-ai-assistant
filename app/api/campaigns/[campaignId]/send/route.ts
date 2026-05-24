@@ -1,6 +1,12 @@
 import { BUSINESS_NAME } from "@/app/api/config";
 import { ApiAuthError, requireBusinessUser } from "@/app/api/lib/require-auth";
 import { refreshCampaignRollup } from "@/lib/campaigns/rollup";
+import {
+  evaluateCampaignRecipientPolicy,
+  evaluateCampaignSendWindow,
+  evaluateCampaignTestAllowlist,
+  isLikelyE164Phone,
+} from "@/lib/campaigns/send-eligibility";
 import { logMessagingAudit } from "@/lib/messaging/audit";
 import { normalizePhone } from "@/lib/messaging/phone";
 import { sendMessage } from "@/lib/send-message";
@@ -11,10 +17,6 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 const MAX_MESSAGE_LENGTH = 1600;
-
-function isLikelyE164Phone(value: string | null | undefined): boolean {
-  return typeof value === "string" && /^\+[1-9]\d{7,14}$/.test(value.trim());
-}
 
 export async function POST(
   req: Request,
@@ -100,6 +102,14 @@ export async function POST(
     );
   }
 
+  const sendWindow = evaluateCampaignSendWindow();
+  if (!sendWindow.allowed) {
+    return jsonNoStore(
+      { error: sendWindow.detail, reason: sendWindow.reason },
+      { status: 423 }
+    );
+  }
+
   await logMessagingAudit(supabase, {
     event_type: "campaign_send_batch_started",
     entity_type: "campaign",
@@ -180,6 +190,33 @@ export async function POST(
       continue;
     }
 
+    const allowTest = evaluateCampaignTestAllowlist(toPhone);
+    if (!allowTest.allowed) {
+      const now = new Date().toISOString();
+      await supabase
+        .from("campaign_messages")
+        .update({
+          status: "failed",
+          failed_at: now,
+          error_message: allowTest.detail,
+          updated_at: now,
+        })
+        .eq("id", messageId);
+      await logMessagingAudit(supabase, {
+        event_type: "campaign_send_blocked_test_allowlist",
+        entity_type: "campaign_message",
+        entity_id: messageId,
+        metadata: {
+          business_id: businessId,
+          user_id: userId,
+          campaign_id: campaignId,
+          phone: toPhone,
+        },
+      });
+      results.push({ id: messageId, outcome: "failed", error: allowTest.detail });
+      continue;
+    }
+
     const { data: contact } = await supabase
       .from("contacts")
       .select("id, name, phone, sms_opt_out, cooling_off_until")
@@ -249,6 +286,39 @@ export async function POST(
         outcome: "failed",
         error: "Cooling-off period active",
       });
+      continue;
+    }
+
+    const policy = await evaluateCampaignRecipientPolicy(supabase, {
+      contactId: (contact?.id as string | undefined) ?? null,
+      phone: toPhone,
+      smsOptOut: false,
+    });
+    if (!policy.allowed) {
+      const now = new Date().toISOString();
+      await supabase
+        .from("campaign_messages")
+        .update({
+          status: "failed",
+          failed_at: now,
+          error_message: policy.detail,
+          contact_id: contact?.id ?? null,
+          updated_at: now,
+        })
+        .eq("id", messageId);
+      await logMessagingAudit(supabase, {
+        event_type: "campaign_send_blocked_policy",
+        entity_type: "campaign_message",
+        entity_id: messageId,
+        metadata: {
+          business_id: businessId,
+          user_id: userId,
+          campaign_id: campaignId,
+          reason: policy.reason,
+          policy_reason_codes: policy.policyReasonCodes,
+        },
+      });
+      results.push({ id: messageId, outcome: "failed", error: policy.detail });
       continue;
     }
 
