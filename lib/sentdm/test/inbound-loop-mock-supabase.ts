@@ -186,7 +186,7 @@ export function createInboundLoopMockSupabase() {
     },
   };
 
-  return client as SupabaseClient & {
+  return client as unknown as SupabaseClient & {
     __tables: typeof tables;
     __countMessages: (filter?: (r: Row) => boolean) => number;
   };

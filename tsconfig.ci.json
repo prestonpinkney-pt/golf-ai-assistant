@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "node_modules",
+    ".next",
+    "app/(dashboard)/settings",
+    "app/api/campaigns",
+    "app/api/business-messaging"
+  ]
+}
