@@ -57,6 +57,28 @@ function conversationNeedsReply(
   return false;
 }
 
+function normalizeConversationRows(data: unknown): ConversationRow[] {
+  if (!Array.isArray(data)) return [];
+
+  return data.flatMap((row) => {
+    if (!row || typeof row !== "object") return [];
+    const record = row as Record<string, unknown>;
+    const id = typeof record.id === "string" ? record.id : String(record.id ?? "");
+    if (!id) return [];
+
+    return [
+      {
+        id,
+        status: typeof record.status === "string" ? record.status : null,
+        last_inbound_at:
+          typeof record.last_inbound_at === "string" ? record.last_inbound_at : null,
+        last_outbound_at:
+          typeof record.last_outbound_at === "string" ? record.last_outbound_at : null,
+      },
+    ];
+  });
+}
+
 async function fetchConversations(
   supabase: SupabaseClient,
   businessId: string
@@ -74,7 +96,7 @@ async function fetchConversations(
       .limit(200);
 
     if (!scoped.error) {
-      return (scoped.data ?? []) as ConversationRow[];
+      return normalizeConversationRows(scoped.data);
     }
     if (isMissingColumnError(scoped.error.message)) {
       if (select === selectAttempts[0]) {
@@ -82,7 +104,7 @@ async function fetchConversations(
       }
       const legacy = await supabase.from("conversations").select(select).limit(200);
       if (!legacy.error) {
-        return (legacy.data ?? []) as ConversationRow[];
+        return normalizeConversationRows(legacy.data);
       }
       if (isMissingColumnError(legacy.error.message)) continue;
       throw new Error(legacy.error.message);
