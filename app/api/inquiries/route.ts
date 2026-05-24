@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import fs from "fs";
 import path from "path";
+import { gateBusinessUser } from "../lib/require-auth";
 
 const filePath = path.join(process.cwd(), "data", "inquiries.json");
 
@@ -13,7 +14,7 @@ function readInquiries() {
   return JSON.parse(fileData);
 }
 
-function writeInquiries(data: any) {
+function writeInquiries(data: unknown) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), "utf-8");
 }
 
@@ -24,10 +25,13 @@ function getNextFollowUpDate(hoursFromNow: number) {
 }
 
 export async function GET() {
+  const denied = await gateBusinessUser();
+  if (denied) return denied;
+
   try {
     const inquiries = readInquiries();
     return NextResponse.json(inquiries);
-  } catch (error) {
+  } catch {
     return NextResponse.json(
       { error: "Failed to load inquiries" },
       { status: 500 }
@@ -36,6 +40,9 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
+  const denied = await gateBusinessUser();
+  if (denied) return denied;
+
   try {
     const body = await req.json();
 
@@ -85,7 +92,7 @@ export async function POST(req: Request) {
     writeInquiries(inquiries);
 
     return NextResponse.json(newInquiry);
-  } catch (error) {
+  } catch {
     return NextResponse.json(
       { error: "Failed to save inquiry" },
       { status: 500 }
