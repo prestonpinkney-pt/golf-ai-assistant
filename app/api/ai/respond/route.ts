@@ -205,7 +205,7 @@ export async function POST(req: Request) {
 
     let aiGenerationError: string | null = null;
 
-    let aiDecisionRaw: AiResponseDecision =
+    const aiDecisionRaw: AiResponseDecision =
       smsBookingFlow.kind === "direct_outbound"
         ? {
             intent: "booking_flow_direct",
