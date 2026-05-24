@@ -1,0 +1,12 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/square-revenue-sync",
+      "schedule": "0 */6 * * *"
+    },
+    {
+      "path": "/api/cron/square-customer-directory",
+      "schedule": "0 6 * * *"
+    }
+  ]
+}
