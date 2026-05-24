@@ -54,13 +54,15 @@ export async function reconcileMessageDeliveryPatch(
     status: input.deliveryStatus,
   };
 
-  let { data, error } = await supabase
+  const firstAttempt = await supabase
     .from("messages")
     .update(patchFull)
     .eq("direction", "outbound")
     .or(sentDmProviderMessageIdOrFilter(input.externalIdTrimmed))
     .select("id, conversation_id")
     .maybeSingle();
+
+  const { data, error } = firstAttempt;
 
   if (!error)
     return {

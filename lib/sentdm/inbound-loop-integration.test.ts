@@ -10,7 +10,6 @@ import { before, beforeEach, describe, test } from "node:test";
 import { createInboundLoopMockSupabase } from "./test/inbound-loop-mock-supabase";
 
 declare global {
-  // eslint-disable-next-line no-var
   var __closeosGenerateAiDecisionCalls: number | undefined;
 }
 
