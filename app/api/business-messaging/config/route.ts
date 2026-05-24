@@ -150,7 +150,7 @@ export async function GET(req: Request) {
   } else {
     const ctx = await requireBusinessUser();
     businessId = paramBusinessId || ctx.businessId;
-    if (paramBusinessId && !ctx.businessIds.includes(paramBusinessId)) {
+    if (paramBusinessId && paramBusinessId !== ctx.businessId) {
       return NextResponse.json({ success: false, error: "Forbidden" }, { status: 403 });
     }
   }
@@ -207,7 +207,7 @@ export async function PUT(req: Request) {
   } else {
     const ctx = await requireBusinessUser();
     businessId = cleanString(payload.businessId) || ctx.businessId;
-    if (!ctx.businessIds.includes(businessId)) {
+    if (businessId !== ctx.businessId) {
       return NextResponse.json({ success: false, error: "Forbidden" }, { status: 403 });
     }
     const rowFallback = await resolveBusinessMessagingConfigFromDb(supabase, {

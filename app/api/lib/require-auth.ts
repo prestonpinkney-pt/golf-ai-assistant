@@ -146,6 +146,25 @@ export async function requireBusinessUser(): Promise<BusinessUserContext> {
   };
 }
 
+/** Primary workspace business id for dashboard server pages (single-tenant Primetime). */
+export async function getPrimaryBusinessIdForUser(userId: string): Promise<string | null> {
+  const admin = createSupabaseServiceRoleClient();
+  const { data: row, error } = await admin
+    .from("business_users")
+    .select("business_id")
+    .eq("user_id", userId)
+    .eq("business_id", BUSINESS_ID)
+    .eq("active", true)
+    .maybeSingle();
+
+  if (error) {
+    console.error("getPrimaryBusinessIdForUser:", error.message);
+    return null;
+  }
+
+  return (row?.business_id as string | undefined) ?? null;
+}
+
 /** Returns a JSON error response or null when the caller may proceed. */
 export async function gateBusinessUser(): Promise<NextResponse | null> {
   try {
