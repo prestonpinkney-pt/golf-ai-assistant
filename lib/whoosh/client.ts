@@ -39,12 +39,19 @@ function loadWhooshConfig(): WhooshResolvedConfig {
   const apiToken = process.env.WHOOSH_API_TOKEN?.trim() ?? "";
   const baseUrlRaw = process.env.WHOOSH_API_BASE_URL?.trim() ?? "";
   const agendaFacilitySlug =
-    process.env[WHOOSH_FACILITY_SLUG_ENV]?.trim() ?? "";
+    process.env[WHOOSH_FACILITY_SLUG_ENV]?.trim() ??
+    process.env.WHOOSH_FACILITY_ID?.trim() ??
+    process.env.WHOOSH_CLUB_ID?.trim() ??
+    "";
 
   const missing: string[] = [];
   if (!apiToken) missing.push("WHOOSH_API_TOKEN");
   if (!baseUrlRaw) missing.push("WHOOSH_API_BASE_URL");
-  if (!agendaFacilitySlug) missing.push(WHOOSH_FACILITY_SLUG_ENV);
+  if (!agendaFacilitySlug) {
+    missing.push(
+      `${WHOOSH_FACILITY_SLUG_ENV} (or WHOOSH_FACILITY_ID / WHOOSH_CLUB_ID)`
+    );
+  }
 
   if (missing.length) {
     throw new Error(
@@ -66,7 +73,10 @@ function loadWhooshConfig(): WhooshResolvedConfig {
 export function isWhooshServerConfigured(): boolean {
   const token = process.env.WHOOSH_API_TOKEN?.trim();
   const base = process.env.WHOOSH_API_BASE_URL?.trim();
-  const slug = process.env[WHOOSH_FACILITY_SLUG_ENV]?.trim();
+  const slug =
+    process.env[WHOOSH_FACILITY_SLUG_ENV]?.trim() ??
+    process.env.WHOOSH_FACILITY_ID?.trim() ??
+    process.env.WHOOSH_CLUB_ID?.trim();
   return Boolean(token && base && slug);
 }
 

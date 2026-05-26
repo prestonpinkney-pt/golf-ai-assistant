@@ -3,10 +3,17 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { logMessagingAudit } from "@/lib/messaging/audit";
 import { reconcileMessageDeliveryPatch } from "@/lib/messaging/delivery-status-update";
 import {
+  buildSentDmWebhookLogSummary,
+  extractSentDmContactId,
   extractSentDmMessageExternalId,
+  extractSentDmMessageIdForLookup,
+  hasSentDmInboundText,
   isDeliveryFailureStatus,
+  logSentDmWebhookSummary,
   looksLikeInboundMessage,
   normalizeSentDmStatus,
+  shouldWarnMissingExternalId,
+  type SentDmWebhookLogSummary,
   type SentDmWebhookVerification,
 } from "@/lib/messaging/sentdm-webhook";
 import { processSentDmWebhookJobFromPending } from "@/lib/sentdm/process-webhook-job";
@@ -18,6 +25,15 @@ export type SentDmWebhookRouteOptions = {
   webhookEventSource: string;
   ingestSource: SentDmWebhookJobIngestSource;
   legacyRoute?: boolean;
+};
+
+type WebhookLogContext = {
+  eventType: string;
+  verificationMode: string;
+  body: Record<string, unknown>;
+  externalId: string;
+  status: string;
+  looksInbound: boolean;
 };
 
 function getSupabase(): SupabaseClient {
@@ -42,6 +58,86 @@ function scheduleInboundJob(jobId: string) {
   });
 }
 
+function verificationModeLabel(verification: SentDmWebhookVerification): string {
+  return verification.ok ? verification.mode : "rejected";
+}
+
+function emitFinalWebhookLog(
+  route: string,
+  ctx: WebhookLogContext,
+  extra: Omit<
+    Parameters<typeof buildSentDmWebhookLogSummary>[0],
+    keyof WebhookLogContext
+  >
+) {
+  const summary = buildSentDmWebhookLogSummary({ ...ctx, ...extra });
+  logSentDmWebhookSummary(route, summary);
+  return summary;
+}
+
+function maybeLogInboundTextHint(route: string, summary: SentDmWebhookLogSummary) {
+  if (summary.mode === "local_text_envelope") {
+    console.info(
+      `[${route}] Inbound text envelope accepted without Sent.dm lookup; use message_id for full integration testing.`
+    );
+  }
+  if (summary.mode === "integration_message_lookup") {
+    console.info(
+      `[${route}] Inbound queued with message_id — Sent.dm GET /v3/messages/{id} enrichment will run.`
+    );
+  }
+}
+
+function buildInboundIntegrationResponse(input: {
+  eventType: string;
+  message_id: string | null;
+  contactId: string | null;
+  status: "processed" | "queued" | "failed" | "skipped";
+  conversation_id?: string | null;
+  inbound_message_id?: string | null;
+  inbound_event_id?: string | null;
+  verificationMode: string;
+  job_id?: string;
+  error?: string | null;
+  skipReason?: string | null;
+  legacyFields?: Record<string, unknown>;
+}) {
+  return {
+    ...(input.legacyFields ?? {}),
+    eventType: input.eventType,
+    message_id: input.message_id,
+    contactId: input.contactId,
+    status: input.status,
+    verificationMode: input.verificationMode,
+    ...(input.conversation_id ? { conversation_id: input.conversation_id } : {}),
+    ...(input.inbound_message_id ?
+      { inbound_message_id: input.inbound_message_id }
+    : {}),
+    ...(input.inbound_event_id ? { inbound_event_id: input.inbound_event_id } : {}),
+    ...(input.job_id ? { job_id: input.job_id } : {}),
+    ...(input.error ? { error: input.error } : {}),
+    ...(input.skipReason ? { skip_reason: input.skipReason } : {}),
+    received: true,
+  };
+}
+
+function maybeWarnMissingExternalId(
+  route: string,
+  ctx: WebhookLogContext
+) {
+  if (
+    shouldWarnMissingExternalId({
+      externalId: ctx.externalId,
+      looksInbound: ctx.looksInbound,
+      body: ctx.body,
+    })
+  ) {
+    console.warn(
+      `[${route}] Delivery/status callback missing message id — cannot reconcile delivery status`
+    );
+  }
+}
+
 /**
  * Canonical Sent.dm webhook processing: persist event, enqueue inbound jobs,
  * reconcile delivery callbacks. Used by /api/sentdm/webhook and legacy /api/webhooks/sent.
@@ -55,21 +151,24 @@ export async function handleSentDmWebhookPost(
   const eventType = String(
     body.sub_type ?? body.subtype ?? body.event ?? body.type ?? "unknown"
   );
-  const externalId = extractSentDmMessageExternalId(body) ?? "";
+  const messageIdForLookup = extractSentDmMessageIdForLookup(body);
+  const externalId = messageIdForLookup ?? extractSentDmMessageExternalId(body) ?? "";
+  const webhookContactId = extractSentDmContactId(body);
   const status = normalizeSentDmStatus(
     (body.status ?? body.delivery_status) as string | undefined
   );
-  const timestamp = (body.timestamp ?? receivedAt) as string;
+  const looksInbound = looksLikeInboundMessage(body);
+  const verificationMode = verificationModeLabel(verification);
+  const logCtx: WebhookLogContext = {
+    eventType,
+    verificationMode,
+    body,
+    externalId,
+    status,
+    looksInbound,
+  };
 
-  console.log(
-    `[${options.route}] event=${eventType} external_id=${externalId} status=${status} ts=${timestamp}`
-  );
-
-  if (!externalId) {
-    console.warn(
-      `[${options.route}] Missing external_id — storing event but cannot reconcile delivery status`
-    );
-  }
+  void (body.timestamp ?? receivedAt);
 
   let supabase: SupabaseClient;
   try {
@@ -125,7 +224,7 @@ export async function handleSentDmWebhookPost(
     ? { legacy_route: true, canonical_route: "/api/sentdm/webhook" as const }
     : {};
 
-  if (looksLikeInboundMessage(body)) {
+  if (looksInbound) {
     const enqueued = await enqueueSentDmInboundWebhookJob(supabase, {
       payload: body,
       eventType,
@@ -134,6 +233,10 @@ export async function handleSentDmWebhookPost(
 
     if (!enqueued.ok) {
       console.error(`[${options.route}] webhook_jobs enqueue failed:`, enqueued.error);
+      emitFinalWebhookLog(options.route, logCtx, {
+        queued: false,
+        reason: "enqueue_failed",
+      });
       return NextResponse.json(
         {
           ...legacyFields,
@@ -154,6 +257,11 @@ export async function handleSentDmWebhookPost(
           dedupe_key: computeWebhookJobDedupeKey(body),
           event_type: eventType,
         },
+      });
+      emitFinalWebhookLog(options.route, logCtx, {
+        queued: false,
+        duplicate: true,
+        reason: "duplicate_job",
       });
       return NextResponse.json(
         {
@@ -177,21 +285,101 @@ export async function handleSentDmWebhookPost(
       },
     });
 
+    const summary = emitFinalWebhookLog(options.route, logCtx, { queued: true });
+    maybeLogInboundTextHint(options.route, summary);
+
+    const runSynchronously = (messageIdForLookup?.trim().length ?? 0) > 0;
+
+    if (runSynchronously) {
+      const processResult = await processSentDmWebhookJobFromPending(
+        supabase,
+        enqueued.jobId
+      );
+
+      if (!processResult) {
+        return NextResponse.json(
+          buildInboundIntegrationResponse({
+            eventType,
+            message_id: messageIdForLookup,
+            contactId: webhookContactId,
+            status: "failed",
+            verificationMode,
+            job_id: enqueued.jobId,
+            error: "webhook_job_claim_failed",
+            legacyFields,
+          }),
+          { status: 503 }
+        );
+      }
+
+      if (processResult.skipped) {
+        return NextResponse.json(
+          buildInboundIntegrationResponse({
+            eventType,
+            message_id: processResult.message_id ?? messageIdForLookup,
+            contactId: webhookContactId,
+            status: "skipped",
+            verificationMode,
+            job_id: enqueued.jobId,
+            skipReason: processResult.skipReason,
+            legacyFields,
+          }),
+          { status: 200 }
+        );
+      }
+
+      if (processResult.jobStatus === "failed") {
+        return NextResponse.json(
+          buildInboundIntegrationResponse({
+            eventType,
+            message_id: processResult.message_id ?? messageIdForLookup,
+            contactId: processResult.contactId ?? webhookContactId,
+            status: "failed",
+            verificationMode,
+            job_id: enqueued.jobId,
+            error: processResult.error,
+            legacyFields,
+          }),
+          { status: 200 }
+        );
+      }
+
+      return NextResponse.json(
+        buildInboundIntegrationResponse({
+          eventType,
+          message_id: processResult.message_id ?? messageIdForLookup,
+          contactId: processResult.contactId ?? webhookContactId,
+          status: "processed",
+          conversation_id: processResult.conversation_id,
+          inbound_message_id: processResult.inbound_message_id,
+          inbound_event_id: processResult.inbound_event_id,
+          verificationMode,
+          job_id: enqueued.jobId,
+          legacyFields,
+        }),
+        { status: 200 }
+      );
+    }
+
     scheduleInboundJob(enqueued.jobId);
 
     return NextResponse.json(
-      {
-        ...legacyFields,
-        received: true,
-        queued: true,
+      buildInboundIntegrationResponse({
+        eventType,
+        message_id: messageIdForLookup,
+        contactId: webhookContactId,
+        status: "queued",
+        verificationMode,
         job_id: enqueued.jobId,
-        event_stored: !insertError,
-      },
+        legacyFields,
+      }),
       { status: 200 }
     );
   }
 
   if (externalId) {
+    maybeWarnMissingExternalId(options.route, logCtx);
+
     const reconcileRes = await reconcileMessageDeliveryPatch(supabase, {
       externalIdTrimmed: externalId.trim(),
       deliveryStatus: status,
@@ -203,6 +391,12 @@ export async function handleSentDmWebhookPost(
         `[${options.route}] Failed to reconcile delivery on messages:`,
         reconcileRes.errorMessage
       );
+      emitFinalWebhookLog(options.route, logCtx, {
+        queued: false,
+        externalIdPresent: true,
+        reconciled: false,
+        reason: "reconcile_error",
+      });
       return NextResponse.json(
         {
           ...legacyFields,
@@ -237,6 +431,12 @@ export async function handleSentDmWebhookPost(
         });
       }
 
+      emitFinalWebhookLog(options.route, logCtx, {
+        queued: false,
+        externalIdPresent: true,
+        reconciled: true,
+      });
+
       return NextResponse.json(
         {
           ...legacyFields,
@@ -265,6 +465,12 @@ export async function handleSentDmWebhookPost(
         `[${options.route}] Failed to update lead_messages:`,
         legacyUpdateError.message
       );
+      emitFinalWebhookLog(options.route, logCtx, {
+        queued: false,
+        externalIdPresent: true,
+        reconciled: false,
+        reason: "legacy_update_error",
+      });
       return NextResponse.json(
         {
           ...legacyFields,
@@ -277,6 +483,8 @@ export async function handleSentDmWebhookPost(
         { status: 200 }
       );
     }
+
+    const reconciled = !!legacyUpdateData;
 
     if (!legacyUpdateData) {
       const likelyEarlyStatus = ["queued", "routed", "sent"].includes(
@@ -293,6 +501,12 @@ export async function handleSentDmWebhookPost(
       );
     }
 
+    emitFinalWebhookLog(options.route, logCtx, {
+      queued: false,
+      externalIdPresent: true,
+      reconciled,
+    });
+
     return NextResponse.json(
       {
         ...legacyFields,
@@ -306,6 +520,18 @@ export async function handleSentDmWebhookPost(
     );
   }
 
+  maybeWarnMissingExternalId(options.route, logCtx);
+
+  const ignoredReason = options.legacyRoute
+    ? "not_inbound_event"
+    : "not_inbound_or_delivery";
+
+  emitFinalWebhookLog(options.route, logCtx, {
+    queued: false,
+    ignored: true,
+    reason: ignoredReason,
+  });
+
   return NextResponse.json(
     {
       ...legacyFields,
@@ -314,7 +540,7 @@ export async function handleSentDmWebhookPost(
       message_updated: false,
       lead_updated: false,
       status,
-      ...(options.legacyRoute ? { ignored: true, reason: "not_inbound_event" } : {}),
+      ...(options.legacyRoute ? { ignored: true, reason: ignoredReason } : {}),
     },
     { status: 200 }
   );

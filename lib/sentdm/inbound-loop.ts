@@ -16,6 +16,7 @@ import {
   type ConversationHistoryMessage,
   type RiskLevel,
 } from "@/lib/ai/conversation-reply-core";
+import { applySafeBookingQualificationNormalization } from "@/lib/ai/safe-booking-qualification-reply";
 import { isLikelyE164Phone } from "@/lib/ai/phone-e164";
 import { maybeUpdateConversationSummary } from "@/lib/agent/conversation-summary";
 import { businessRulesGate } from "@/lib/agent/business-rules-gate";
@@ -25,7 +26,12 @@ import {
   resolveBusinessMessagingConfigFromDb,
 } from "@/lib/business-messaging-config";
 import { detectCarrierComplianceKind } from "@/lib/sentdm/carrier-compliance";
-import { evaluateInboundLiveOutboundPolicy } from "@/lib/campaigns/send-eligibility";
+import { computeInboundProviderSendDecision } from "@/lib/sentdm/live-agent-outbound";
+import {
+  computeCoolingOffUntil,
+  isContactInCoolingOff,
+  isUninterestedMessage,
+} from "@/lib/messaging/cooling-off";
 import { extractSentDmInboundPayload } from "@/lib/messaging/sentdm-webhook";
 import {
   loadSmsConversationHistoryAscending,
@@ -1041,6 +1047,88 @@ export async function runSentDmInboundConversationLoop(params: {
       };
     }
 
+    if (isUninterestedMessage(messageText)) {
+      const coolingOffUntil = computeCoolingOffUntil(new Date());
+      const coolingOffIso = coolingOffUntil.toISOString();
+
+      await supabase
+        .from("contacts")
+        .update({
+          cooling_off_until: coolingOffIso,
+          cooling_off_reason: messageText,
+        })
+        .eq("id", contact!.id as string);
+
+      contact = {
+        ...(contact as DbRow),
+        cooling_off_until: coolingOffIso,
+        cooling_off_reason: messageText,
+      };
+
+      await audit(supabase, {
+        event_type: "cooling_off_started",
+        entity_type: "contact",
+        entity_id: String(contact!.id),
+        metadata: {
+          message: messageText,
+          conversation_id: conversation!.id,
+          inbound_event_id: inboundEventId,
+          cooling_off_until: coolingOffIso,
+          source: "sentdm_inbound_loop",
+        },
+      });
+
+      await audit(supabase, {
+        event_type: "sentdm_loop_suppressed_cooling_off",
+        entity_type: "contact",
+        entity_id: String(contact!.id),
+        metadata: {
+          conversation_id: conversation!.id,
+          reason: "uninterested_language",
+          cooling_off_until: coolingOffIso,
+        },
+      });
+
+      await supabase
+        .from("inbound_events")
+        .update({ status: "processed" })
+        .eq("id", inboundEventId);
+
+      scheduleConversationSummaryRefresh(supabase, conversation!.id as string);
+
+      return {
+        ok: true,
+        statusCode: 200,
+        body: {
+          suppressed: true,
+          reason: "cooling_off_started",
+          cooling_off_until: coolingOffIso,
+          conversation_id: conversation!.id,
+        },
+      };
+    }
+
+    if (isContactInCoolingOff(contact as DbRow)) {
+      await audit(supabase, {
+        event_type: "sentdm_loop_suppressed_cooling_off_active",
+        entity_type: "contact",
+        entity_id: String(contact!.id),
+        metadata: {
+          conversation_id: conversation!.id,
+          cooling_off_until: (contact as DbRow).cooling_off_until ?? null,
+        },
+      });
+      await supabase
+        .from("inbound_events")
+        .update({ status: "processed" })
+        .eq("id", inboundEventId);
+      return {
+        ok: true,
+        statusCode: 200,
+        body: { suppressed: true, reason: "cooling_off_active" },
+      };
+    }
+
     const gate = businessRulesGate({
       inboundText: messageText,
       contact: contact as DbRow,
@@ -1389,10 +1477,17 @@ export async function runSentDmInboundConversationLoop(params: {
         return buildFallbackDecision(aiGenerationError);
       });
 
-      const aiDecision = applyMisunderstoodRouting(
-        aiDecisionRaw,
-        businessConfig.name,
-        Math.min(businessConfig.minConfidence, 0.42)
+      const aiDecision = applySafeBookingQualificationNormalization(
+        applyMisunderstoodRouting(
+          aiDecisionRaw,
+          businessConfig.name,
+          Math.min(businessConfig.minConfidence, 0.42)
+        ),
+        {
+          inboundText: messageText,
+          playbook,
+          intent: aiDecisionRaw.intent,
+        }
       );
 
       const nextState = getNextConversationState(currentState, playbook, messageText);
@@ -1539,37 +1634,32 @@ export async function runSentDmInboundConversationLoop(params: {
       metadata: { intent: reply.intent },
     });
 
-    const liveOutboundPolicy = await evaluateInboundLiveOutboundPolicy(supabase, {
-      contactId: contact!.id as string,
+    const sendDecision = await computeInboundProviderSendDecision(supabase, {
       phone,
-      smsOptOut: Boolean(contact?.sms_opt_out),
-      humanTakeover: Boolean(conversation?.human_takeover),
-      automationDisabled: conversation?.automation_enabled === false,
-      highStakesOrSensitive:
-        escalationHuman || reply.riskLevel === "high" || reply.shouldEscalate,
+      contact: contact! as DbRow,
+      conversation: conversation! as DbRow,
       autoSendEnabled: businessConfig.autoSendEnabled,
-      messageGoal: reply.intent || "inbound_reply",
+      modelShouldSend: reply.shouldSend,
+      deferOutboundSms,
+      escalationHuman,
+      riskLevel: reply.riskLevel,
+      shouldEscalate: reply.shouldEscalate,
     });
 
-    const baseSendEligible =
-      businessConfig.autoSendEnabled &&
-      reply.shouldSend &&
-      isLikelyE164Phone(phone) &&
-      !deferOutboundSms &&
-      !isInboundQuietHoursActive();
+    const allowProviderSend = sendDecision.allowProviderSend;
 
-    const allowProviderSend =
-      baseSendEligible && liveOutboundPolicy.maySendViaProvider;
-
-    if (baseSendEligible && !liveOutboundPolicy.maySendViaProvider) {
+    if (!allowProviderSend && sendDecision.blocker) {
       await audit(supabase, {
         event_type: "sentdm_outbound_send_blocked_policy",
         entity_type: "message",
         entity_id: String(outboundMessage.id),
         metadata: {
-          policy_mode: liveOutboundPolicy.decision.mode,
-          policy_reason_codes: liveOutboundPolicy.decision.reasonCodes,
-          detail: liveOutboundPolicy.blockDetail,
+          provider_send_blocker: sendDecision.blocker,
+          blocker_detail: sendDecision.blockerDetail,
+          policy_reason_codes: sendDecision.policyReasonCodes,
+          allowlist_passed: sendDecision.allowlistPassed,
+          quiet_hours_active: sendDecision.quietHoursActive,
+          live_agent_test_mode: sendDecision.liveAgentTestMode,
           intent: reply.intent,
         },
       });
@@ -1627,10 +1717,31 @@ export async function runSentDmInboundConversationLoop(params: {
           event_type: "sentdm_outbound_send_failed",
           entity_type: "message",
           entity_id: String(outboundMessage.id),
-          metadata: { error: msg },
+          metadata: {
+            error: msg,
+            provider_send_blocker: "sentdm_api_error",
+          },
         });
       }
     } else {
+      await supabase
+        .from("messages")
+        .update({
+          metadata: {
+            ...(typeof outboundMessage.metadata === "object" &&
+            outboundMessage.metadata &&
+            !Array.isArray(outboundMessage.metadata) ?
+              (outboundMessage.metadata as Record<string, unknown>)
+            : {}),
+            provider_send_blocker: sendDecision.blocker,
+            provider_send_blocker_detail: sendDecision.blockerDetail,
+            allowlist_passed: sendDecision.allowlistPassed,
+            quiet_hours_active: sendDecision.quietHoursActive,
+            live_agent_test_mode: sendDecision.liveAgentTestMode,
+          },
+        })
+        .eq("id", outboundMessage.id);
+
       await audit(supabase, {
         event_type: "sentdm_outbound_send_skipped",
         entity_type: "message",
@@ -1640,9 +1751,12 @@ export async function runSentDmInboundConversationLoop(params: {
           model_should_send: reply.shouldSend,
           escalation: escalationHuman,
           defer_outbound_sms: deferOutboundSms,
-          quiet_hours_active: isInboundQuietHoursActive(),
-          policy_blocked: baseSendEligible && !liveOutboundPolicy.maySendViaProvider,
-          policy_reason_codes: liveOutboundPolicy.decision.reasonCodes,
+          quiet_hours_active: sendDecision.quietHoursActive,
+          provider_send_blocker: sendDecision.blocker,
+          provider_send_blocker_detail: sendDecision.blockerDetail,
+          allowlist_passed: sendDecision.allowlistPassed,
+          live_agent_test_mode: sendDecision.liveAgentTestMode,
+          policy_reason_codes: sendDecision.policyReasonCodes,
         },
       });
     }
@@ -1669,8 +1783,10 @@ export async function runSentDmInboundConversationLoop(params: {
       ok: true,
       statusCode: 200,
       body: {
+        contact_id: contact!.id,
         conversation_id: conversation!.id,
         inbound_message_id: inboundMessage.id,
+        inbound_event_id: inboundEventId,
         outbound_message_id: outboundMessage.id,
         intent: reply.intent,
         conversation_stage: reply.conversationStage,

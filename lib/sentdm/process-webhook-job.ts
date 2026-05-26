@@ -25,6 +25,35 @@ export type WebhookJobRow = {
   metadata?: Record<string, unknown> | null;
 };
 
+export type SentDmWebhookJobRunResult = {
+  jobStatus: "completed" | "failed";
+  message_id: string | null;
+  contactId: string | null;
+  conversation_id: string | null;
+  inbound_message_id: string | null;
+  inbound_event_id: string | null;
+  error: string | null;
+  skipped: boolean;
+  skipReason: string | null;
+};
+
+function emptyJobRunResult(
+  partial: Partial<SentDmWebhookJobRunResult> = {}
+): SentDmWebhookJobRunResult {
+  return {
+    jobStatus: "failed",
+    message_id: null,
+    contactId: null,
+    conversation_id: null,
+    inbound_message_id: null,
+    inbound_event_id: null,
+    error: null,
+    skipped: false,
+    skipReason: null,
+    ...partial,
+  };
+}
+
 function ingestSourceFromJob(job: WebhookJobRow): SentDmWebhookJobIngestSource {
   const raw = job.metadata?.ingest_source;
   return raw === "sentdm_inbound_route" ?
@@ -115,7 +144,7 @@ async function finalizeJob(
 export async function runQueuedSentDmInboundJob(
   supabase: SupabaseClient,
   job: WebhookJobRow
-): Promise<void> {
+): Promise<SentDmWebhookJobRunResult> {
   const ingestSource = ingestSourceFromJob(job);
 
   await logMessagingAudit(supabase, {
@@ -155,7 +184,12 @@ export async function runQueuedSentDmInboundJob(
           reason: enrich.reason,
         },
       });
-      return;
+      return emptyJobRunResult({
+        jobStatus: "completed",
+        message_id: enrich.messageId,
+        skipped: true,
+        skipReason: enrich.reason,
+      });
     }
 
     if (!enrich.ok) {
@@ -178,7 +212,11 @@ export async function runQueuedSentDmInboundJob(
           message_id: enrich.messageId,
         },
       });
-      return;
+      return emptyJobRunResult({
+        jobStatus: "failed",
+        message_id: enrich.messageId,
+        error: enrich.error,
+      });
     }
 
     const workBody = enrich.body;
@@ -212,7 +250,12 @@ export async function runQueuedSentDmInboundJob(
           reason: "template_wrapper_existing_outbound",
         },
       });
-      return;
+      return emptyJobRunResult({
+        jobStatus: "completed",
+        message_id: externalId,
+        skipped: true,
+        skipReason: "template_wrapper_existing_outbound",
+      });
     }
 
     const loopResult = await runSentDmInboundConversationLoop({
@@ -223,9 +266,10 @@ export async function runQueuedSentDmInboundJob(
     });
 
     if (!loopResult.ok) {
+      const errText = JSON.stringify(loopResult.body);
       await finalizeJob(supabase, job.id, {
         status: "failed",
-        last_error: JSON.stringify(loopResult.body),
+        last_error: errText,
       });
       await logMessagingAudit(supabase, {
         event_type: "webhook_job_failed",
@@ -237,7 +281,11 @@ export async function runQueuedSentDmInboundJob(
           body: loopResult.body,
         },
       });
-      return;
+      return emptyJobRunResult({
+        jobStatus: "failed",
+        message_id: externalId,
+        error: errText,
+      });
     }
 
     await finalizeJob(supabase, job.id, { status: "completed" });
@@ -249,6 +297,26 @@ export async function runQueuedSentDmInboundJob(
         ingest_source: ingestSource,
         inbound_status: loopResult.statusCode,
       },
+    });
+
+    const loopBody = loopResult.body;
+    return emptyJobRunResult({
+      jobStatus: "completed",
+      message_id: externalId,
+      contactId:
+        typeof loopBody.contact_id === "string" ? loopBody.contact_id : null,
+      conversation_id:
+        typeof loopBody.conversation_id === "string" ?
+          loopBody.conversation_id
+        : null,
+      inbound_message_id:
+        typeof loopBody.inbound_message_id === "string" ?
+          loopBody.inbound_message_id
+        : null,
+      inbound_event_id:
+        typeof loopBody.inbound_event_id === "string" ?
+          loopBody.inbound_event_id
+        : null,
     });
   } catch (error: unknown) {
     const msg =
@@ -263,6 +331,7 @@ export async function runQueuedSentDmInboundJob(
       entity_id: job.id,
       metadata: { stage: "throw", error: msg },
     });
+    return emptyJobRunResult({ jobStatus: "failed", error: msg });
   }
 }
 
@@ -288,33 +357,35 @@ function normalizeRpcJobRows(data: unknown): WebhookJobRow[] {
 export async function processSentDmWebhookJobFromPending(
   supabase: SupabaseClient,
   jobId: string
-): Promise<void> {
+): Promise<SentDmWebhookJobRunResult | null> {
   const { data, error } = await supabase.rpc("begin_webhook_job", {
     p_id: jobId,
   });
 
   if (error) {
     console.warn("[webhook-jobs] begin_webhook_job RPC:", error.message);
-    return;
+    return null;
   }
 
   const rows = normalizeRpcJobRows(data);
   const row = rows[0];
   if (!row) {
-    return;
+    return null;
   }
 
-  await runQueuedSentDmInboundJob(supabase, row);
+  return runQueuedSentDmInboundJob(supabase, row);
 }
 
 /** Drain helper for cron — rows are already `processing`. */
 export async function runClaimedSentDmInboundWebhookJobs(
   supabase: SupabaseClient,
   jobs: WebhookJobRow[]
-): Promise<void> {
+): Promise<SentDmWebhookJobRunResult[]> {
+  const results: SentDmWebhookJobRunResult[] = [];
   for (const j of jobs) {
-    await runQueuedSentDmInboundJob(supabase, j);
+    results.push(await runQueuedSentDmInboundJob(supabase, j));
   }
+  return results;
 }
 
 /** Claims up to `limit` pending jobs and processes each (RPC). */

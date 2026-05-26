@@ -11,6 +11,7 @@ import {
   getAutoSendDecision,
   getNextConversationState,
 } from "@/lib/ai/conversation-reply-core";
+import { applySafeBookingQualificationNormalization } from "@/lib/ai/safe-booking-qualification-reply";
 import { loadSmsConversationHistoryAscending } from "@/lib/sentdm/inbound-sms-booking-phase";
 
 export type AgentIntent =
@@ -119,10 +120,17 @@ export async function generateReply(input: {
     )
   );
 
-  const aiDecision = applyMisunderstoodRouting(
-    aiDecisionRaw,
-    input.config.name,
-    Math.min(input.config.minConfidence, 0.42)
+  const aiDecision = applySafeBookingQualificationNormalization(
+    applyMisunderstoodRouting(
+      aiDecisionRaw,
+      input.config.name,
+      Math.min(input.config.minConfidence, 0.42)
+    ),
+    {
+      inboundText: input.inboundText,
+      playbook,
+      intent: aiDecisionRaw.intent,
+    }
   );
 
   const autoSendDecision = getAutoSendDecision({

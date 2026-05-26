@@ -11,11 +11,14 @@ import {
   type ConversationHistoryMessage,
   withAutomationDisclosure,
 } from "@/lib/ai/conversation-reply-core";
+import { applySafeBookingQualificationNormalization } from "@/lib/ai/safe-booking-qualification-reply";
 import { ApiAuthError, requireBusinessUser } from "@/app/api/lib/require-auth";
+import { conversationAccessibleToBusiness } from "@/lib/conversations/conversation-tenant";
 import {
   messagingAutoSendPolicy,
   resolveBusinessMessagingConfigFromDb,
 } from "@/lib/business-messaging-config";
+import { postgrestMissingBusinessIdColumn } from "@/lib/supabase-postgrest-errors";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/admin";
 
 const UUID_RE =
@@ -25,9 +28,11 @@ export const dynamic = "force-dynamic";
 
 export async function POST(req: Request) {
   let userId: string;
+  let businessId: string;
   try {
     const ctx = await requireBusinessUser();
     userId = ctx.user.id;
+    businessId = ctx.businessId;
   } catch (e) {
     if (e instanceof ApiAuthError) {
       return NextResponse.json({ error: e.message }, { status: e.statusCode });
@@ -61,14 +66,46 @@ export async function POST(req: Request) {
   const supabase = createSupabaseServiceRoleClient();
 
   try {
-    const { data: conversation, error: conversationError } = await supabase
+    let conversation: {
+      id: unknown;
+      status: unknown;
+      business_id?: unknown;
+    } | null;
+    let conversationError: { message: string } | null;
+
+    const convWide = await supabase
       .from("conversations")
-      .select("id, status")
+      .select("id, status, business_id")
       .eq("id", conversationId)
       .maybeSingle();
 
+    if (
+      convWide.error &&
+      postgrestMissingBusinessIdColumn(convWide.error.message)
+    ) {
+      const convNarrow = await supabase
+        .from("conversations")
+        .select("id, status")
+        .eq("id", conversationId)
+        .maybeSingle();
+      conversation = convNarrow.data;
+      conversationError = convNarrow.error;
+    } else {
+      conversation = convWide.data;
+      conversationError = convWide.error;
+    }
+
     if (conversationError) throw new Error(conversationError.message);
     if (!conversation) {
+      return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
+    }
+
+    if (
+      !conversationAccessibleToBusiness(
+        conversation as { business_id?: string | null },
+        businessId
+      )
+    ) {
       return NextResponse.json({ error: "Conversation not found" }, { status: 404 });
     }
 
@@ -119,7 +156,8 @@ export async function POST(req: Request) {
 
     const inboundText = latestMessage.message_text || "";
     const playbook = decidePlaybook(inboundText);
-    const currentState = conversation.status || "new_inquiry";
+    const currentState =
+      typeof conversation.status === "string" ? conversation.status : "new_inquiry";
     const { data: recentMessages, error: historyError } = await supabase
       .from("messages")
       .select("direction, channel, message_text, status, created_at")
@@ -163,10 +201,17 @@ export async function POST(req: Request) {
       return buildFallbackDecision(message);
     });
 
-    const aiDecision = applyMisunderstoodRouting(
-      aiDecisionRaw,
-      businessConfig.name,
-      Math.min(businessConfig.minConfidence, 0.42)
+    const aiDecision = applySafeBookingQualificationNormalization(
+      applyMisunderstoodRouting(
+        aiDecisionRaw,
+        businessConfig.name,
+        Math.min(businessConfig.minConfidence, 0.42)
+      ),
+      {
+        inboundText,
+        playbook,
+        intent: aiDecisionRaw.intent,
+      }
     );
 
     const responseText = withAutomationDisclosure({

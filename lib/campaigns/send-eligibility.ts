@@ -214,6 +214,7 @@ export type LiveOutboundPolicyResult = {
 
 export function evaluateLiveOutboundPolicy(input: {
   smsOptOut: boolean;
+  contactCoolingOff?: boolean;
   humanTakeover: boolean;
   automationDisabled: boolean;
   highStakesOrSensitive: boolean;
@@ -222,6 +223,30 @@ export function evaluateLiveOutboundPolicy(input: {
   lastOutboundAtMs: number | null;
   outboundCount24h: number;
 }): LiveOutboundPolicyResult {
+  if (input.contactCoolingOff) {
+    return {
+      maySendViaProvider: false,
+      decision: {
+        mode: "suppress_due_to_policy",
+        allowed: false,
+        approvalRequired: false,
+        reasonCodes: ["contact_cooling_off"],
+        copyGuidance: {
+          audience: "public",
+          messageGoal: input.messageGoal,
+          tone: "natural_primetime_front_desk",
+          maxQuestions: 1,
+          avoidExactRepeat: true,
+          avoidRecentAngles: false,
+          forbiddenPhrases: [],
+          suggestedCtaStyle: "offer_help",
+        },
+        notes: ["Contact is in a cooling-off period; outbound SMS deferred."],
+      },
+      blockDetail: "Contact is in a cooling-off period",
+    };
+  }
+
   const decision = evaluateMessagingPolicyV1({
     nowMs: Date.now(),
     opportunityAudience: "public",
@@ -264,21 +289,28 @@ export async function evaluateInboundLiveOutboundPolicy(
     contactId: string;
     phone: string;
     smsOptOut: boolean;
+    contactCoolingOff?: boolean;
     humanTakeover: boolean;
     automationDisabled: boolean;
     highStakesOrSensitive: boolean;
     autoSendEnabled: boolean;
     messageGoal: string;
+    /** Live-agent QA: skip 24h cap/cooldown for allowlisted conversational replies only. */
+    relaxFrequencyLimits?: boolean;
   }
 ): Promise<LiveOutboundPolicyResult> {
-  const stats = await loadRecipientOutboundStats(
-    supabase,
-    input.contactId,
-    input.phone
-  );
+  const stats =
+    input.relaxFrequencyLimits ?
+      { lastOutboundAtMs: null, outboundCount24h: 0 }
+    : await loadRecipientOutboundStats(
+        supabase,
+        input.contactId,
+        input.phone
+      );
 
   return evaluateLiveOutboundPolicy({
     smsOptOut: input.smsOptOut,
+    contactCoolingOff: input.contactCoolingOff,
     humanTakeover: input.humanTakeover,
     automationDisabled: input.automationDisabled,
     highStakesOrSensitive: input.highStakesOrSensitive,

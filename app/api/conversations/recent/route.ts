@@ -1,6 +1,10 @@
-import { createClient } from "@supabase/supabase-js";
 import { NextResponse } from "next/server";
-import { gateBusinessUser } from "../../lib/require-auth";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { ApiAuthError, requireBusinessUser } from "@/app/api/lib/require-auth";
+import { conversationAccessibleToBusiness } from "@/lib/conversations/conversation-tenant";
+import { maskPhoneForDisplay } from "@/lib/messaging/phone";
+import { postgrestMissingBusinessIdColumn } from "@/lib/supabase-postgrest-errors";
+import { createSupabaseServiceRoleClient } from "@/lib/supabase/admin";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -11,38 +15,31 @@ const NO_STORE_HEADERS = {
   Expires: "0",
 };
 
-type MessageRow = {
+type ConversationRow = {
   id: string;
-  conversation_id: string | null;
-  contact_id: string | null;
-  direction: string | null;
-  message_text: string | null;
   status: string | null;
-  created_at: string | null;
+  contact_id: string | null;
+  needs_human?: boolean | null;
+  human_takeover?: boolean | null;
+  last_message_at?: string | null;
+  last_inbound_at?: string | null;
+  last_outbound_at?: string | null;
+  business_id?: string | null;
 };
 
 type ContactRow = {
   id: string;
   name: string | null;
+  phone: string | null;
 };
 
-type ConversationRow = {
+type MessageRow = {
   id: string;
-  status: string | null;
+  conversation_id: string | null;
+  direction: string | null;
+  message_text: string | null;
+  created_at: string | null;
 };
-
-function getSupabaseAdmin() {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-  if (!supabaseUrl || !serviceRoleKey) {
-    throw new Error("Missing Supabase environment variables");
-  }
-
-  return createClient(supabaseUrl, serviceRoleKey, {
-    auth: { persistSession: false },
-  });
-}
 
 function jsonNoStore(body: unknown, init?: ResponseInit) {
   return NextResponse.json(body, {
@@ -54,66 +51,157 @@ function jsonNoStore(body: unknown, init?: ResponseInit) {
   });
 }
 
-function uniqueNonNull(values: Array<string | null | undefined>) {
-  return [...new Set(values.filter((value): value is string => Boolean(value)))];
+function isMissingColumnError(message: string): boolean {
+  const m = message.toLowerCase();
+  return m.includes("column") && (m.includes("does not exist") || m.includes("could not find"));
+}
+
+async function fetchConversationsForBusiness(
+  supabase: SupabaseClient,
+  businessId: string
+): Promise<ConversationRow[]> {
+  const selectWide =
+    "id, status, contact_id, needs_human, human_takeover, last_message_at, last_inbound_at, last_outbound_at, business_id";
+  const selectNarrow = "id, status, contact_id";
+
+  const scoped = await supabase
+    .from("conversations")
+    .select(selectWide)
+    .eq("business_id", businessId)
+    .order("last_message_at", { ascending: false, nullsFirst: false })
+    .limit(50);
+
+  if (!scoped.error) {
+    return (scoped.data ?? []) as ConversationRow[];
+  }
+
+  if (postgrestMissingBusinessIdColumn(scoped.error.message)) {
+    const legacy = await supabase
+      .from("conversations")
+      .select(selectNarrow)
+      .order("created_at", { ascending: false })
+      .limit(50);
+    if (legacy.error) throw new Error(legacy.error.message);
+    return (legacy.data ?? []) as ConversationRow[];
+  }
+
+  if (isMissingColumnError(scoped.error.message)) {
+    const fallback = await supabase
+      .from("conversations")
+      .select(selectNarrow)
+      .eq("business_id", businessId)
+      .order("created_at", { ascending: false })
+      .limit(50);
+    if (fallback.error) throw new Error(fallback.error.message);
+    return (fallback.data ?? []) as ConversationRow[];
+  }
+
+  throw new Error(scoped.error.message);
+}
+
+function conversationSortKey(conv: ConversationRow): number {
+  const raw =
+    conv.last_message_at ?? conv.last_inbound_at ?? conv.last_outbound_at ?? null;
+  if (!raw) return 0;
+  const ms = Date.parse(raw);
+  return Number.isNaN(ms) ? 0 : ms;
+}
+
+function needsHumanBadge(conv: ConversationRow, latestDirection: string | null): boolean {
+  if (conv.needs_human === true || conv.human_takeover === true) return true;
+  const st = (conv.status ?? "").toLowerCase();
+  if (st.includes("needs_human") || st.includes("escalated")) return true;
+  return (latestDirection ?? "").toLowerCase() === "inbound";
 }
 
 export async function GET() {
-  const denied = await gateBusinessUser();
-  if (denied) return denied;
+  let businessId: string;
+  try {
+    const ctx = await requireBusinessUser();
+    businessId = ctx.businessId;
+  } catch (e) {
+    if (e instanceof ApiAuthError) {
+      return jsonNoStore({ error: e.message }, { status: e.statusCode });
+    }
+    throw e;
+  }
 
   try {
-    const supabase = getSupabaseAdmin();
-    const { data: messageRows, error: messageError } = await supabase
-      .from("messages")
-      .select("id, conversation_id, contact_id, direction, message_text, status, created_at")
-      .order("created_at", { ascending: false })
-      .limit(12);
+    const supabase = createSupabaseServiceRoleClient();
+    let conversations = await fetchConversationsForBusiness(supabase, businessId);
 
-    if (messageError) throw new Error(messageError.message);
+    conversations = conversations.filter((conv) =>
+      conversationAccessibleToBusiness(conv, businessId)
+    );
 
-    const messages = (messageRows ?? []) as MessageRow[];
-    const contactIds = uniqueNonNull(messages.map((message) => message.contact_id));
-    const conversationIds = uniqueNonNull(messages.map((message) => message.conversation_id));
+    if (conversations.length === 0) {
+      return jsonNoStore({
+        generatedAt: new Date().toISOString(),
+        conversations: [],
+      });
+    }
 
-    const [contactsResult, conversationsResult] = await Promise.all([
+    conversations.sort((a, b) => conversationSortKey(b) - conversationSortKey(a));
+
+    const conversationIds = conversations.map((c) => c.id);
+    const contactIds = [
+      ...new Set(
+        conversations
+          .map((c) => c.contact_id)
+          .filter((id): id is string => Boolean(id))
+      ),
+    ];
+
+    const [contactsResult, messagesResult] = await Promise.all([
       contactIds.length > 0
-        ? supabase.from("contacts").select("id, name").in("id", contactIds)
+        ? supabase.from("contacts").select("id, name, phone").in("id", contactIds)
         : Promise.resolve({ data: [] as ContactRow[], error: null }),
-      conversationIds.length > 0
-        ? supabase.from("conversations").select("id, status").in("id", conversationIds)
-        : Promise.resolve({ data: [] as ConversationRow[], error: null }),
+      supabase
+        .from("messages")
+        .select("id, conversation_id, direction, message_text, created_at")
+        .in("conversation_id", conversationIds)
+        .order("created_at", { ascending: false })
+        .limit(500),
     ]);
 
     if (contactsResult.error) throw new Error(contactsResult.error.message);
-    if (conversationsResult.error) throw new Error(conversationsResult.error.message);
+    if (messagesResult.error) throw new Error(messagesResult.error.message);
 
     const contactsById = new Map(
-      ((contactsResult.data ?? []) as ContactRow[]).map((contact) => [contact.id, contact])
+      ((contactsResult.data ?? []) as ContactRow[]).map((c) => [c.id, c])
     );
-    const conversationsById = new Map(
-      ((conversationsResult.data ?? []) as ConversationRow[]).map((conversation) => [
-        conversation.id,
-        conversation,
-      ])
-    );
+
+    const latestByConv = new Map<string, MessageRow>();
+    for (const row of (messagesResult.data ?? []) as MessageRow[]) {
+      const cid = row.conversation_id;
+      if (!cid || latestByConv.has(cid)) continue;
+      latestByConv.set(cid, row);
+    }
+
+    const list = conversations.map((conv) => {
+      const contact = conv.contact_id ? contactsById.get(conv.contact_id) : null;
+      const latest = latestByConv.get(conv.id);
+      const lastDirection = latest?.direction ?? null;
+
+      return {
+        id: conv.id,
+        contactName: contact?.name?.trim() || "Unknown contact",
+        phoneMasked: maskPhoneForDisplay(contact?.phone),
+        preview: latest?.message_text?.trim() || "(no messages yet)",
+        lastMessageAt:
+          latest?.created_at ??
+          conv.last_message_at ??
+          conv.last_inbound_at ??
+          null,
+        lastDirection,
+        needsHuman: needsHumanBadge(conv, lastDirection),
+        status: conv.status,
+      };
+    });
 
     return jsonNoStore({
       generatedAt: new Date().toISOString(),
-      conversations: messages.slice(0, 4).map((message) => {
-        const contact = message.contact_id ? contactsById.get(message.contact_id) : null;
-        const conversation = message.conversation_id
-          ? conversationsById.get(message.conversation_id)
-          : null;
-        return {
-          id: message.conversation_id ?? message.id,
-          contactName: contact?.name?.trim() || "Unknown contact",
-          preview: message.message_text ?? "",
-          direction: message.direction ?? "inbound",
-          status: conversation?.status ?? message.status ?? null,
-          lastMessageAt: message.created_at,
-        };
-      }),
+      conversations: list,
     });
   } catch (error) {
     return jsonNoStore(

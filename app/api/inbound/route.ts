@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { logMessagingAudit } from "@/lib/messaging/audit";
+import {
+  computeCoolingOffUntil,
+  isUninterestedMessage,
+} from "@/lib/messaging/cooling-off";
 import { isInboundQuietHoursActive } from "@/lib/messaging/quiet-hours";
 import { resolveBusinessMessagingConfigFromDb, getHelpResponseForConfig, getOptInAcknowledgementForConfig } from "@/lib/business-messaging-config";
 import { postgrestMissingBusinessIdColumn } from "@/lib/supabase-postgrest-errors";
@@ -289,21 +293,6 @@ function isMenuMessage(text: string): boolean {
 
 function isLikelyE164Phone(value: unknown): value is string {
   return typeof value === "string" && /^\+[1-9]\d{7,14}$/.test(value.trim());
-}
-
-function isUninterestedMessage(text: string): boolean {
-  const normalized = text.trim().toLowerCase();
-  const uninterestedPhrases = [
-    "not interested",
-    "maybe later",
-    "i'm good",
-    "im good",
-    "i’ll let you know",
-    "i'll let you know",
-    "not right now",
-    "just looking",
-  ];
-  return uninterestedPhrases.some((phrase) => normalized.includes(phrase));
 }
 
 async function saveAndSendAutomatedReply(input: {
@@ -1127,8 +1116,7 @@ export async function POST(req: Request) {
 
     // 9. Cooling-off handling
     if (isUninterestedMessage(messageText)) {
-      const coolingOffUntil = new Date();
-      coolingOffUntil.setDate(coolingOffUntil.getDate() + 14);
+      const coolingOffUntil = computeCoolingOffUntil(new Date());
 
       await supabase
         .from("contacts")

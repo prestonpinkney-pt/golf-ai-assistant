@@ -1,3 +1,13 @@
+/** Mask phone for operator UI — last four digits only. */
+export function maskPhoneForDisplay(value: string | null | undefined): string {
+  if (!value?.trim()) return "—";
+  const digits = value.replace(/\D/g, "");
+  if (digits.length >= 4) {
+    return `***-***-${digits.slice(-4)}`;
+  }
+  return "***";
+}
+
 /** Normalize SMS numbers to E.164 where possible (US-centric). */
 export function normalizePhone(value: string | null): string | null {
   if (!value) return null;

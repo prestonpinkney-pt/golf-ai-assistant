@@ -1,13 +1,14 @@
 import { ApiAuthError, requireBusinessUser } from "@/app/api/lib/require-auth";
 import { loadOutboundOpportunityTargets } from "@/app/api/lib/opportunity-eligible-targets";
+import { listCampaignsForBusiness } from "@/lib/campaigns/list-campaigns";
 import { refreshCampaignRollup } from "@/lib/campaigns/rollup";
 import {
-  postgrestMissingColumn,
   postgrestMissingTable,
 } from "@/lib/supabase-postgrest-errors";
 import { createSupabaseServiceRoleClient } from "@/lib/supabase/admin";
 import { jsonNoStore, errorMessage } from "./_http";
 import { CAMPAIGNS_SETUP_MESSAGE } from "./setup-copy";
+import { buildCampaignsSetupMessage, isDevelopmentRuntime } from "@/lib/campaigns/setup-diagnostics";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -16,53 +17,13 @@ const MAX_TARGETS = 100;
 
 export { CAMPAIGNS_SETUP_MESSAGE };
 
-const CAMPAIGNS_SELECT_FULL =
-  "id, business_id, name, campaign_type, playbook_key, status, source, total_recipients, total_drafted, total_approved, total_sent, total_failed, created_at, updated_at, approved_at, sent_at, metadata";
-
-const CAMPAIGNS_SELECT_MINIMAL =
-  "id, business_id, name, playbook_key, status, total_recipients, total_drafted, total_approved, total_sent, total_failed, created_at, updated_at";
-
-async function listCampaignsForBusiness(
-  supabase: ReturnType<typeof createSupabaseServiceRoleClient>,
-  businessId: string
-): Promise<
-  | { ok: true; campaigns: unknown[]; setupRequired: boolean }
-  | { ok: false; message: string }
-> {
-  const attempts = [CAMPAIGNS_SELECT_FULL, CAMPAIGNS_SELECT_MINIMAL];
-  let lastMsg = "";
-
-  for (const sel of attempts) {
-    const { data, error } = await supabase
-      .from("campaigns")
-      .select(sel)
-      .eq("business_id", businessId)
-      .order("created_at", { ascending: false });
-
-    if (!error) {
-      return { ok: true, campaigns: data ?? [], setupRequired: false };
-    }
-
-    lastMsg = error.message;
-    if (postgrestMissingTable(error.message, "campaigns")) {
-      return { ok: true, campaigns: [], setupRequired: true };
-    }
-    if (postgrestMissingColumn(error.message)) {
-      continue;
-    }
-    return { ok: false, message: error.message };
-  }
-
-  return { ok: false, message: lastMsg || "Failed to load campaigns" };
-}
-
 export async function GET() {
   let businessId: string;
   try {
     businessId = (await requireBusinessUser()).businessId;
   } catch (e) {
     if (e instanceof ApiAuthError) {
-      return jsonNoStore({ error: e.message }, { status: e.statusCode });
+      return jsonNoStore({ error: e.message, code: "auth_failed" }, { status: e.statusCode });
     }
     throw e;
   }
@@ -70,17 +31,29 @@ export async function GET() {
   const supabase = createSupabaseServiceRoleClient();
   const result = await listCampaignsForBusiness(supabase, businessId);
 
-  if (!result.ok) {
-    console.error("campaigns list error:", result.message);
-    return jsonNoStore({ error: "Failed to load campaigns" }, { status: 500 });
-  }
-
-  if (result.setupRequired) {
+  if (result.ok && result.setupRequired) {
     return jsonNoStore({
       campaigns: [],
       setupRequired: true,
-      setupMessage: CAMPAIGNS_SETUP_MESSAGE,
+      setupMessage: result.setupMessage,
+      missing: result.missing,
+      ...(result.debugError ? { debugError: result.debugError } : {}),
     });
+  }
+
+  if (!result.ok) {
+    console.error("[campaigns] list failed:", result.message, result.debugError ?? "");
+    return jsonNoStore(
+      {
+        error: result.setupRequired ? result.setupMessage : result.message,
+        setupRequired: result.setupRequired,
+        setupMessage: result.setupMessage,
+        missing: result.missing,
+        code: result.setupRequired ? "setup_required" : "generation_failed",
+        ...(result.debugError ? { debugError: result.debugError } : {}),
+      },
+      { status: result.setupRequired ? 503 : 500 }
+    );
   }
 
   return jsonNoStore({
@@ -98,7 +71,7 @@ export async function POST(req: Request) {
     businessId = ctx.businessId;
   } catch (e) {
     if (e instanceof ApiAuthError) {
-      return jsonNoStore({ error: e.message }, { status: e.statusCode });
+      return jsonNoStore({ error: e.message, code: "auth_failed" }, { status: e.statusCode });
     }
     throw e;
   }
@@ -161,7 +134,7 @@ export async function POST(req: Request) {
   const picked = targets.filter((t) => targetIdSet.has(t.opportunityId));
   if (picked.length === 0) {
     return jsonNoStore(
-      { error: "No matching opportunity targets for this workspace" },
+      { error: "No matching opportunity targets for this workspace", code: "no_targets" },
       { status: 404 }
     );
   }
@@ -202,15 +175,20 @@ export async function POST(req: Request) {
   if (cErr || !campaign) {
     console.error("campaign insert:", cErr?.message);
     if (cErr && postgrestMissingTable(cErr.message, "campaigns")) {
+      const missing = ["campaigns"] as const;
       return jsonNoStore(
         {
-          error: CAMPAIGNS_SETUP_MESSAGE,
+          error: buildCampaignsSetupMessage([...missing]),
           setupRequired: true,
+          setupMessage: buildCampaignsSetupMessage([...missing]),
+          missing,
+          code: "setup_required",
+          ...(isDevelopmentRuntime() ? { debugError: cErr.message } : {}),
         },
         { status: 503 }
       );
     }
-    return jsonNoStore({ error: "Failed to create campaign" }, { status: 500 });
+    return jsonNoStore({ error: "Failed to create campaign", code: "generation_failed" }, { status: 500 });
   }
 
   const campaignId = campaign.id as string;
@@ -236,15 +214,20 @@ export async function POST(req: Request) {
     console.error("campaign_messages insert:", mErr.message);
     await supabase.from("campaigns").delete().eq("id", campaignId);
     if (postgrestMissingTable(mErr.message, "campaign_messages")) {
+      const missing = ["campaign_messages"] as const;
       return jsonNoStore(
         {
-          error: CAMPAIGNS_SETUP_MESSAGE,
+          error: buildCampaignsSetupMessage([...missing]),
           setupRequired: true,
+          setupMessage: buildCampaignsSetupMessage([...missing]),
+          missing,
+          code: "setup_required",
+          ...(isDevelopmentRuntime() ? { debugError: mErr.message } : {}),
         },
         { status: 503 }
       );
     }
-    return jsonNoStore({ error: "Failed to create campaign messages" }, { status: 500 });
+    return jsonNoStore({ error: "Failed to create campaign messages", code: "generation_failed" }, { status: 500 });
   }
 
   try {

@@ -1,0 +1,11 @@
+{
+  "sub_type": "message.received",
+  "field": "message",
+  "payload": {
+    "from": "+15551234567",
+    "to": "+15559876543",
+    "text": "Hey Primetime — any simulator time this week?",
+    "channel": "sms"
+  },
+  "timestamp": "2026-05-24T12:00:00.000Z"
+}

@@ -44,6 +44,7 @@ export type OpportunityRowForTargets = {
   next_best_action: string | null;
   reply_handling_goal: string | null;
   recommended_message: string | null;
+  metadata?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
   customer_profiles: CustomerProfileJoin | CustomerProfileJoin[] | null;
@@ -102,6 +103,9 @@ export type OutboundOpportunityTarget = {
   pipelineCategory: string;
   offerKey: string | null;
   knownPipelineContributionCents: number;
+
+  availabilitySource: string | null;
+  availabilityVerified: boolean;
 };
 
 function getCustomer(row: OpportunityRowForTargets) {
@@ -191,6 +195,7 @@ export async function loadOutboundOpportunityTargets(input: {
           "next_best_action",
           "reply_handling_goal",
           "recommended_message",
+          "metadata",
           "created_at",
           "updated_at",
           "source",
@@ -211,6 +216,7 @@ export async function loadOutboundOpportunityTargets(input: {
           "next_best_action",
           "reply_handling_goal",
           "recommended_message",
+          "metadata",
           "created_at",
           "updated_at",
           "source",
@@ -253,8 +259,9 @@ export async function loadOutboundOpportunityTargets(input: {
       row.recognized_opportunity.startsWith("mailchimp_");
 
     const isBookingIntel = row.source === "google_calendar_booking";
+    const isWhooshAvailability = row.source === "whoosh_availability";
 
-    if (customer.total_spend_cents <= 0 && !isMailchimpLead && !isBookingIntel) {
+    if (customer.total_spend_cents <= 0 && !isMailchimpLead && !isBookingIntel && !isWhooshAvailability) {
       return false;
     }
     if (!hasUsablePhone(customer.phone)) return false;
@@ -327,6 +334,23 @@ export async function loadOutboundOpportunityTargets(input: {
       const knownPipelineContributionCents =
         knownPipelineDollarsFromTruth(eff);
 
+      const meta =
+        row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+          ? (row.metadata as Record<string, unknown>)
+          : {};
+      const availabilitySource =
+        typeof meta.availability_source === "string" ? meta.availability_source : null;
+      const availabilityVerified = meta.availability_verified === true;
+      const suggestedDayparts = Array.isArray(meta.suggested_dayparts)
+        ? meta.suggested_dayparts.filter((d): d is string => typeof d === "string")
+        : [];
+      const whooshDaypart =
+        suggestedDayparts.includes("sunday")
+          ? ("sunday" as const)
+          : suggestedDayparts.includes("weekday")
+            ? ("weekday" as const)
+            : ("general" as const);
+
       const ai = buildCloseOsAiRecommendation({
         opportunity: {
           id: row.id,
@@ -341,6 +365,14 @@ export async function loadOutboundOpportunityTargets(input: {
           reply_handling_goal: row.reply_handling_goal,
           recommended_message: row.recommended_message,
         },
+        whooshAvailability:
+          availabilityVerified
+            ? {
+                verified: true,
+                hasExactTimes: false,
+                daypart: whooshDaypart,
+              }
+            : null,
         customer: {
           first_name: customer.first_name,
           last_name: customer.last_name,
@@ -419,6 +451,8 @@ export async function loadOutboundOpportunityTargets(input: {
         pipelineCategory: eff.pipelineCategory,
         offerKey: eff.offerKey,
         knownPipelineContributionCents,
+        availabilitySource,
+        availabilityVerified,
       };
       return target;
     })

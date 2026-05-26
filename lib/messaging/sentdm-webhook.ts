@@ -36,13 +36,14 @@ export function sentDmWebhookSignatureHeaderPresence(
   req: NextRequest
 ): Record<string, boolean> {
   const keys = [
+    "x-webhook-signature",
+    "x-webhook-id",
+    "x-webhook-timestamp",
+    // legacy / alternate spellings kept for diagnostics
     "x-sentdm-signature",
     "x-sent-dm-signature",
     "x-sentdm-secret",
     "x-sent-dm-secret",
-    "x-sentdm-timestamp",
-    "x-sent-dm-timestamp",
-    "sentdm-timestamp",
   ] as const;
   const out: Record<string, boolean> = {};
   for (const k of keys) {
@@ -53,6 +54,7 @@ export function sentDmWebhookSignatureHeaderPresence(
 
 function parseWebhookTimestampSeconds(req: NextRequest): number | null {
   const raw =
+    req.headers.get("x-webhook-timestamp") ??
     req.headers.get("x-sentdm-timestamp") ??
     req.headers.get("x-sent-dm-timestamp") ??
     req.headers.get("sentdm-timestamp");
@@ -61,6 +63,59 @@ function parseWebhookTimestampSeconds(req: NextRequest): number | null {
   if (!Number.isFinite(n)) return null;
   if (n > 1e12) return Math.floor(n / 1000);
   return Math.floor(n);
+}
+
+/**
+ * Sent.dm HMAC-SHA256 signature verification.
+ * Signed content: "{webhookId}.{timestamp}.{rawBody}"
+ * Key: base64-decode of secret after stripping "whsec_" prefix.
+ * Signature format: "v1,{base64}" — header may contain multiple space-separated values.
+ */
+function verifySentDmHmacSignature(
+  secret: string,
+  webhookId: string,
+  timestamp: string,
+  rawBody: string,
+  signatureHeader: string
+): boolean {
+  const secretStripped = secret.replace(/^whsec_/, "");
+  let keyBytes: Buffer;
+  try {
+    keyBytes = Buffer.from(secretStripped, "base64");
+  } catch {
+    return false;
+  }
+  const signedContent = `${webhookId}.${timestamp}.${rawBody}`;
+  const expectedB64 = createHmac("sha256", keyBytes)
+    .update(signedContent)
+    .digest("base64");
+
+  // Header may contain multiple space-separated signatures during key rotation
+  const signatures = signatureHeader.split(" ").filter(Boolean);
+  for (const sig of signatures) {
+    const provided = sig.replace(/^v1,/i, "").trim();
+    if (!provided) continue;
+    const bufExpected = Buffer.from(expectedB64);
+    const bufProvided = Buffer.from(provided);
+    if (
+      bufExpected.length === bufProvided.length &&
+      timingSafeEqual(bufExpected, bufProvided)
+    ) {
+      return true;
+    }
+  }
+
+  if (process.env.SENTDM_DEBUG_WEBHOOK_SIGNATURE === "true") {
+    console.debug("[sentdm-webhook] signature mismatch debug", {
+      webhookId,
+      timestamp,
+      rawBodyLength: rawBody.length,
+      expectedB64,
+      signatureHeader,
+    });
+  }
+
+  return false;
 }
 
 function webhookTimestampFresh(tsSeconds: number, skewSeconds = 300): boolean {
@@ -79,10 +134,55 @@ export type SentDmWebhookVerification =
     }
   | { ok: false; reason: string };
 
+export const SENTDM_DEV_UNSIGNED_LOG =
+  "[sentdm-webhook] DEV unsigned webhook accepted for local testing only.";
+
+/** True when `SENTDM_REQUIRE_SIGNED_DEV_WEBHOOKS=true` (always require HMAC in dev). */
+export function isSentDmSignedDevWebhooksRequired(): boolean {
+  return (
+    process.env.SENTDM_REQUIRE_SIGNED_DEV_WEBHOOKS?.trim().toLowerCase() ===
+    "true"
+  );
+}
+
+/** True when `SENTDM_ALLOW_UNSIGNED_DEV_WEBHOOKS=true` (local smoke only). */
+export function isSentDmUnsignedDevWebhooksExplicitlyAllowed(): boolean {
+  return (
+    process.env.NODE_ENV === "development" &&
+    process.env.SENTDM_ALLOW_UNSIGNED_DEV_WEBHOOKS?.trim().toLowerCase() ===
+      "true"
+  );
+}
+
+/**
+ * Unsigned dev webhooks are opt-in only (`SENTDM_ALLOW_UNSIGNED_DEV_WEBHOOKS=true`).
+ * When `SENTDM_WEBHOOK_SECRET` is set, HMAC is required unless that flag is set.
+ */
+export function isSentDmUnsignedDevWebhooksAllowed(): boolean {
+  return (
+    process.env.NODE_ENV === "development" &&
+    isSentDmUnsignedDevWebhooksExplicitlyAllowed() &&
+    !isSentDmSignedDevWebhooksRequired()
+  );
+}
+
+/**
+ * True when `SENTDM_ALLOW_UNSIGNED_WEBHOOKS=true` (any environment).
+ * Use when Sent.dm is not configured to sign webhook requests.
+ * Webhooks are accepted without signature verification — set this only when
+ * Sent.dm signing is unavailable and remove once signing is configured.
+ */
+export function isSentDmUnsignedWebhooksAllowed(): boolean {
+  return (
+    process.env.SENTDM_ALLOW_UNSIGNED_WEBHOOKS?.trim().toLowerCase() === "true"
+  );
+}
+
 /**
  * Validates Sent.dm webhook authenticity.
- * - Production requires `SENTDM_WEBHOOK_SECRET` and valid signature headers (unless explicitly skipped — never default).
- * - Development (`NODE_ENV=development`): allows unsigned requests when secret is set but no signature headers are sent (local testing).
+ * - Production requires `SENTDM_WEBHOOK_SECRET` and valid signature headers.
+ * - Development requires HMAC when `SENTDM_WEBHOOK_SECRET` is set; set
+ *   `SENTDM_ALLOW_UNSIGNED_DEV_WEBHOOKS=true` only for unsigned local smoke tests.
  * - Optional timestamp headers: when present with a verified signature path, checked for freshness (±5 min).
  */
 export function verifySentDmAuthenticity(
@@ -91,32 +191,45 @@ export function verifySentDmAuthenticity(
 ): SentDmWebhookVerification {
   const secret = process.env.SENTDM_WEBHOOK_SECRET?.trim();
   const isDev = process.env.NODE_ENV === "development";
+  const allowUnsignedDev = isSentDmUnsignedDevWebhooksAllowed();
+  const allowUnsigned = isSentDmUnsignedWebhooksAllowed();
 
   if (!secret) {
-    if (isDev) {
+    if (allowUnsigned || (isDev && (allowUnsignedDev || !isSentDmSignedDevWebhooksRequired()))) {
       return { ok: true, mode: "development_no_secret" };
     }
     return {
       ok: false,
       reason:
-        "SENTDM_WEBHOOK_SECRET must be configured in production for Sent.dm webhooks",
+        "SENTDM_WEBHOOK_SECRET must be configured for Sent.dm webhook signature verification",
     };
   }
 
-  const signatureHeader =
+  // Sent.dm v3 standard headers
+  const signatureHeader = req.headers.get("x-webhook-signature");
+  const webhookId = req.headers.get("x-webhook-id");
+  const webhookTimestamp = req.headers.get("x-webhook-timestamp");
+
+  // Legacy / fallback headers (kept for compatibility)
+  const legacySignatureHeader =
     req.headers.get("x-sentdm-signature") ??
     req.headers.get("x-sent-dm-signature");
-
   const sharedHeaderRaw =
     req.headers.get("x-sentdm-secret") ?? req.headers.get("x-sent-dm-secret");
 
-  const headersPresent = !!(signatureHeader || sharedHeaderRaw?.trim());
+  const headersPresent = !!(
+    signatureHeader ||
+    legacySignatureHeader ||
+    sharedHeaderRaw?.trim()
+  );
 
   if (!headersPresent) {
-    if (isDev) {
-      console.warn(
-        "[sentdm-webhook] DEV unsigned webhook accepted (NODE_ENV=development)"
-      );
+    if (allowUnsigned) {
+      console.warn("[sentdm-webhook] Unsigned webhook accepted (SENTDM_ALLOW_UNSIGNED_WEBHOOKS=true). Configure Sent.dm webhook signing to remove this bypass.");
+      return { ok: true, mode: "development_unsigned_allowed" };
+    }
+    if (allowUnsignedDev) {
+      console.warn(SENTDM_DEV_UNSIGNED_LOG);
       return { ok: true, mode: "development_unsigned_allowed" };
     }
     return { ok: false, reason: "Missing Sent.dm signature headers" };
@@ -124,9 +237,29 @@ export function verifySentDmAuthenticity(
 
   const tsSeconds = parseWebhookTimestampSeconds(req);
 
-  if (signatureHeader) {
+  // Primary path: Sent.dm v3 HMAC-SHA256 (x-webhook-signature + x-webhook-id + x-webhook-timestamp)
+  if (signatureHeader && webhookId && webhookTimestamp) {
+    if (
+      !verifySentDmHmacSignature(
+        secret,
+        webhookId,
+        webhookTimestamp,
+        rawBody,
+        signatureHeader
+      )
+    ) {
+      return { ok: false, reason: "Invalid Sent.dm signature" };
+    }
+    if (tsSeconds !== null && !webhookTimestampFresh(tsSeconds)) {
+      return { ok: false, reason: "Sent.dm webhook timestamp stale or invalid" };
+    }
+    return { ok: true, mode: "hmac_sha256_body" };
+  }
+
+  // Fallback: legacy HMAC header (hex digest, raw body)
+  if (legacySignatureHeader) {
     const expected = createHmac("sha256", secret).update(rawBody).digest("hex");
-    const provided = signatureHeader.replace(/^sha256=/i, "").trim();
+    const provided = legacySignatureHeader.replace(/^sha256=/i, "").trim();
     if (!timingSafeEqualStrings(expected, provided)) {
       return { ok: false, reason: "Invalid Sent.dm signature" };
     }
@@ -136,6 +269,7 @@ export function verifySentDmAuthenticity(
     return { ok: true, mode: "hmac_sha256_body" };
   }
 
+  // Fallback: shared secret header
   const sharedHeader = sharedHeaderRaw?.trim() ?? "";
   if (!timingSafeEqualStrings(sharedHeader, secret)) {
     return { ok: false, reason: "Invalid Sent.dm shared secret header" };
@@ -426,22 +560,50 @@ export function extractSentDmInboundPayload(
   };
 }
 
-/** External / Sent.dm message id (supports nested `payload.message_id`). */
-export function extractSentDmMessageExternalId(
+/**
+ * Sent.dm message id for GET /v3/messages/{id} enrichment.
+ * Prefers nested `payload.message_id` over top-level `external_id` (correlation ids).
+ */
+export function extractSentDmMessageIdForLookup(
   body: Record<string, unknown>
 ): string | null {
   const id = firstString(body, [
-    "external_id",
-    "externalId",
-    "message_id",
     "payload.message_id",
     "payload.messageId",
+    "message_id",
+    "messageId",
     "data.message_id",
     "data.messageId",
     "data.id",
     "message.message_id",
     "message.messageId",
     "message.id",
+    "external_id",
+    "externalId",
+  ]);
+  return id?.trim()?.length ? id.trim() : null;
+}
+
+/** External / Sent.dm message id (supports nested `payload.message_id`). */
+export function extractSentDmMessageExternalId(
+  body: Record<string, unknown>
+): string | null {
+  return extractSentDmMessageIdForLookup(body);
+}
+
+/** Sent.dm / CloseOS contact id from webhook envelope (when present). */
+export function extractSentDmContactId(
+  body: Record<string, unknown>
+): string | null {
+  const id = firstString(body, [
+    "contactId",
+    "contact_id",
+    "payload.contactId",
+    "payload.contact_id",
+    "data.contactId",
+    "data.contact_id",
+    "contact.id",
+    "payload.contact.id",
   ]);
   return id?.trim()?.length ? id.trim() : null;
 }
@@ -522,4 +684,156 @@ export function isDeliveryFailureStatus(status: string): boolean {
     s === "rejected" ||
     s === "complained"
   );
+}
+
+/** True when envelope includes customer message text (any supported path). */
+export function hasSentDmInboundText(body: Record<string, unknown>): boolean {
+  const { messageText } = extractSentDmInboundPayload(body);
+  return (messageText?.trim().length ?? 0) > 0;
+}
+
+/**
+ * Delivery / lifecycle callbacks (not customer inbound SMS).
+ * Used to decide when missing message id should warn about reconciliation.
+ */
+export function looksLikeDeliveryStatusCallback(
+  body: Record<string, unknown>
+): boolean {
+  if (looksLikeInboundMessage(body)) return false;
+
+  const eventType = normalizedEventLabel(body);
+  if (looksLikeOutboundStatus(body)) return true;
+
+  const status = normalizeSentDmStatus(
+    (body.status ?? body.delivery_status) as string | undefined
+  );
+  const deliveryStatuses = new Set([
+    "delivered",
+    "failed",
+    "bounced",
+    "rejected",
+    "complained",
+    "opened",
+    "clicked",
+    "unsubscribed",
+  ]);
+  if (deliveryStatuses.has(status)) return true;
+
+  if (
+    eventType?.includes("delivered") ||
+    eventType?.includes("delivery") ||
+    eventType?.includes("failed") ||
+    eventType?.includes("bounced") ||
+    eventType?.includes("routed") ||
+    eventType?.includes("queued")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+export type SentDmWebhookLogSummary = {
+  eventType: string;
+  verificationMode: string;
+  hasMessageId: boolean;
+  hasText: boolean;
+  looksInbound: boolean;
+  queued: boolean;
+  status: string;
+  mode?: "local_text_envelope" | "integration_message_lookup";
+  reconciled?: boolean;
+  externalIdPresent?: boolean;
+  ignored?: boolean;
+  reason?: string;
+  duplicate?: boolean;
+};
+
+export function inferInboundWebhookLogMode(input: {
+  body: Record<string, unknown>;
+  externalId: string;
+  looksInbound: boolean;
+  queued: boolean;
+}): "local_text_envelope" | "integration_message_lookup" | undefined {
+  if (
+    input.looksInbound &&
+    input.queued &&
+    input.externalId.trim().length > 0
+  ) {
+    return "integration_message_lookup";
+  }
+  if (
+    input.looksInbound &&
+    input.queued &&
+    !input.externalId.trim() &&
+    hasSentDmInboundText(input.body)
+  ) {
+    return "local_text_envelope";
+  }
+  return undefined;
+}
+
+export function buildSentDmWebhookLogSummary(input: {
+  eventType: string;
+  verificationMode: string;
+  body: Record<string, unknown>;
+  externalId: string;
+  status: string;
+  looksInbound: boolean;
+  queued?: boolean;
+  mode?: "local_text_envelope" | "integration_message_lookup";
+  reconciled?: boolean;
+  externalIdPresent?: boolean;
+  ignored?: boolean;
+  reason?: string;
+  duplicate?: boolean;
+}): SentDmWebhookLogSummary {
+  const queued = input.queued ?? false;
+  const mode =
+    input.mode ??
+    inferInboundWebhookLogMode({
+      body: input.body,
+      externalId: input.externalId,
+      looksInbound: input.looksInbound,
+      queued,
+    });
+
+  const summary: SentDmWebhookLogSummary = {
+    eventType: input.eventType,
+    verificationMode: input.verificationMode,
+    hasMessageId: input.externalId.trim().length > 0,
+    hasText: hasSentDmInboundText(input.body),
+    looksInbound: input.looksInbound,
+    queued,
+    status: input.status,
+  };
+
+  if (mode) summary.mode = mode;
+  if (input.reconciled !== undefined) summary.reconciled = input.reconciled;
+  if (input.externalIdPresent !== undefined) {
+    summary.externalIdPresent = input.externalIdPresent;
+  }
+  if (input.ignored) summary.ignored = input.ignored;
+  if (input.reason) summary.reason = input.reason;
+  if (input.duplicate) summary.duplicate = input.duplicate;
+
+  return summary;
+}
+
+/** Warn only when a delivery/status callback cannot reconcile without message id. */
+export function shouldWarnMissingExternalId(input: {
+  externalId: string;
+  looksInbound: boolean;
+  body: Record<string, unknown>;
+}): boolean {
+  if (input.externalId.trim().length > 0) return false;
+  if (input.looksInbound) return false;
+  return looksLikeDeliveryStatusCallback(input.body);
+}
+
+export function logSentDmWebhookSummary(
+  route: string,
+  summary: SentDmWebhookLogSummary
+): void {
+  console.log(`[${route}]`, JSON.stringify(summary));
 }

@@ -123,3 +123,19 @@ test("evaluateLiveOutboundPolicy blocks human takeover threads", () => {
   assert.equal(result.maySendViaProvider, false);
   assert.ok(result.decision.reasonCodes.includes("human_takeover"));
 });
+
+test("evaluateLiveOutboundPolicy blocks contact cooling-off period", () => {
+  const result = evaluateLiveOutboundPolicy({
+    smsOptOut: false,
+    contactCoolingOff: true,
+    humanTakeover: false,
+    automationDisabled: false,
+    highStakesOrSensitive: false,
+    autoSendEnabled: true,
+    messageGoal: "inbound_reply",
+    lastOutboundAtMs: null,
+    outboundCount24h: 0,
+  });
+  assert.equal(result.maySendViaProvider, false);
+  assert.ok(result.decision.reasonCodes.includes("contact_cooling_off"));
+});

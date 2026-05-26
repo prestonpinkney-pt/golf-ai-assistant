@@ -76,6 +76,18 @@ function resolveApiKeyMeta() {
   console.log(`key_source: ${key.key_source}`);
   console.log(`template_configured: ${present("SENT_DM_TEMPLATE_ID")}`);
   console.log(`webhook_secret_configured: ${present("SENTDM_WEBHOOK_SECRET")}`);
+  console.log(
+    `require_signed_dev_webhooks: ${String(process.env.SENTDM_REQUIRE_SIGNED_DEV_WEBHOOKS ?? "").trim().toLowerCase() === "true"}`,
+  );
+  console.log(
+    `allow_unsigned_dev_webhooks: ${String(process.env.SENTDM_ALLOW_UNSIGNED_DEV_WEBHOOKS ?? "").trim().toLowerCase() === "true"}`,
+  );
+  console.log(
+    `live_agent_test_mode: ${String(process.env.CLOSEOS_LIVE_AGENT_TEST_MODE ?? "").trim().toLowerCase() === "true"}`,
+  );
+  console.log(
+    `test_sms_allowlist_configured: ${Boolean(process.env.CLOSEOS_TEST_SMS_ALLOWLIST?.trim())}`,
+  );
 })();
 
 const issues = [];

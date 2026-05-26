@@ -62,7 +62,7 @@ export function resolveSentDmAuthMode(): SentDmAuthMode {
   return "x_api_key";
 }
 
-function resolveSentDmApiKey(): SentDmResolvedApiKey | null {
+export function resolveSentDmApiKey(): SentDmResolvedApiKey | null {
   const sentdm = process.env.SENTDM_API_KEY?.trim();
   if (sentdm)
     return { apiKey: sentdm, sourceEnvVar: "SENTDM_API_KEY" };

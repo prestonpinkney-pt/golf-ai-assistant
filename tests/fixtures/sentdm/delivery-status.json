@@ -1,0 +1,12 @@
+{
+  "sub_type": "message.delivered",
+  "event": "message.delivered",
+  "external_id": "sdm-msg-delivery-001",
+  "payload": {
+    "message_id": "sdm-msg-delivery-001",
+    "status": "delivered"
+  },
+  "status": "delivered",
+  "delivery_status": "delivered",
+  "timestamp": "2026-05-24T12:10:00.000Z"
+}

@@ -15,6 +15,7 @@ import {
   type ConversationHistoryMessage,
   withAutomationDisclosure,
 } from "@/lib/ai/conversation-reply-core";
+import { applySafeBookingQualificationNormalization } from "@/lib/ai/safe-booking-qualification-reply";
 import {
   applyBookingConfirmationOutboundGuard,
 } from "@/lib/ai/booking-outbound-guard";
@@ -238,10 +239,18 @@ export async function POST(req: Request) {
     const aiDecision =
       smsBookingFlow.kind === "direct_outbound"
         ? aiDecisionRaw
-        : applyMisunderstoodRouting(
-            aiDecisionRaw,
-            businessConfig.name,
-            Math.min(businessConfig.minConfidence, 0.42)
+        : applySafeBookingQualificationNormalization(
+            applyMisunderstoodRouting(
+              aiDecisionRaw,
+              businessConfig.name,
+              Math.min(businessConfig.minConfidence, 0.42)
+            ),
+            {
+              inboundText,
+              playbook,
+              intent: aiDecisionRaw.intent,
+              bookingConfirmedByWhoosh: bookingConfirmedFlag,
+            }
           );
 
     const draftedReply =

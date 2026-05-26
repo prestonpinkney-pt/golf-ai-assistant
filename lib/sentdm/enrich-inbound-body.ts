@@ -10,6 +10,7 @@ import {
 } from "@/lib/sentdm/sentdm-inbound-eligibility";
 import {
   extractSentDmInboundPayload,
+  extractSentDmMessageIdForLookup,
   normalizePhone,
 } from "@/lib/messaging/sentdm-webhook";
 import { firstString, readPath } from "@/lib/messaging/webhook-payload";
@@ -58,14 +59,7 @@ export async function enrichSentDmInboundBody(
   body: Record<string, unknown>
 ): Promise<EnrichSentDmInboundBodyResult> {
   const parsed = extractSentDmInboundPayload(body);
-  const messageId =
-    firstString(body, [
-      "payload.message_id",
-      "payload.messageId",
-      "message_id",
-      "externalId",
-      "external_id",
-    ])?.trim() || null;
+  const messageId = extractSentDmMessageIdForLookup(body);
 
   const payloadIn = shallowPayload(body) ?? {};
   const inboundHint = firstString(body, [
@@ -177,7 +171,9 @@ export async function enrichSentDmInboundBody(
         messageId: null,
       };
     }
-    logDev("envelope_text_only_no_lookup");
+    logDev(
+      "Inbound text envelope accepted without Sent.dm lookup; use message_id for full integration testing."
+    );
     return { ok: true, body: { ...body } };
   }
 

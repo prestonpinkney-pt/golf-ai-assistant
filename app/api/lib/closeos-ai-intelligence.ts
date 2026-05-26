@@ -38,6 +38,11 @@ export type BuildCloseOsAiRecommendationInput = {
   bookingContext: CloseOsAiBookingContext;
   /** e.g. Booking Intelligence */
   sourceDisplayLabel: string;
+  whooshAvailability?: {
+    verified: boolean;
+    hasExactTimes: boolean;
+    daypart?: "weekday" | "sunday" | "general";
+  } | null;
 };
 
 export type CloseOsAiRecommendation = {
@@ -198,6 +203,55 @@ export function buildCloseOsAiRecommendation(
       followUpPlan:
         "1) Enrich phone from Square/Whoosh. 2) Confirm consent. 3) Re-run targets list.",
     });
+  }
+
+  const whoosh = input.whooshAvailability;
+  const whooshVerified = whoosh?.verified === true;
+
+  if (
+    whooshVerified &&
+    (ro === "slow_time_fill" ||
+      ro === "weekday_open_bay_fill" ||
+      ro === "sunday_open_bay_fill" ||
+      ro === "simulator_open_bay_fill" ||
+      ro === "simulator_rebooking_due" ||
+      ro === "simulator_recent_guest_follow_up" ||
+      ro === "simulator_cancelled_recovery" ||
+      ro === "mailchimp_simulator_interest")
+  ) {
+    const generalMsg = capSms(
+      `Hi ${first}, this is Primetime Golf. We have a few simulator windows this week if you want to get a round or practice session in. Want me to send a couple options?`
+    );
+    const sundayMsg = capSms(
+      `Hi ${first}, this is Primetime Golf. Sunday has a few good simulator windows if you want to get a round in without the rush. Want me to send a couple options?`
+    );
+    const weekdayMsg = capSms(
+      `Hi ${first}, this is Primetime Golf. We have a few weekday simulator windows before the evening rush. Want me to send a couple options?`
+    );
+
+    const daypart = whoosh?.daypart ?? "general";
+    const msg =
+      ro === "sunday_open_bay_fill" || daypart === "sunday"
+        ? sundayMsg
+        : ro === "weekday_open_bay_fill" || daypart === "weekday"
+          ? weekdayMsg
+          : generalMsg;
+
+    return {
+      aiOpportunityReason: `Whoosh-verified simulator availability (${whoosh?.daypart ?? "general"} daypart). No exact times promised in SMS.${gCalSuffix}`,
+      aiConfidenceReason,
+      recommendedCampaign: "Fill Simulator Time",
+      recommendedOffer: "Simulator bay time",
+      recommendedMessage: msg,
+      recommendedChannel: "sms",
+      nextBestAction:
+        "If they reply yes, offer 2–3 Whoosh-confirmed windows (do not invent times).",
+      replyHandlingGoal: "Book verified simulator time.",
+      objectionHandlingNotes:
+        "Do not quote specific tee times unless pulled from Whoosh sync.",
+      followUpPlan:
+        "1) Confirm interest. 2) Offer verified options from Whoosh. 3) Book in Whoosh.",
+    };
   }
 
   const base = (): CloseOsAiRecommendation => {

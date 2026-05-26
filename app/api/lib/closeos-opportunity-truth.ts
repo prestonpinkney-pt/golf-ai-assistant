@@ -184,6 +184,35 @@ export function getOpportunityTruthForRecognized(
     };
   }
 
+  if (
+    ro === "slow_time_fill" ||
+    ro === "weekday_open_bay_fill" ||
+    ro === "sunday_open_bay_fill" ||
+    ro === "simulator_open_bay_fill"
+  ) {
+    return {
+      offerKey: null,
+      estimatedRevenueCents: 4500,
+      revenueReviewRequired: false,
+      countsTowardPipeline: true,
+      pipelineCategory: "known_pipeline",
+    };
+  }
+
+  if (
+    ro === "simulator_rebooking_due" ||
+    ro === "simulator_recent_guest_follow_up" ||
+    ro === "simulator_cancelled_recovery"
+  ) {
+    return {
+      offerKey: null,
+      estimatedRevenueCents: 3500,
+      revenueReviewRequired: false,
+      countsTowardPipeline: true,
+      pipelineCategory: "known_pipeline",
+    };
+  }
+
   if (ro === "inactive_customer_reactivation" || ro === "recent_buyer_follow_up") {
     return {
       offerKey: null,

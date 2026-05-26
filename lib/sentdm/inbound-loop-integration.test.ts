@@ -39,6 +39,13 @@ before(async () => {
   runQueuedSentDmInboundJob = webhookJob.runQueuedSentDmInboundJob;
 });
 
+function envelopeWithText(base: Record<string, unknown>, text: string) {
+  const clone = structuredClone(base) as Record<string, unknown>;
+  const payload = clone.payload as Record<string, unknown> | undefined;
+  if (payload) payload.text = text;
+  return clone;
+}
+
 describe("inbound-loop integration (mocked Supabase + AI)", () => {
   beforeEach(() => {
     resetAiCalls();
@@ -72,11 +79,92 @@ describe("inbound-loop integration (mocked Supabase + AI)", () => {
       ) >= 1,
       "expected AI outbound draft"
     );
-    const inbound = supabase.__tables.messages.find(
-      (m) =>
-        m.direction === "inbound" && m.external_id === "fixture-inbound-ext-001"
+  });
+
+  test("not interested sets cooling_off_until and skips auto-reply", async () => {
+    const supabase = createInboundLoopMockSupabase();
+    const base = fixtures.inbound_membership_question_envelope as Record<
+      string,
+      unknown
+    >;
+    const envelope = envelopeWithText(base, "Thanks, not interested");
+
+    const result = await runSentDmInboundConversationLoop({
+      supabase,
+      rawPayload: envelope,
+      externalId: "fixture-cooling-off-001",
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(
+      (result.body as { reason?: string }).reason,
+      "cooling_off_started"
     );
-    assert.ok(inbound);
+    assert.equal(aiCalls(), 0);
+    assert.equal(
+      supabase.__countMessages((m) => m.direction === "outbound" && m.ai_generated === true),
+      0
+    );
+
+    const contact = supabase.__tables.contacts.find((c) => c.phone === "+15551234567");
+    assert.ok(contact?.cooling_off_until);
+    assert.ok(
+      supabase.__tables.audit_logs.some((a) => a.event_type === "cooling_off_started")
+    );
+  });
+
+  test("STOP uses opt-out path, not cooling-off", async () => {
+    const supabase = createInboundLoopMockSupabase();
+    const base = fixtures.inbound_membership_question_envelope as Record<
+      string,
+      unknown
+    >;
+    const envelope = envelopeWithText(base, "STOP");
+
+    const result = await runSentDmInboundConversationLoop({
+      supabase,
+      rawPayload: envelope,
+      externalId: "fixture-stop-001",
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal((result.body as { control_reply?: string }).control_reply, "opt_out");
+    assert.equal(aiCalls(), 0);
+
+    const contact = supabase.__tables.contacts.find((c) => c.phone === "+15551234567");
+    assert.equal(contact?.sms_opt_out, true);
+    assert.equal(contact?.cooling_off_until, undefined);
+  });
+
+  test("cooled-off contact does not receive auto-reply", async () => {
+    const supabase = createInboundLoopMockSupabase();
+    const future = new Date(Date.now() + 7 * 86_400_000).toISOString();
+    supabase.__tables.contacts.push({
+      id: "contact-already-cooled",
+      phone: "+15551234567",
+      cooling_off_until: future,
+    });
+
+    const envelope = fixtures.inbound_membership_question_envelope as Record<
+      string,
+      unknown
+    >;
+
+    const result = await runSentDmInboundConversationLoop({
+      supabase,
+      rawPayload: envelope,
+      externalId: "fixture-cooled-active-001",
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(
+      (result.body as { reason?: string }).reason,
+      "cooling_off_active"
+    );
+    assert.equal(aiCalls(), 0);
   });
 
   test("duplicate external_id dedupes on second processing", async () => {

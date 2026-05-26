@@ -34,7 +34,9 @@ Set these in **Vercel → Project → Settings → Environment Variables** (Prod
 | `OPENAI_API_KEY` | AI reply drafting |
 | `CLOSEOS_BUSINESS_ID` | UUID for Primetime Golf tenant row |
 | `SENTDM_API_KEY` (or `SENT_API_KEY` / `SENT_DM_API_KEY`) | Sent.dm outbound |
-| `SENTDM_WEBHOOK_SECRET` | Validates inbound Sent.dm webhooks |
+| `SENTDM_WEBHOOK_SECRET` | HMAC signing secret for inbound Sent.dm webhooks (required when secret is set) |
+| `SENTDM_ALLOW_UNSIGNED_DEV_WEBHOOKS` | **Development only.** `true` allows unsigned smoke tests (not integration) |
+| `SENTDM_REQUIRE_SIGNED_DEV_WEBHOOKS` | **Development only.** `true` always rejects unsigned (redundant when secret is set) |
 | `SENT_DM_TEMPLATE_ID` | Required when `SENTDM_SEND_MODE=template` (default) |
 | `SQUARE_ACCESS_TOKEN` | Square API (sync scripts + revenue) |
 | `SQUARE_LOCATION_ID` | Square location for payments/sync |
@@ -45,7 +47,8 @@ Optional but common:
 
 | Variable | Purpose |
 | -------- | ------- |
-| `CLOSEOS_TEST_SMS_ALLOWLIST` | Comma-separated E.164; bulk campaign send blocked off-list |
+| `CLOSEOS_TEST_SMS_ALLOWLIST` | Comma-separated E.164; required for live agent test mode provider auto-send |
+| `CLOSEOS_LIVE_AGENT_TEST_MODE` | `true` enables allowlisted inbound auto-send QA (does not bypass STOP/opt-out/cooling-off/high-risk) |
 | `CLOSEOS_QUIET_HOURS_ENABLED` | `true` to defer overnight sends |
 | `CLOSEOS_WEBHOOK_JOB_SECRET` | Ops override for manual webhook drain |
 | `WHOOSH_*` | Whoosh agenda/booking integration (if enabled) |
@@ -102,8 +105,41 @@ In the Sent.dm dashboard, point inbound message webhooks to your **production** 
 Requirements:
 
 1. Set `SENTDM_WEBHOOK_SECRET` in Vercel to match Sent.dm signing secret.
-2. Do **not** embed API keys in webhook URLs.
-3. Confirm Vercel Cron drains the queue: `/api/cron/process-webhook-jobs` every 5 minutes (needs `CRON_SECRET`).
+2. In production, unsigned webhooks are always rejected — no dev bypass flags apply.
+3. Do **not** embed API keys in webhook URLs.
+4. Confirm Vercel Cron drains the queue: `/api/cron/process-webhook-jobs` every 5 minutes (needs `CRON_SECRET`).
+
+### Local webhook testing
+
+| Mode | Env | Command |
+| ---- | --- | ------- |
+| **Integration (recommended)** | `SENTDM_WEBHOOK_SECRET` + `SENTDM_API_KEY` | `npm run test:sentdm-webhook:signed` |
+| **Unsigned smoke only** | `SENTDM_ALLOW_UNSIGNED_DEV_WEBHOOKS=true` | `npm run test:sentdm-webhook:smoke` |
+
+Signed `message.received` with `payload.message_id` runs HMAC verification (`verificationMode: hmac_sha256_body`), GET `/v3/messages/{id}`, and returns HTTP 200 with `status: "processed"`, `message_id`, and `contactId`. Unsigned text-only fixtures log `mode: local_text_envelope` and queue without Sent.dm lookup — smoke only.
+
+**Sent.dm dashboard:** configure webhook URL to `https://<host>/api/sentdm/webhook`, paste the same value into `SENTDM_WEBHOOK_SECRET`, and send a real inbound SMS. Confirm the JSON response includes `"status":"processed"`.
+
+### Live conversational agent test (allowlisted phone)
+
+Set in `.env.local`:
+
+```bash
+CLOSEOS_LIVE_AGENT_TEST_MODE=true
+CLOSEOS_TEST_SMS_ALLOWLIST=+15103756639
+CLOSEOS_AUTO_SEND_ENABLED=true
+```
+
+Commands:
+
+| Step | Command |
+| ---- | ------- |
+| Unit + mocked full path | `npm run test:live-agent-sms` |
+| Debug latest reply state | `npm run qa:live-agent-reply -- --prepare` |
+| Real E2E (dev server running) | `npm run test:live-agent-sms:e2e` |
+| Drain stuck jobs | `npm run drain:sentdm-webhook-jobs` |
+
+If send is skipped, check `provider_send_blocker` on the outbound message metadata or `npm run qa:live-agent-reply`.
 
 Smoke test: send a test SMS to your Primetime number; confirm a row appears in `inbound_events` / `messages` and the cron job moves `webhook_jobs` to `completed`.
 

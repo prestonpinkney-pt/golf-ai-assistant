@@ -1,0 +1,8 @@
+{
+  "sub_type": "message.received",
+  "field": "message",
+  "payload": {
+    "channel": "sms"
+  },
+  "timestamp": "2026-05-24T12:15:00.000Z"
+}

@@ -1,0 +1,12 @@
+{
+  "sub_type": "message.received",
+  "field": "message",
+  "payload": {
+    "message_id": "sdm-msg-prod-like-001",
+    "contactId": "sdm-contact-prod-like-001",
+    "inbound_number": "+15551234567",
+    "outbound_number": "+15559876543",
+    "channel": "sms"
+  },
+  "timestamp": "2026-05-24T12:05:00.000Z"
+}
