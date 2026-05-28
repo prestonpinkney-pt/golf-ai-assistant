@@ -1,3 +1,5 @@
+import { resolveSentDmApiKey } from "@/lib/sentdm/send-message";
+
 type SendMessageResult = {
   success: boolean;
   provider: string;
@@ -22,11 +24,15 @@ export async function sendMessage(input: {
   templateId?: string;
 }): Promise<SendMessageResult> {
   const { channel, to, message, name, templateId } = input;
-  const apiKey = process.env.SENT_DM_API_KEY;
+  const resolved = resolveSentDmApiKey();
 
-  if (!apiKey) {
-    throw new Error("Missing SENT_DM_API_KEY");
+  if (!resolved) {
+    throw new Error(
+      "Missing Sent.dm API key (set SENTDM_API_KEY, SENT_API_KEY, or SENT_DM_API_KEY)"
+    );
   }
+
+  const apiKey = resolved.apiKey;
 
   if (channel !== "sms") {
     throw new Error(`Unsupported channel: ${channel}`);
