@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
+import { createSupabaseServiceRoleClient } from "@/lib/supabase/admin";
 import {
   AI_RESPONSE_MODEL,
   PENDING_SEND_STATUS,
@@ -36,10 +36,9 @@ import {
   isInternalSecretAuthorizedRequest,
 } from "../../lib/require-auth";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+function getSupabase() {
+  return createSupabaseServiceRoleClient();
+}
 
 /** Best-effort Whoosh member ids from contacts row (`select("*")`). */
 function readContactWhooshMemberNumber(contact: unknown): string | null {
@@ -69,7 +68,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { data: conversation, error: conversationError } = await supabase
+    const { data: conversation, error: conversationError } = await getSupabase()
       .from("conversations")
       .select("*")
       .eq("id", conversationId)
@@ -85,7 +84,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { data: latestMessage, error: messageError } = await supabase
+    const { data: latestMessage, error: messageError } = await getSupabase()
       .from("messages")
       .select("*")
       .eq("conversation_id", conversationId)
@@ -104,7 +103,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { data: contact, error: contactError } = await supabase
+    const { data: contact, error: contactError } = await getSupabase()
       .from("contacts")
       .select("*")
       .eq("id", latestMessage.contact_id)
@@ -142,7 +141,7 @@ export async function POST(req: Request) {
     const inboundText = latestMessage.message_text || "";
     const playbook = decidePlaybook(inboundText);
     const currentState = conversation.status || "new_inquiry";
-    const { data: recentMessages, error: historyError } = await supabase
+    const { data: recentMessages, error: historyError } = await getSupabase()
       .from("messages")
       .select("direction, channel, message_text, status, created_at")
       .eq("conversation_id", conversationId)
@@ -162,7 +161,7 @@ export async function POST(req: Request) {
     const conversationHistory = [
       ...((recentMessages ?? []) as ConversationHistoryMessage[]),
     ].reverse();
-    const businessConfig = await resolveBusinessMessagingConfigFromDb(supabase, {
+    const businessConfig = await resolveBusinessMessagingConfigFromDb(getSupabase(), {
       businessId: getMetadataString(latestMessage.metadata, "business_id"),
       businessSlug: getMetadataString(latestMessage.metadata, "business_slug"),
       toNumber: getMetadataString(latestMessage.metadata, "destination_number"),
@@ -179,7 +178,7 @@ export async function POST(req: Request) {
     try {
       if (latestMessage.channel === "sms" && businessConfig.id) {
         smsBookingFlow = await runCloseOsSmsBookingAugmentation({
-          supabase,
+          supabase: getSupabase(),
           businessId: businessConfig.id,
           conversationId,
           contactId: contact.id,
@@ -279,7 +278,7 @@ export async function POST(req: Request) {
       confirmationGuardMatched = guarded.matchedPattern;
 
       if (guarded.blocked) {
-        await logMessagingAudit(supabase, {
+        await logMessagingAudit(getSupabase(), {
           entity_type: "conversation",
           entity_id: conversationId,
           event_type: "sms_booking_confirmation_blocked",
@@ -311,7 +310,7 @@ export async function POST(req: Request) {
     });
     const shouldEscalate = !autoSendDecision.shouldAutoSend;
 
-    const { data: outboundMessage, error: outboundError } = await supabase
+    const { data: outboundMessage, error: outboundError } = await getSupabase()
       .from("messages")
       .insert({
         conversation_id: conversationId,
@@ -383,7 +382,7 @@ export async function POST(req: Request) {
         providerMessageId = smsResult.external_id;
         outboundSmsProvider = smsResult.provider;
 
-        const { error: updateError } = await supabase
+        const { error: updateError } = await getSupabase()
           .from("messages")
           .update({
             status: sendStatus,
@@ -402,7 +401,7 @@ export async function POST(req: Request) {
         sendStatus = "failed";
         sendErrorMessage = errorMessage(sendError, "SMS send failed");
 
-        await supabase
+        await getSupabase()
           .from("messages")
           .update({
             status: sendStatus,
@@ -429,7 +428,7 @@ export async function POST(req: Request) {
       }
     }
 
-    await supabase
+    await getSupabase()
       .from("conversations")
       .update({
         ...(nextState !== currentState ? { status: nextState } : {}),
@@ -442,7 +441,7 @@ export async function POST(req: Request) {
       })
       .eq("id", conversationId);
 
-    await supabase.from("audit_logs").insert({
+    await getSupabase().from("audit_logs").insert({
       event_type: "ai_response_generated",
       entity_type: "conversation",
       entity_id: conversationId,

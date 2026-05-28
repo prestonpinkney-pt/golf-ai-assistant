@@ -5,9 +5,18 @@ import { isLikelyE164Phone } from "@/lib/ai/phone-e164";
 
 export { isLikelyE164Phone };
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-});
+let openaiClient: OpenAI | null = null;
+
+function getOpenAI(): OpenAI {
+  if (!openaiClient) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey?.trim()) {
+      throw new Error("Missing OPENAI_API_KEY");
+    }
+    openaiClient = new OpenAI({ apiKey });
+  }
+  return openaiClient;
+}
 
 export const AI_RESPONSE_MODEL = "gpt-4o-mini";
 export const PENDING_SEND_STATUS = "pending_send";
@@ -115,7 +124,7 @@ export async function generateAiDecision(input: {
   /** Runtime SMS booking / concierge notes merged into prompt (Whoosh appendix, escalations). */
   runtimeAppendix?: string | null;
 }): Promise<AiResponseDecision> {
-  const completion = await openai.chat.completions.create({
+  const completion = await getOpenAI().chat.completions.create({
     model: AI_RESPONSE_MODEL,
     temperature: 0.52,
     response_format: { type: "json_object" },

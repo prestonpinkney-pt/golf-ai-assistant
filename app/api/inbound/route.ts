@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { createClient } from "@supabase/supabase-js";
 import { logMessagingAudit } from "@/lib/messaging/audit";
+import { createSupabaseServiceRoleClient } from "@/lib/supabase/admin";
 import {
   computeCoolingOffUntil,
   isUninterestedMessage,
@@ -12,10 +12,9 @@ import { getResolvedMessagingProvider } from "@/lib/messaging/provider-resolve";
 import { sendMessage } from "@/lib/send-message";
 
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+function getSupabase() {
+  return createSupabaseServiceRoleClient();
+}
 
 type DbRow = Record<string, unknown>;
 
@@ -312,7 +311,7 @@ async function saveAndSendAutomatedReply(input: {
   const shouldSend = channel === "sms" && isLikelyE164Phone(contactPhone);
   const initialStatus = shouldSend ? "pending_send" : "needs_human";
 
-  const { data: outboundMessage, error: outboundError } = await supabase
+  const { data: outboundMessage, error: outboundError } = await getSupabase()
     .from("messages")
     .insert({
       conversation_id: input.conversation.id,
@@ -358,7 +357,7 @@ async function saveAndSendAutomatedReply(input: {
       sendStatus = result.status || "queued";
       providerMessageId = result.external_id;
 
-      const { error: updateError } = await supabase
+      const { error: updateError } = await getSupabase()
         .from("messages")
         .update({
           status: sendStatus,
@@ -375,7 +374,7 @@ async function saveAndSendAutomatedReply(input: {
       sendStatus = "failed";
       sendError = errorMessage(error, "Automated reply send failed");
 
-      await supabase
+      await getSupabase()
         .from("messages")
         .update({
           status: sendStatus,
@@ -388,7 +387,7 @@ async function saveAndSendAutomatedReply(input: {
         })
         .eq("id", outboundMessage.id);
 
-      await logMessagingAudit(supabase, {
+      await logMessagingAudit(getSupabase(), {
         event_type: "messaging_provider_send_failed",
         entity_type: "message",
         entity_id: outboundMessage.id as string,
@@ -402,7 +401,7 @@ async function saveAndSendAutomatedReply(input: {
     }
   }
 
-  await supabase
+  await getSupabase()
     .from("conversations")
     .update({
       last_message_at: new Date().toISOString(),
@@ -445,7 +444,7 @@ export async function POST(req: Request) {
       body.raw_payload?.to ||
       body.raw_payload?.to_number ||
       null;
-    const businessConfig = await resolveBusinessMessagingConfigFromDb(supabase, {
+    const businessConfig = await resolveBusinessMessagingConfigFromDb(getSupabase(), {
       businessId: body.business_id,
       businessSlug: body.business_slug,
       toNumber: destinationNumber,
@@ -462,7 +461,7 @@ export async function POST(req: Request) {
     const mappedLeadType = mapLeadType(messageText);
 
     // 1. Save inbound event
-    const { data: inboundEvent, error: inboundError } = await supabase
+    const { data: inboundEvent, error: inboundError } = await getSupabase()
       .from("inbound_events")
       .insert({
         source,
@@ -494,7 +493,7 @@ export async function POST(req: Request) {
     }
 
     // 2. Find existing contact by phone
-    const contactLookupResult = await supabase
+    const contactLookupResult = await getSupabase()
       .from("contacts")
       .select("*")
       .eq("phone", phone)
@@ -503,7 +502,7 @@ export async function POST(req: Request) {
     const contactLookupError = contactLookupResult.error;
 
     if (contactLookupError) {
-      await supabase
+      await getSupabase()
         .from("inbound_events")
         .update({
           status: "failed",
@@ -524,7 +523,7 @@ export async function POST(req: Request) {
 
     // 3. Create contact if not found
     if (!contact) {
-      const { data: newContact, error: contactCreateError } = await supabase
+      const { data: newContact, error: contactCreateError } = await getSupabase()
         .from("contacts")
         .insert({
           phone,
@@ -534,7 +533,7 @@ export async function POST(req: Request) {
         .single();
 
       if (contactCreateError || !newContact) {
-        await supabase
+        await getSupabase()
           .from("inbound_events")
           .update({
             status: "failed",
@@ -572,7 +571,7 @@ export async function POST(req: Request) {
     // 4. Find existing active conversation first. If one exists, reuse its
     // lead instead of creating a duplicate lead for every SMS reply.
     const conversationBase = () =>
-      supabase
+      getSupabase()
         .from("conversations")
         .select("*")
         .eq("contact_id", contact.id)
@@ -595,7 +594,7 @@ export async function POST(req: Request) {
     const conversationLookupError = conversationLookupResult.error;
 
     if (conversationLookupError) {
-      await supabase
+      await getSupabase()
         .from("inbound_events")
         .update({
           status: "failed",
@@ -618,14 +617,14 @@ export async function POST(req: Request) {
     let qualificationProfile: DbRow | null = null;
 
     if (conversation?.lead_id) {
-      const { data: existingLead, error: existingLeadError } = await supabase
+      const { data: existingLead, error: existingLeadError } = await getSupabase()
         .from("leads")
         .select("*")
         .eq("id", conversation.lead_id)
         .maybeSingle();
 
       if (existingLeadError) {
-        await supabase
+        await getSupabase()
           .from("inbound_events")
           .update({
             status: "failed",
@@ -647,7 +646,7 @@ export async function POST(req: Request) {
       lead = existingLead;
 
       if (lead?.id) {
-        const { data: existingQualificationProfile } = await supabase
+        const { data: existingQualificationProfile } = await getSupabase()
           .from("qualification_profiles")
           .select("*")
           .eq("lead_id", lead.id)
@@ -660,7 +659,7 @@ export async function POST(req: Request) {
     }
 
     if (!lead) {
-      const { data: newLead, error: leadError } = await supabase
+      const { data: newLead, error: leadError } = await getSupabase()
         .from("leads")
         .insert({
           contact_id: contact.id,
@@ -686,7 +685,7 @@ export async function POST(req: Request) {
         .single();
 
       if (leadError || !newLead) {
-        await supabase
+        await getSupabase()
           .from("inbound_events")
           .update({
             status: "failed",
@@ -725,7 +724,7 @@ export async function POST(req: Request) {
       const {
         data: newQualificationProfile,
         error: qualificationProfileError,
-      } = await supabase
+      } = await getSupabase()
         .from("qualification_profiles")
         .insert({
           lead_id: lead.id,
@@ -744,7 +743,7 @@ export async function POST(req: Request) {
         .single();
 
       if (qualificationProfileError || !newQualificationProfile) {
-        await supabase
+        await getSupabase()
           .from("inbound_events")
           .update({
             status: "failed",
@@ -782,7 +781,7 @@ export async function POST(req: Request) {
     }
 
     if (!conversation) {
-      let conversationCreateResult = await supabase
+      let conversationCreateResult = await getSupabase()
         .from("conversations")
         .insert({
           contact_id: contact.id,
@@ -799,7 +798,7 @@ export async function POST(req: Request) {
           conversationCreateResult.error.message
         )
       ) {
-        conversationCreateResult = await supabase
+        conversationCreateResult = await getSupabase()
           .from("conversations")
           .insert({
             contact_id: contact.id,
@@ -814,7 +813,7 @@ export async function POST(req: Request) {
       const conversationCreateError = conversationCreateResult.error;
 
       if (conversationCreateError || !newConversation) {
-        await supabase
+        await getSupabase()
           .from("inbound_events")
           .update({
             status: "failed",
@@ -841,7 +840,7 @@ export async function POST(req: Request) {
     }
 
     // 7. Save inbound message
-    const { data: message, error: messageError } = await supabase
+    const { data: message, error: messageError } = await getSupabase()
       .from("messages")
       .insert({
         conversation_id: conversation.id,
@@ -868,7 +867,7 @@ export async function POST(req: Request) {
       .single();
 
     if (messageError || !message) {
-      await supabase
+      await getSupabase()
         .from("inbound_events")
         .update({
           status: "failed",
@@ -889,7 +888,7 @@ export async function POST(req: Request) {
     }
 
     const nowIso = new Date().toISOString();
-    await supabase
+    await getSupabase()
       .from("conversations")
       .update({
         last_message_at: nowIso,
@@ -899,7 +898,7 @@ export async function POST(req: Request) {
 
     // 8. START / UNSTOP (resubscribe)
     if (isOptInMessage(messageText)) {
-      await supabase
+      await getSupabase()
         .from("contacts")
         .update({
           sms_opt_out: false,
@@ -908,7 +907,7 @@ export async function POST(req: Request) {
         })
         .eq("id", contact.id);
 
-      await logMessagingAudit(supabase, {
+      await logMessagingAudit(getSupabase(), {
         event_type: "sms_opt_in_detected",
         entity_type: "contact",
         entity_id: contact.id as string,
@@ -930,7 +929,7 @@ export async function POST(req: Request) {
         intent: "sms_opt_in",
       });
 
-      await supabase
+      await getSupabase()
         .from("inbound_events")
         .update({ status: "processed" })
         .eq("id", inboundEvent.id);
@@ -951,7 +950,7 @@ export async function POST(req: Request) {
 
     // 9. STOP handling
     if (isOptOutMessage(messageText)) {
-      await supabase
+      await getSupabase()
         .from("contacts")
         .update({
           sms_opt_out: true,
@@ -960,7 +959,7 @@ export async function POST(req: Request) {
         })
         .eq("id", contact.id);
 
-      await supabase.from("audit_logs").insert({
+      await getSupabase().from("audit_logs").insert({
         event_type: "sms_opt_out_detected",
         entity_type: "contact",
         entity_id: contact.id,
@@ -981,7 +980,7 @@ export async function POST(req: Request) {
         intent: "sms_opt_out",
       });
 
-      await supabase
+      await getSupabase()
         .from("inbound_events")
         .update({ status: "processed" })
         .eq("id", inboundEvent.id);
@@ -1002,7 +1001,7 @@ export async function POST(req: Request) {
 
     // Contacts who have opted out: store the message but do not send HELP/menu/AI auto-replies.
     if (Boolean(contact.sms_opt_out)) {
-      await logMessagingAudit(supabase, {
+      await logMessagingAudit(getSupabase(), {
         event_type: "inbound_suppressed_sms_opt_out",
         entity_type: "contact",
         entity_id: contact.id as string,
@@ -1014,7 +1013,7 @@ export async function POST(req: Request) {
         },
       });
 
-      await supabase
+      await getSupabase()
         .from("inbound_events")
         .update({ status: "processed" })
         .eq("id", inboundEvent.id);
@@ -1043,7 +1042,7 @@ export async function POST(req: Request) {
         intent: "human_help_requested",
       });
 
-      await supabase.from("audit_logs").insert({
+      await getSupabase().from("audit_logs").insert({
         event_type: "human_help_requested",
         entity_type: "conversation",
         entity_id: conversation.id,
@@ -1054,7 +1053,7 @@ export async function POST(req: Request) {
         },
       });
 
-      await supabase
+      await getSupabase()
         .from("inbound_events")
         .update({ status: "processed" })
         .eq("id", inboundEvent.id);
@@ -1084,7 +1083,7 @@ export async function POST(req: Request) {
         intent: "menu_requested",
       });
 
-      await supabase.from("audit_logs").insert({
+      await getSupabase().from("audit_logs").insert({
         event_type: "menu_requested",
         entity_type: "conversation",
         entity_id: conversation.id,
@@ -1095,7 +1094,7 @@ export async function POST(req: Request) {
         },
       });
 
-      await supabase
+      await getSupabase()
         .from("inbound_events")
         .update({ status: "processed" })
         .eq("id", inboundEvent.id);
@@ -1118,7 +1117,7 @@ export async function POST(req: Request) {
     if (isUninterestedMessage(messageText)) {
       const coolingOffUntil = computeCoolingOffUntil(new Date());
 
-      await supabase
+      await getSupabase()
         .from("contacts")
         .update({
           cooling_off_until: coolingOffUntil.toISOString(),
@@ -1126,7 +1125,7 @@ export async function POST(req: Request) {
         })
         .eq("id", contact.id);
 
-      await supabase.from("audit_logs").insert({
+      await getSupabase().from("audit_logs").insert({
         event_type: "cooling_off_started",
         entity_type: "contact",
         entity_id: contact.id,
@@ -1140,7 +1139,7 @@ export async function POST(req: Request) {
     }
 
     // 10. Audit successful inbound processing
-    await supabase.from("audit_logs").insert({
+    await getSupabase().from("audit_logs").insert({
       event_type: "inbound_processed",
       entity_type: "conversation",
       entity_id: conversation.id,
@@ -1157,7 +1156,7 @@ export async function POST(req: Request) {
     });
 
     // 11. Mark inbound event processed
-    await supabase
+    await getSupabase()
       .from("inbound_events")
       .update({
         status: "processed",
@@ -1168,7 +1167,7 @@ export async function POST(req: Request) {
     let aiResult: unknown = null;
 
     if (source === "sms" && isInboundQuietHoursActive()) {
-      await logMessagingAudit(supabase, {
+      await logMessagingAudit(getSupabase(), {
         event_type: "quiet_hours_ai_suppressed",
         entity_type: "conversation",
         entity_id: conversation.id as string,

@@ -4,9 +4,13 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import { gateBusinessUser } from "../../lib/require-auth";
 import { fetchLeadById } from "../_shared";
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY!,
-});
+function getOpenAI() {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey?.trim()) {
+    throw new Error("Missing OPENAI_API_KEY");
+  }
+  return new OpenAI({ apiKey });
+}
 
 export async function POST(req: Request) {
   const denied = await gateBusinessUser();
@@ -32,7 +36,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const completion = await openai.chat.completions.create({
+    const completion = await getOpenAI().chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0.2,
       response_format: { type: "json_object" },

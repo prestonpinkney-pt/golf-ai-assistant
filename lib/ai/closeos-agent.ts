@@ -21,9 +21,18 @@ export type CloseOSAgentResult = {
   reply: string;
 };
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+let openaiClient: OpenAI | null = null;
+
+function getOpenAI(): OpenAI {
+  if (!openaiClient) {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey?.trim()) {
+      throw new Error("Missing OPENAI_API_KEY");
+    }
+    openaiClient = new OpenAI({ apiKey });
+  }
+  return openaiClient;
+}
 
 const ESCALATION_REPLY =
   "Thanks for reaching out. A team member will follow up shortly to help with this.";
@@ -90,7 +99,7 @@ export async function generateCloseOSReply(input: {
     };
   }
 
-  const completion = await openai.chat.completions.create({
+  const completion = await getOpenAI().chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0.45,
     response_format: { type: "json_object" },

@@ -17,11 +17,25 @@ export function createSupabaseServiceRoleClient(): SupabaseClient {
   });
 }
 
-/** @deprecated Prefer createSupabaseServiceRoleClient() for clarity */
-export const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL ?? "",
-  process.env.SUPABASE_SERVICE_ROLE_KEY ?? "",
-  {
-    auth: { persistSession: false },
+let lazyAdminClient: SupabaseClient | null = null;
+
+function getLazySupabaseAdmin(): SupabaseClient {
+  if (!lazyAdminClient) {
+    lazyAdminClient = createSupabaseServiceRoleClient();
   }
-);
+  return lazyAdminClient;
+}
+
+/**
+ * @deprecated Prefer createSupabaseServiceRoleClient() — lazy proxy avoids build-time
+ * createClient() when env vars are not available during `next build`.
+ */
+export const supabaseAdmin: SupabaseClient = new Proxy({} as SupabaseClient, {
+  get(_target, prop) {
+    const client = getLazySupabaseAdmin();
+    const value = Reflect.get(client, prop, client) as unknown;
+    return typeof value === "function" ?
+        (value as (...args: unknown[]) => unknown).bind(client)
+      : value;
+  },
+});
