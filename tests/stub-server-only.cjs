@@ -3,6 +3,7 @@
  * Provides a deterministic OpenAI key so modules that eagerly construct the client load under Node.
  * Resolves `@/*` path aliases from tsconfig (required when `--experimental-test-module-mocks` bypasses tsx paths).
  */
+/* eslint-disable @typescript-eslint/no-require-imports */
 const Module = require("module");
 const fs = require("fs");
 const path = require("path");
