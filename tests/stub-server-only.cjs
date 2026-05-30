@@ -3,6 +3,7 @@
  * Provides a deterministic OpenAI key so modules that eagerly construct the client load under Node.
  * Resolves `@/*` path aliases from tsconfig (required when `--experimental-test-module-mocks` bypasses tsx paths).
  */
+/* eslint-disable @typescript-eslint/no-require-imports */
 const Module = require("module");
 const fs = require("fs");
 const path = require("path");
@@ -10,6 +11,7 @@ const path = require("path");
 const origLoad = Module._load.bind(Module);
 const origResolveFilename = Module._resolveFilename.bind(Module);
 const projectRoot = path.resolve(__dirname, "..");
+const serverOnlyStub = path.join(__dirname, "server-only-stub.cjs");
 
 if (!process.env.OPENAI_API_KEY?.trim()) {
   process.env.OPENAI_API_KEY = "test_openai_key_stub_unit";
@@ -35,6 +37,9 @@ Module._resolveFilename = function patchedResolveFilename(
   isMain,
   options
 ) {
+  if (request === "server-only") {
+    return serverOnlyStub;
+  }
   const aliased = resolveAliasPath(request);
   if (aliased) {
     return origResolveFilename.call(this, aliased, parent, isMain, options);

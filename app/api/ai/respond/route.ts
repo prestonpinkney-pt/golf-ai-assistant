@@ -32,9 +32,11 @@ import {
 import { sendMessage } from "@/lib/send-message";
 import { getResolvedMessagingProvider } from "@/lib/messaging/provider-resolve";
 import {
-  gateInternalOrBusinessUser,
+  ApiAuthError,
   isInternalSecretAuthorizedRequest,
+  requireBusinessUser,
 } from "../../lib/require-auth";
+import { conversationAccessibleToBusiness } from "@/lib/conversations/conversation-tenant";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -53,10 +55,19 @@ function readContactWhooshMemberNumber(contact: unknown): string | null {
 }
 
 export async function POST(req: Request) {
-  const denied = await gateInternalOrBusinessUser(req);
-  if (denied) return denied;
-
   const internalCaller = isInternalSecretAuthorizedRequest(req);
+  let callerBusinessId: string | null = null;
+
+  if (!internalCaller) {
+    try {
+      callerBusinessId = (await requireBusinessUser()).businessId;
+    } catch (e) {
+      if (e instanceof ApiAuthError) {
+        return NextResponse.json({ error: e.message }, { status: e.statusCode });
+      }
+      throw e;
+    }
+  }
 
   try {
     const body = await req.json();
@@ -82,6 +93,19 @@ export async function POST(req: Request) {
           error: conversationError?.message || "Conversation not found",
         },
         { status: 500 }
+      );
+    }
+
+    if (
+      callerBusinessId &&
+      !conversationAccessibleToBusiness(
+        conversation as { business_id?: string | null },
+        callerBusinessId
+      )
+    ) {
+      return NextResponse.json(
+        { success: false, error: "Conversation not found" },
+        { status: 404 }
       );
     }
 
