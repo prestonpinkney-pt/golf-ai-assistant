@@ -23,6 +23,13 @@ import {
   computeWebhookJobDedupeKey,
 
 } from "./webhook-job-dedupe";
+import {
+
+  enqueueSentDmInboundWebhookJob,
+
+  isRetryableExistingWebhookJob,
+
+} from "./webhook-queue";
 
 import {
 
@@ -115,6 +122,264 @@ describe("computeWebhookJobDedupeKey", () => {
     >;
 
     assert.equal(computeWebhookJobDedupeKey(body), null);
+
+  });
+
+});
+
+
+
+describe("enqueueSentDmInboundWebhookJob", () => {
+
+  function duplicateInsertSupabase(existing: Record<string, unknown> | null) {
+
+    const updates: Record<string, unknown>[] = [];
+
+    const supabase = {
+
+      from(table: string) {
+
+        assert.equal(table, "webhook_jobs");
+
+        const updateChain = {
+
+          eq() {
+
+            return updateChain;
+
+          },
+
+          lt() {
+
+            return updateChain;
+
+          },
+
+          select() {
+
+            return {
+
+              async maybeSingle() {
+
+                return { data: { id: existing?.id }, error: null };
+
+              },
+
+            };
+
+          },
+
+        };
+
+        return {
+
+          insert() {
+
+            return {
+
+              select() {
+
+                return {
+
+                  async maybeSingle() {
+
+                    return {
+
+                      data: null,
+
+                      error: { code: "23505", message: "duplicate key" },
+
+                    };
+
+                  },
+
+                };
+
+              },
+
+            };
+
+          },
+
+          select() {
+
+            return {
+
+              eq() {
+
+                return {
+
+                  order() {
+
+                    return {
+
+                      limit() {
+
+                        return {
+
+                          async maybeSingle() {
+
+                            return { data: existing, error: null };
+
+                          },
+
+                        };
+
+                      },
+
+                    };
+
+                  },
+
+                };
+
+              },
+
+            };
+
+          },
+
+          update(payload: Record<string, unknown>) {
+
+            updates.push(payload);
+
+            return updateChain;
+
+          },
+
+        };
+
+      },
+
+    };
+
+    return { supabase, updates };
+
+  }
+
+
+
+  test("duplicate failed job is reopened for retry", async () => {
+
+    const { supabase, updates } = duplicateInsertSupabase({
+
+      id: "job-failed",
+
+      status: "failed",
+
+      updated_at: new Date().toISOString(),
+
+    });
+
+    const result = await enqueueSentDmInboundWebhookJob(supabase as never, {
+
+      payload: { message_id: "msg-retry-1" },
+
+      eventType: "message.received",
+
+      ingestSource: "sentdm_webhook",
+
+    });
+
+    assert.deepEqual(result, {
+
+      ok: true,
+
+      jobId: "job-failed",
+
+      duplicate: false,
+
+      reused: true,
+
+    });
+
+    assert.equal(updates.length, 1);
+
+    assert.equal(updates[0].status, "pending");
+
+    assert.equal(updates[0].last_error, null);
+
+    assert.equal(updates[0].processed_at, null);
+
+  });
+
+
+
+  test("duplicate completed job stays deduped", async () => {
+
+    const { supabase, updates } = duplicateInsertSupabase({
+
+      id: "job-completed",
+
+      status: "completed",
+
+      updated_at: new Date().toISOString(),
+
+    });
+
+    const result = await enqueueSentDmInboundWebhookJob(supabase as never, {
+
+      payload: { message_id: "msg-done-1" },
+
+      eventType: "message.received",
+
+      ingestSource: "sentdm_webhook",
+
+    });
+
+    assert.deepEqual(result, {
+
+      ok: true,
+
+      duplicate: true,
+
+      jobId: "job-completed",
+
+      existingStatus: "completed",
+
+    });
+
+    assert.equal(updates.length, 0);
+
+  });
+
+
+
+  test("retryability distinguishes fresh and stale processing jobs", () => {
+
+    const now = Date.parse("2026-05-31T11:00:00.000Z");
+
+    assert.equal(
+
+      isRetryableExistingWebhookJob({
+
+        id: "fresh",
+
+        status: "processing",
+
+        updated_at: "2026-05-31T10:55:01.000Z",
+
+      }, now),
+
+      false
+
+    );
+
+    assert.equal(
+
+      isRetryableExistingWebhookJob({
+
+        id: "stale",
+
+        status: "processing",
+
+        updated_at: "2026-05-31T10:44:59.000Z",
+
+      }, now),
+
+      true
+
+    );
 
   });
 
