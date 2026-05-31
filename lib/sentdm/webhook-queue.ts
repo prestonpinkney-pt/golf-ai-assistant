@@ -51,7 +51,7 @@ async function reuseExistingWebhookJob(
 
   const job = (existing ?? null) as ExistingWebhookJob | null;
   const jobId = typeof job?.id === "string" ? job.id : null;
-  if (!jobId) {
+  if (!job || !jobId) {
     return { ok: true, duplicate: true };
   }
 
