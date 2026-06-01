@@ -37,6 +37,52 @@ export async function enqueueSentDmInboundWebhookJob(
     .maybeSingle();
 
   if (error?.code === "23505") {
+    if (external_id) {
+      const { data: existing, error: existingError } = await supabase
+        .from("webhook_jobs")
+        .select("id, status")
+        .eq("provider", "sentdm")
+        .eq("external_id", external_id)
+        .maybeSingle();
+
+      if (existingError) {
+        return { ok: false, error: existingError.message };
+      }
+
+      const existingId =
+        existing && typeof existing.id === "string" ? existing.id : null;
+      const existingStatus =
+        existing && typeof existing.status === "string" ? existing.status : null;
+
+      if (existingId && existingStatus === "failed") {
+        const { data: recovered, error: recoverError } = await supabase
+          .from("webhook_jobs")
+          .update({
+            payload: input.payload,
+            event_type: input.eventType,
+            metadata: { ingest_source: input.ingestSource },
+            status: "pending",
+            last_error: null,
+            processed_at: null,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", existingId)
+          .eq("status", "failed")
+          .select("id")
+          .maybeSingle();
+
+        if (recoverError) {
+          return { ok: false, error: recoverError.message };
+        }
+
+        const recoveredId =
+          recovered && typeof recovered.id === "string" ? recovered.id : null;
+        if (recoveredId) {
+          return { ok: true, jobId: recoveredId, duplicate: false };
+        }
+      }
+    }
+
     return { ok: true, duplicate: true };
   }
 

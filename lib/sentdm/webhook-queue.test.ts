@@ -23,6 +23,11 @@ import {
   computeWebhookJobDedupeKey,
 
 } from "./webhook-job-dedupe";
+import {
+
+  enqueueSentDmInboundWebhookJob,
+
+} from "./webhook-queue";
 
 import {
 
@@ -57,6 +62,95 @@ const fixtures = JSON.parse(readFileSync(fixturesPath, "utf8")) as Record<
   unknown
 
 >;
+
+type WebhookJobTestRow = {
+  id: string;
+  provider: string;
+  external_id: string | null;
+  status: string;
+  payload?: Record<string, unknown>;
+  event_type?: string;
+  metadata?: Record<string, unknown>;
+  last_error?: string | null;
+  processed_at?: string | null;
+  updated_at?: string | null;
+};
+
+function createWebhookQueueMockSupabase(initialRows: WebhookJobTestRow[]) {
+  const rows = initialRows.map((row) => ({ ...row }));
+
+  type Filter = { field: string; value: unknown };
+
+  function matching(filters: Filter[]) {
+    return rows.filter((row) =>
+      filters.every((filter) => row[filter.field as keyof WebhookJobTestRow] === filter.value)
+    );
+  }
+
+  const supabase = {
+    from(table: string) {
+      assert.equal(table, "webhook_jobs");
+      const filters: Filter[] = [];
+      let pendingInsert: Partial<WebhookJobTestRow> | null = null;
+      let pendingUpdate: Partial<WebhookJobTestRow> | null = null;
+
+      const api = {
+        insert(row: Partial<WebhookJobTestRow>) {
+          pendingInsert = row;
+          return api;
+        },
+        update(patch: Partial<WebhookJobTestRow>) {
+          pendingUpdate = patch;
+          return api;
+        },
+        select() {
+          return api;
+        },
+        eq(field: string, value: unknown) {
+          filters.push({ field, value });
+          return api;
+        },
+        async maybeSingle() {
+          if (pendingInsert) {
+            const duplicate = rows.some(
+              (row) =>
+                row.external_id !== null &&
+                row.external_id === pendingInsert?.external_id
+            );
+            if (duplicate) {
+              return { data: null, error: { code: "23505", message: "duplicate key" } };
+            }
+            const row = {
+              id: `job-${rows.length + 1}`,
+              provider: "sentdm",
+              status: "pending",
+              external_id: null,
+              ...pendingInsert,
+            } as WebhookJobTestRow;
+            rows.push(row);
+            return { data: { id: row.id }, error: null };
+          }
+
+          if (pendingUpdate) {
+            const row = matching(filters)[0] ?? null;
+            if (row) {
+              Object.assign(row, pendingUpdate);
+              return { data: { id: row.id }, error: null };
+            }
+            return { data: null, error: null };
+          }
+
+          return { data: matching(filters)[0] ?? null, error: null };
+        },
+      };
+
+      return api;
+    },
+    _rows: rows,
+  };
+
+  return supabase;
+}
 
 
 
@@ -115,6 +209,96 @@ describe("computeWebhookJobDedupeKey", () => {
     >;
 
     assert.equal(computeWebhookJobDedupeKey(body), null);
+
+  });
+
+});
+
+describe("enqueueSentDmInboundWebhookJob", () => {
+
+  test("reopens a failed duplicate job so provider retries are processed", async () => {
+
+    const supabase = createWebhookQueueMockSupabase([
+
+      {
+
+        id: "job-existing",
+
+        provider: "sentdm",
+
+        external_id: "sentdm:retry-message-1",
+
+        status: "failed",
+
+        last_error: "temporary Sent.dm lookup timeout",
+
+        processed_at: "2026-06-01T10:00:00.000Z",
+
+      },
+
+    ]);
+
+
+
+    const result = await enqueueSentDmInboundWebhookJob(supabase as never, {
+
+      payload: { payload: { message_id: "retry-message-1" } },
+
+      eventType: "message.received",
+
+      ingestSource: "sentdm_webhook",
+
+    });
+
+
+
+    assert.deepEqual(result, { ok: true, jobId: "job-existing", duplicate: false });
+
+    assert.equal(supabase._rows[0]?.status, "pending");
+
+    assert.equal(supabase._rows[0]?.last_error, null);
+
+    assert.equal(supabase._rows[0]?.processed_at, null);
+
+  });
+
+
+
+  test("keeps completed duplicate jobs idempotent", async () => {
+
+    const supabase = createWebhookQueueMockSupabase([
+
+      {
+
+        id: "job-completed",
+
+        provider: "sentdm",
+
+        external_id: "sentdm:completed-message-1",
+
+        status: "completed",
+
+      },
+
+    ]);
+
+
+
+    const result = await enqueueSentDmInboundWebhookJob(supabase as never, {
+
+      payload: { payload: { message_id: "completed-message-1" } },
+
+      eventType: "message.received",
+
+      ingestSource: "sentdm_webhook",
+
+    });
+
+
+
+    assert.deepEqual(result, { ok: true, duplicate: true });
+
+    assert.equal(supabase._rows[0]?.status, "completed");
 
   });
 

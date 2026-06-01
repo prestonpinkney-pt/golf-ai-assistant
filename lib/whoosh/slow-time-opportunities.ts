@@ -56,6 +56,36 @@ function buildMetadata(windows: WhooshAvailabilityWindow[]): WhooshOpportunityMe
   };
 }
 
+async function expireUnavailableOpportunities(input: {
+  supabase: SupabaseClient;
+  businessId: string;
+  startDate: string;
+  endDate: string;
+}): Promise<void> {
+  const iso = new Date().toISOString();
+  const { error } = await input.supabase
+    .from("ai_opportunities")
+    .update({
+      status: "dismissed",
+      signal_summary: `Whoosh currently has no bookable simulator/bay windows for ${input.startDate}-${input.endDate}; removed from slow-time targeting.`,
+      next_best_action: "Re-sync Whoosh availability before generating slow-time SMS.",
+      metadata: {
+        availability_source: "whoosh",
+        availability_verified: false,
+        window_count: 0,
+        expired_reason: "no_bookable_whoosh_windows",
+      },
+      updated_at: iso,
+    })
+    .eq("business_id", input.businessId)
+    .eq("source", SOURCE)
+    .in("status", ["open", "queued"]);
+
+  if (error) {
+    console.error("[whoosh-slow-time] expire unavailable opportunities:", error.message);
+  }
+}
+
 export async function refreshWhooshSlowTimeOpportunities(input: {
   supabase: SupabaseClient;
   businessId: string;
@@ -71,6 +101,7 @@ export async function refreshWhooshSlowTimeOpportunities(input: {
   });
 
   if (windows.length === 0) {
+    await expireUnavailableOpportunities(input);
     return { opportunitiesUpserted: 0, windowCount: 0 };
   }
 
@@ -83,6 +114,7 @@ export async function refreshWhooshSlowTimeOpportunities(input: {
   const { data: profiles, error: profileErr } = await input.supabase
     .from("customer_profiles")
     .select("id, phone, exclude_from_ai_targeting, visit_count, total_spend_cents")
+    .eq("business_id", input.businessId)
     .eq("exclude_from_ai_targeting", false)
     .not("phone", "is", null)
     .order("last_purchase_at", { ascending: false, nullsFirst: false })

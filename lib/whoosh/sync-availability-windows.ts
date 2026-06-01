@@ -37,7 +37,26 @@ export async function syncWhooshAvailabilityWindows(
   }
 
   const now = new Date().toISOString();
+  const startIso = new Date(startDate).toISOString();
+  const endIso = new Date(`${endDate}T23:59:59.999Z`).toISOString();
   let windowsSynced = 0;
+
+  const { error: staleError } = await input.supabase
+    .from("whoosh_availability_windows")
+    .update({
+      bookable: false,
+      synced_at: now,
+      updated_at: now,
+    })
+    .eq("business_id", input.businessId)
+    .eq("bookable", true)
+    .gte("starts_at", startIso)
+    .lte("ends_at", endIso)
+    .in("resource_type", ["simulator", "bay"]);
+
+  if (staleError) {
+    console.error("[whoosh-sync] stale window invalidation failed:", staleError.message);
+  }
 
   for (const w of fetched.windows) {
     const row = {
@@ -67,17 +86,15 @@ export async function syncWhooshAvailabilityWindows(
     windowsSynced += 1;
   }
 
-  if (windowsSynced > 0) {
-    try {
-      await refreshWhooshSlowTimeOpportunities({
-        supabase: input.supabase,
-        businessId: input.businessId,
-        startDate,
-        endDate,
-      });
-    } catch (err) {
-      console.error("[whoosh-sync] slow-time opportunity refresh:", err);
-    }
+  try {
+    await refreshWhooshSlowTimeOpportunities({
+      supabase: input.supabase,
+      businessId: input.businessId,
+      startDate,
+      endDate,
+    });
+  } catch (err) {
+    console.error("[whoosh-sync] slow-time opportunity refresh:", err);
   }
 
   return {
