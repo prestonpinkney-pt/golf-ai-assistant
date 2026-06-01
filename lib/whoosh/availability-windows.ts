@@ -108,7 +108,7 @@ function slotToWindow(
   const parsedStart = parseSlotLocalDateTime({ agendaDateYmd: agendaDate, timeRaw });
   if (!parsedStart?.isValid) return null;
 
-  if (!isSlotEligibleForSmsPublicSimulator(parsedStart) && remainingCapacity(normalized) <= 0) {
+  if (!isSlotEligibleForSmsPublicSimulator(parsedStart)) {
     return null;
   }
 
