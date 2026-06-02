@@ -32,7 +32,6 @@ import {
 import { sendMessage } from "@/lib/send-message";
 import { getResolvedMessagingProvider } from "@/lib/messaging/provider-resolve";
 import {
-  gateInternalOrBusinessUser,
   isInternalSecretAuthorizedRequest,
 } from "../../lib/require-auth";
 
@@ -40,6 +39,11 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
 );
+
+export function gateAiRespondInternalRequest(req: Request): NextResponse | null {
+  if (isInternalSecretAuthorizedRequest(req)) return null;
+  return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+}
 
 /** Best-effort Whoosh member ids from contacts row (`select("*")`). */
 function readContactWhooshMemberNumber(contact: unknown): string | null {
@@ -53,10 +57,10 @@ function readContactWhooshMemberNumber(contact: unknown): string | null {
 }
 
 export async function POST(req: Request) {
-  const denied = await gateInternalOrBusinessUser(req);
+  const denied = gateAiRespondInternalRequest(req);
   if (denied) return denied;
 
-  const internalCaller = isInternalSecretAuthorizedRequest(req);
+  const internalCaller = true;
 
   try {
     const body = await req.json();

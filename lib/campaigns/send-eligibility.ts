@@ -108,7 +108,7 @@ async function loadRecipientOutboundStats(
   const { data, error } = await q;
   if (error) {
     console.warn("[campaign-send-eligibility] outbound stats:", error.message);
-    return { lastOutboundAtMs: null, outboundCount24h: 0 };
+    throw new Error(error.message);
   }
 
   const rows = data ?? [];
@@ -127,6 +127,54 @@ async function loadRecipientOutboundStats(
   }
 
   return { lastOutboundAtMs, outboundCount24h: rows.length };
+}
+
+function outboundStatsUnavailableCampaignBlock(): CampaignSendEligibility {
+  return {
+    allowed: false,
+    reason: "policy_suppressed",
+    detail:
+      "Unable to verify outbound frequency history; send blocked to avoid over-messaging.",
+    policyReasonCodes: ["outbound_stats_unavailable"],
+  };
+}
+
+function outboundStatsUnavailableLiveBlock(
+  messageGoal: string
+): LiveOutboundPolicyResult {
+  const decision = evaluateMessagingPolicyV1({
+    nowMs: Date.now(),
+    opportunityAudience: "public",
+    audienceEligible: true,
+    optedOut: false,
+    humanTakeover: false,
+    automationDisabled: true,
+    highStakesOrSensitive: false,
+    coldLead: false,
+    lastOutboundAtMs: null,
+    minHoursBetweenOutbound: 0,
+    outboundCount24h: 0,
+    maxOutboundPer24h: DEFAULT_MAX_OUTBOUND_24H,
+    nudgeCount: 0,
+    maxNudges: DEFAULT_MAX_NUDGES,
+    sameAngleRecentlySent: false,
+    hasRecentRelatedAngles: false,
+    messageGoal,
+    suggestedCtaStyle: "soft_direct",
+    autoSendGloballyDisabled: true,
+  });
+
+  return {
+    maySendViaProvider: false,
+    decision: {
+      ...decision,
+      reasonCodes: ["outbound_stats_unavailable"],
+      notes: [
+        "Unable to verify outbound frequency history; outbound SMS requires review.",
+      ],
+    },
+    blockDetail: "Unable to verify outbound frequency history",
+  };
 }
 
 export async function evaluateCampaignRecipientPolicy(
@@ -148,11 +196,16 @@ export async function evaluateCampaignRecipientPolicy(
     };
   }
 
-  const stats = await loadRecipientOutboundStats(
-    supabase,
-    input.contactId,
-    input.phone
-  );
+  let stats: { lastOutboundAtMs: number | null; outboundCount24h: number };
+  try {
+    stats = await loadRecipientOutboundStats(
+      supabase,
+      input.contactId,
+      input.phone
+    );
+  } catch {
+    return outboundStatsUnavailableCampaignBlock();
+  }
 
   const decision = evaluateMessagingPolicyV1({
     nowMs: Date.now(),
@@ -299,14 +352,20 @@ export async function evaluateInboundLiveOutboundPolicy(
     relaxFrequencyLimits?: boolean;
   }
 ): Promise<LiveOutboundPolicyResult> {
-  const stats =
-    input.relaxFrequencyLimits ?
-      { lastOutboundAtMs: null, outboundCount24h: 0 }
-    : await loadRecipientOutboundStats(
+  let stats: { lastOutboundAtMs: number | null; outboundCount24h: number };
+  if (input.relaxFrequencyLimits) {
+    stats = { lastOutboundAtMs: null, outboundCount24h: 0 };
+  } else {
+    try {
+      stats = await loadRecipientOutboundStats(
         supabase,
         input.contactId,
         input.phone
       );
+    } catch {
+      return outboundStatsUnavailableLiveBlock(input.messageGoal);
+    }
+  }
 
   return evaluateLiveOutboundPolicy({
     smsOptOut: input.smsOptOut,

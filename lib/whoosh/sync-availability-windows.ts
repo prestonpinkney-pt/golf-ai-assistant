@@ -37,6 +37,7 @@ export async function syncWhooshAvailabilityWindows(
   }
 
   const now = new Date().toISOString();
+  const fetchedIds = new Set(fetched.windows.map((w) => w.id));
   let windowsSynced = 0;
 
   for (const w of fetched.windows) {
@@ -67,17 +68,48 @@ export async function syncWhooshAvailabilityWindows(
     windowsSynced += 1;
   }
 
-  if (windowsSynced > 0) {
-    try {
-      await refreshWhooshSlowTimeOpportunities({
-        supabase: input.supabase,
-        businessId: input.businessId,
-        startDate,
-        endDate,
-      });
-    } catch (err) {
-      console.error("[whoosh-sync] slow-time opportunity refresh:", err);
+  const startIso = DateTime.fromISO(startDate, { zone: tz }).startOf("day").toISO();
+  const endIso = DateTime.fromISO(endDate, { zone: tz }).endOf("day").toISO();
+  if (startIso && endIso) {
+    const { data: cachedRows, error: cachedErr } = await input.supabase
+      .from("whoosh_availability_windows")
+      .select("id, whoosh_window_id")
+      .eq("business_id", input.businessId)
+      .eq("bookable", true)
+      .gte("starts_at", startIso)
+      .lte("ends_at", endIso);
+
+    if (cachedErr) {
+      console.error("[whoosh-sync] stale window scan failed:", cachedErr.message);
+    } else {
+      for (const row of cachedRows ?? []) {
+        const windowId = String(row.whoosh_window_id ?? "");
+        if (fetchedIds.has(windowId)) continue;
+        const { error } = await input.supabase
+          .from("whoosh_availability_windows")
+          .update({
+            bookable: false,
+            synced_at: now,
+            updated_at: now,
+          })
+          .eq("id", row.id as string);
+
+        if (error) {
+          console.error("[whoosh-sync] stale window update failed:", error.message);
+        }
+      }
     }
+  }
+
+  try {
+    await refreshWhooshSlowTimeOpportunities({
+      supabase: input.supabase,
+      businessId: input.businessId,
+      startDate,
+      endDate,
+    });
+  } catch (err) {
+    console.error("[whoosh-sync] slow-time opportunity refresh:", err);
   }
 
   return {
