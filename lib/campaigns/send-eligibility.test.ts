@@ -1,12 +1,46 @@
 ﻿import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  evaluateCampaignRecipientPolicy,
   evaluateCampaignSendWindow,
   evaluateCampaignTestAllowlist,
+  evaluateInboundLiveOutboundPolicy,
   evaluateLiveOutboundPolicy,
   isLikelyE164Phone,
   parseTestSmsAllowlist,
 } from "./send-eligibility";
+
+function mockStatsErrorSupabase() {
+  const query = {
+    select() {
+      return this;
+    },
+    eq() {
+      return this;
+    },
+    gte() {
+      return this;
+    },
+    order() {
+      return this;
+    },
+    limit() {
+      return this;
+    },
+    then(resolve: (value: unknown) => unknown, reject: (reason?: unknown) => unknown) {
+      return Promise.resolve({
+        data: null,
+        error: { message: "database unavailable" },
+      }).then(resolve, reject);
+    },
+  };
+
+  return {
+    from() {
+      return query;
+    },
+  };
+}
 
 test("isLikelyE164Phone accepts US E.164", () => {
   assert.equal(isLikelyE164Phone("+15551234567"), true);
@@ -138,4 +172,38 @@ test("evaluateLiveOutboundPolicy blocks contact cooling-off period", () => {
   });
   assert.equal(result.maySendViaProvider, false);
   assert.ok(result.decision.reasonCodes.includes("contact_cooling_off"));
+});
+
+test("evaluateCampaignRecipientPolicy blocks when outbound history cannot be verified", async () => {
+  const result = await evaluateCampaignRecipientPolicy(
+    mockStatsErrorSupabase() as never,
+    {
+      contactId: "contact-1",
+      phone: "+15551234567",
+      smsOptOut: false,
+    }
+  );
+
+  assert.equal(result.allowed, false);
+  assert.equal(result.reason, "policy_suppressed");
+  assert.deepEqual(result.policyReasonCodes, ["outbound_stats_unavailable"]);
+});
+
+test("evaluateInboundLiveOutboundPolicy blocks provider send when outbound history cannot be verified", async () => {
+  const result = await evaluateInboundLiveOutboundPolicy(
+    mockStatsErrorSupabase() as never,
+    {
+      contactId: "contact-1",
+      phone: "+15551234567",
+      smsOptOut: false,
+      humanTakeover: false,
+      automationDisabled: false,
+      highStakesOrSensitive: false,
+      autoSendEnabled: true,
+      messageGoal: "inbound_reply",
+    }
+  );
+
+  assert.equal(result.maySendViaProvider, false);
+  assert.deepEqual(result.decision.reasonCodes, ["outbound_stats_unavailable"]);
 });

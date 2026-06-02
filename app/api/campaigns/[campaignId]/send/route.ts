@@ -356,14 +356,45 @@ export async function POST(
       .select()
       .single();
 
-    if (insertError) {
+    if (insertError || !outboundMessage) {
+      const now = new Date().toISOString();
+      const err = insertError?.message || "Failed to create outbound message row";
       console.error(
-        "campaign send messages insert skipped:",
-        insertError.message
+        "campaign send messages insert failed:",
+        err
       );
-    } else if (outboundMessage) {
-      outboundMessageId = outboundMessage.id as string;
+      await supabase
+        .from("campaign_messages")
+        .update({
+          status: "failed",
+          failed_at: now,
+          error_message: "Outbound ledger insert failed before provider send",
+          contact_id: contactId,
+          conversation_id: conversationId,
+          updated_at: now,
+        })
+        .eq("id", messageId);
+      await logMessagingAudit(supabase, {
+        event_type: "campaign_send_blocked_ledger_insert_failed",
+        entity_type: "campaign_message",
+        entity_id: messageId,
+        metadata: {
+          business_id: businessId,
+          user_id: userId,
+          campaign_id: campaignId,
+          contact_id: contactId,
+          conversation_id: conversationId,
+          error: err,
+        },
+      });
+      results.push({
+        id: messageId,
+        outcome: "failed",
+        error: "Outbound ledger insert failed before provider send",
+      });
+      continue;
     }
+    outboundMessageId = outboundMessage.id as string;
 
     const displayName =
       (typeof cm.contact_name === "string" && cm.contact_name.trim()) ||
