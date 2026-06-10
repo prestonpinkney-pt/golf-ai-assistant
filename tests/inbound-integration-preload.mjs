@@ -35,6 +35,7 @@ const testBusinessConfig = {
 };
 
 globalThis.__closeosGenerateAiDecisionCalls = 0;
+globalThis.__closeosGenerateAiDecisionInputs = [];
 
 registerMock("lib/business-messaging-config.ts", {
   namedExports: {
@@ -87,11 +88,51 @@ registerMock("lib/sentdm/send-message.ts", {
   },
 });
 
+function testDecidePlaybook(text) {
+  const lowered = String(text ?? "").toLowerCase();
+  if (
+    lowered.includes("simulator") ||
+    lowered.includes("player") ||
+    lowered.includes("friday") ||
+    lowered.includes("saturday") ||
+    lowered.includes("sunday")
+  ) {
+    return "simulator";
+  }
+  if (lowered.includes("membership") || lowered.includes("member")) {
+    return "membership";
+  }
+  return "general";
+}
+
+function testNextConversationState(currentState, playbook, inboundText) {
+  const text = String(inboundText ?? "").toLowerCase();
+  if (currentState === "new_inquiry") return "qualifying";
+  if (
+    currentState === "qualifying" &&
+    playbook === "simulator" &&
+    (text.includes("player") ||
+      text.includes("players") ||
+      text.includes("friday") ||
+      text.includes("saturday") ||
+      text.includes("sunday") ||
+      text.includes("book"))
+  ) {
+    return "ready_to_book";
+  }
+  return currentState;
+}
+
 registerMock("lib/ai/conversation-reply-core.ts", {
   namedExports: {
-    generateAiDecision: async () => {
+    generateAiDecision: async (input) => {
       globalThis.__closeosGenerateAiDecisionCalls =
         (globalThis.__closeosGenerateAiDecisionCalls ?? 0) + 1;
+      globalThis.__closeosGenerateAiDecisionInputs.push({
+        currentState: input?.currentState,
+        inboundText: input?.inboundText,
+        playbook: input?.playbook,
+      });
       return {
         intent: "membership_inquiry",
         confidence: 0.92,
@@ -113,8 +154,8 @@ registerMock("lib/ai/conversation-reply-core.ts", {
     }),
     applyMisunderstoodRouting: (d) => d,
     getAutoSendDecision: () => ({ shouldAutoSend: false, reason: "auto_send_disabled" }),
-    getNextConversationState: () => "qualifying",
-    decidePlaybook: () => "general",
+    getNextConversationState: testNextConversationState,
+    decidePlaybook: testDecidePlaybook,
     AI_RESPONSE_MODEL: "gpt-4o-mini",
     PENDING_SEND_STATUS: "pending_send",
     DEFAULT_ESCALATION_REPLY: "Escalation",

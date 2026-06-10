@@ -1549,6 +1549,7 @@ export async function runSentDmInboundConversationLoop(params: {
     const escalationHuman = reply.shouldEscalate;
     const convUpdate: DbRow = {
       intent: reply.intent,
+      status: reply.conversationStage,
       stage: reply.conversationStage,
       last_message_at: new Date().toISOString(),
     };
