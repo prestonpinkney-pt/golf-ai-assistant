@@ -10,8 +10,10 @@ import { before, beforeEach, describe, test } from "node:test";
 import { createInboundLoopMockSupabase } from "./test/inbound-loop-mock-supabase";
 
 declare global {
-  // eslint-disable-next-line no-var
   var __closeosGenerateAiDecisionCalls: number | undefined;
+  var __closeosGenerateAiDecisionInputs:
+    | Array<{ currentState?: string; inboundText?: string; playbook?: string }>
+    | undefined;
 }
 
 const fixtures = JSON.parse(
@@ -30,6 +32,11 @@ function aiCalls() {
 
 function resetAiCalls() {
   globalThis.__closeosGenerateAiDecisionCalls = 0;
+  globalThis.__closeosGenerateAiDecisionInputs = [];
+}
+
+function aiInputs() {
+  return globalThis.__closeosGenerateAiDecisionInputs ?? [];
 }
 
 before(async () => {
@@ -195,6 +202,44 @@ describe("inbound-loop integration (mocked Supabase + AI)", () => {
       supabase.__countMessages((m) => m.direction === "inbound" && m.external_id === ext),
       1
     );
+  });
+
+  test("persists status so the next inbound turn uses advanced conversation state", async () => {
+    const supabase = createInboundLoopMockSupabase();
+    const base = fixtures.inbound_membership_question_envelope as Record<
+      string,
+      unknown
+    >;
+
+    const first = await runSentDmInboundConversationLoop({
+      supabase,
+      rawPayload: envelopeWithText(base, "Do you have simulator time?"),
+      externalId: "fixture-state-turn-001",
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.equal(first.ok, true);
+
+    const conversationAfterFirst = supabase.__tables.conversations[0];
+    assert.equal(conversationAfterFirst?.status, "qualifying");
+    assert.equal(conversationAfterFirst?.stage, "qualifying");
+
+    const second = await runSentDmInboundConversationLoop({
+      supabase,
+      rawPayload: envelopeWithText(base, "2 players this Friday"),
+      externalId: "fixture-state-turn-002",
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.equal(second.ok, true);
+    assert.equal(supabase.__tables.conversations.length, 1);
+
+    const statesSeenByAi = aiInputs().map((input) => input.currentState);
+    assert.deepEqual(statesSeenByAi, ["new_inquiry", "qualifying"]);
+
+    const conversationAfterSecond = supabase.__tables.conversations[0];
+    assert.equal(conversationAfterSecond?.status, "ready_to_book");
+    assert.equal(conversationAfterSecond?.stage, "ready_to_book");
   });
 });
 

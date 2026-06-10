@@ -10,7 +10,7 @@
     "lint:hardcoded": "node scripts/check-hardcoded-runtime-values.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.ci.json",
     "test:sentdm": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/sentdm/carrier-compliance.test.ts lib/sentdm/inbound-sms-booking-phase.test.ts lib/sentdm/live-sms-outbound-finalize.test.ts lib/sentdm/send-message.test.ts lib/campaigns/send-eligibility.test.ts lib/campaigns/generate-campaign.test.ts lib/campaigns/list-campaigns.test.ts lib/whoosh/availability-campaign.test.ts lib/ai/safe-booking-qualification-reply.test.ts",
-    "test:webhook": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/messaging/cooling-off.test.ts lib/sentdm/webhook-queue.test.ts lib/sentdm/webhook-logging.test.ts lib/sentdm/enrich-inbound-body.test.ts lib/sentdm/sentdm-inbound-eligibility.test.ts && node --import ./tests/stub-server-only.cjs --import ./tests/inbound-integration-preload.mjs --import tsx --test --experimental-test-module-mocks lib/sentdm/inbound-loop-integration.test.ts",
+    "test:webhook": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/messaging/cooling-off.test.ts lib/sentdm/webhook-queue.test.ts lib/sentdm/webhook-logging.test.ts lib/sentdm/enrich-inbound-body.test.ts lib/sentdm/sentdm-inbound-eligibility.test.ts && node --import ./tests/stub-server-only.cjs --import ./tests/inbound-integration-preload.mjs --import tsx --test --experimental-test-module-mocks app/api/webhooks/sent/route.test.ts lib/sentdm/inbound-loop-integration.test.ts",
     "test:booking": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/ai/sms-booking-flow.test.ts lib/sentdm/inbound-sms-booking-phase.test.ts",
     "test:revenue-recovery": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/payments/process-square-booking-payment-hold.test.ts",
     "test:ci": "npm run test:sentdm && npm run test:webhook && npm run test:booking && npm run test:revenue-recovery",
@@ -37,6 +37,7 @@
     "postcss": "^8.5.10",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "server-only": "^0.0.1",
     "tailwindcss": "^4.2.4"
   },
   "devDependencies": {

@@ -38,7 +38,6 @@ import {
   runInboundSmsBookingAugmentationPhase,
 } from "@/lib/sentdm/inbound-sms-booking-phase";
 import { finalizeLiveSmsOutboundText } from "@/lib/sentdm/live-sms-outbound-finalize";
-import { isInboundQuietHoursActive } from "@/lib/messaging/quiet-hours";
 import { logMessagingAudit } from "@/lib/messaging/audit";
 import { postgrestMissingBusinessIdColumn } from "@/lib/supabase-postgrest-errors";
 import { sendSentDmMessage } from "@/lib/sentdm/send-message";
@@ -1549,6 +1548,7 @@ export async function runSentDmInboundConversationLoop(params: {
     const escalationHuman = reply.shouldEscalate;
     const convUpdate: DbRow = {
       intent: reply.intent,
+      status: reply.conversationStage,
       stage: reply.conversationStage,
       last_message_at: new Date().toISOString(),
     };
