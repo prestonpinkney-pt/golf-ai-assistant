@@ -40,13 +40,12 @@ mock.module(
   }
 );
 
-const { POST } = await import("./route");
-
 function signSha256(body: string, secret: string): string {
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
 }
 
 test("legacy Sent.dm webhook route delegates to canonical queue handler", async () => {
+  const { POST } = await import("./route");
   handlerCalls.length = 0;
   const previousEnv = { ...process.env };
   Object.assign(process.env, {
