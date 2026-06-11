@@ -83,6 +83,7 @@ export async function refreshWhooshSlowTimeOpportunities(input: {
   const { data: profiles, error: profileErr } = await input.supabase
     .from("customer_profiles")
     .select("id, phone, exclude_from_ai_targeting, visit_count, total_spend_cents")
+    .eq("business_id", input.businessId)
     .eq("exclude_from_ai_targeting", false)
     .not("phone", "is", null)
     .order("last_purchase_at", { ascending: false, nullsFirst: false })
