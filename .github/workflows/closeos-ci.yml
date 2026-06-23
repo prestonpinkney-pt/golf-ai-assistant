@@ -32,10 +32,14 @@ jobs:
 
       - name: Lint
         run: npm run lint
-        continue-on-error: true
 
       - name: Test suite
         run: npm run test:ci
+
+      - name: CloseOS production QA
+        run: npm run verify:closeos-qa -- --ci
+        env:
+          VERIFY_CLOSEOS_QA_CI: "1"
 
       - name: Verify messaging env script
         run: npm run verify:messaging-env
