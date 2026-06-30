@@ -123,14 +123,44 @@ export async function POST(req: NextRequest) {
   }
 
   if (enqueued.duplicate) {
+    if (enqueued.requeued) {
+      await logMessagingAudit(supabase, {
+        event_type: "webhook_duplicate_requeued",
+        entity_type: "webhook_job",
+        entity_id: enqueued.jobId,
+        metadata: { route: "/api/sentdm/inbound", external_id: externalId || null },
+      });
+      scheduleInboundJob(enqueued.jobId);
+      return NextResponse.json(
+        {
+          received: true,
+          queued: true,
+          duplicate: true,
+          requeued: true,
+          job_id: enqueued.jobId,
+        },
+        { status: 200 }
+      );
+    }
+
     await logMessagingAudit(supabase, {
       event_type: "webhook_duplicate_ignored",
       entity_type: "webhook_job",
-      entity_id: null,
-      metadata: { route: "/api/sentdm/inbound", external_id: externalId || null },
+      entity_id: enqueued.jobId,
+      metadata: {
+        route: "/api/sentdm/inbound",
+        external_id: externalId || null,
+        existing_status: enqueued.status,
+      },
     });
     return NextResponse.json(
-      { received: true, queued: false, duplicate: true },
+      {
+        received: true,
+        queued: false,
+        duplicate: true,
+        job_id: enqueued.jobId,
+        existing_status: enqueued.status,
+      },
       { status: 200 }
     );
   }
