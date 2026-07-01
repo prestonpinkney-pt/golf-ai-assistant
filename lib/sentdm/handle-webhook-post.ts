@@ -7,7 +7,6 @@ import {
   extractSentDmContactId,
   extractSentDmMessageExternalId,
   extractSentDmMessageIdForLookup,
-  hasSentDmInboundText,
   isDeliveryFailureStatus,
   logSentDmWebhookSummary,
   looksLikeInboundMessage,

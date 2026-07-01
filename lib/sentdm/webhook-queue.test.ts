@@ -88,7 +88,7 @@ function createWebhookQueueSupabase(rows: WebhookJobTestRow[]) {
           filters.push({ field, value });
           return api;
         },
-        select(_cols?: string) {
+        select() {
           return api;
         },
         async maybeSingle() {
