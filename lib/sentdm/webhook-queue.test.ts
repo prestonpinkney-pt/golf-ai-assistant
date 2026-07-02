@@ -321,7 +321,7 @@ describe("enqueueSentDmInboundWebhookJob", () => {
 
     assert.equal(result.ok, true);
 
-    if (!result.ok) throw new Error(result.error);
+    if (!result.ok) throw new Error("enqueue failed");
 
     assert.equal(result.duplicate, false);
 
@@ -381,7 +381,7 @@ describe("enqueueSentDmInboundWebhookJob", () => {
 
     assert.equal(result.ok, true);
 
-    if (!result.ok) throw new Error(result.error);
+    if (!result.ok) throw new Error("enqueue failed");
 
     assert.deepEqual(result, { ok: true, duplicate: true });
 
