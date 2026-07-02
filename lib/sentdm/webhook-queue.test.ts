@@ -121,7 +121,7 @@ function createWebhookQueueMockSupabase(initialRows: MockWebhookJobRow[] = []) {
 
         },
 
-        select(_cols?: string) {
+        select() {
 
           return api;
 
