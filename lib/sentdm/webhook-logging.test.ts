@@ -149,6 +149,17 @@ describe("Sent.dm webhook log planning", () => {
     assert.equal(source.includes("queued: false,\n    })"), false);
   });
 
+  test("synchronous inbound job failures are not acknowledged as successful webhooks", () => {
+    const source = readFileSync(
+      join(process.cwd(), "lib/sentdm/handle-webhook-post.ts"),
+      "utf8"
+    );
+    assert.match(
+      source,
+      /if \(processResult\.jobStatus === "failed"\)[\s\S]*\{ status: 503 \}/
+    );
+  });
+
   test("inbound text-only does not warn about missing external_id", () => {
     const body = loadFixture("inbound-text-only.local.json");
     const looksInbound = looksLikeInboundMessage(body);
