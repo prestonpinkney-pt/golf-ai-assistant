@@ -15,6 +15,7 @@ import { createHmac } from "node:crypto";
 import { afterEach, describe, test } from "node:test";
 
 import { NextRequest } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 
 
@@ -23,6 +24,12 @@ import {
   computeWebhookJobDedupeKey,
 
 } from "./webhook-job-dedupe";
+
+import {
+
+  enqueueSentDmInboundWebhookJob,
+
+} from "./webhook-queue";
 
 import {
 
@@ -63,6 +70,154 @@ const fixtures = JSON.parse(readFileSync(fixturesPath, "utf8")) as Record<
 function signSha256(body: string, secret: string): string {
 
   return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
+
+}
+
+
+
+type MockWebhookJobRow = Record<string, unknown>;
+
+
+
+function createWebhookQueueMockSupabase(initialRows: MockWebhookJobRow[] = []) {
+
+  const rows = initialRows;
+
+  function matches(row: MockWebhookJobRow, filters: Array<[string, unknown]>) {
+
+    return filters.every(([field, value]) => row[field] === value);
+
+  }
+
+
+
+  const client = {
+
+    from(table: string) {
+
+      assert.equal(table, "webhook_jobs");
+
+      let pendingInsert: MockWebhookJobRow | null = null;
+
+      let pendingUpdate: MockWebhookJobRow | null = null;
+
+      const filters: Array<[string, unknown]> = [];
+
+      const api = {
+
+        insert(row: MockWebhookJobRow) {
+
+          pendingInsert = row;
+
+          return api;
+
+        },
+
+        update(patch: MockWebhookJobRow) {
+
+          pendingUpdate = patch;
+
+          return api;
+
+        },
+
+        select() {
+
+          return api;
+
+        },
+
+        eq(field: string, value: unknown) {
+
+          filters.push([field, value]);
+
+          return api;
+
+        },
+
+        async maybeSingle() {
+
+          if (pendingInsert) {
+
+            const externalId = pendingInsert.external_id;
+
+            const conflict =
+
+              externalId ?
+
+                rows.find(
+
+                  (row) =>
+
+                    row.provider === pendingInsert?.provider &&
+
+                    row.external_id === externalId
+
+                )
+
+              : null;
+
+            if (conflict) {
+
+              return {
+
+                data: null,
+
+                error: { code: "23505", message: "duplicate key value" },
+
+              };
+
+            }
+
+
+
+            const inserted = {
+
+              id: `job-${rows.length + 1}`,
+
+              ...pendingInsert,
+
+            };
+
+            rows.push(inserted);
+
+            return { data: { id: inserted.id }, error: null };
+
+          }
+
+
+
+          if (pendingUpdate) {
+
+            const row = rows.find((candidate) => matches(candidate, filters));
+
+            if (!row) return { data: null, error: null };
+
+            Object.assign(row, pendingUpdate);
+
+            return { data: { id: row.id }, error: null };
+
+          }
+
+
+
+          return { data: null, error: null };
+
+        },
+
+      };
+
+      return api;
+
+    },
+
+    __rows: rows,
+
+  };
+
+
+
+  return client as unknown as SupabaseClient & { __rows: MockWebhookJobRow[] };
 
 }
 
@@ -115,6 +270,122 @@ describe("computeWebhookJobDedupeKey", () => {
     >;
 
     assert.equal(computeWebhookJobDedupeKey(body), null);
+
+  });
+
+});
+
+
+
+describe("enqueueSentDmInboundWebhookJob", () => {
+
+  test("requeues a failed duplicate job so provider retries are processed", async () => {
+
+    const payload = { payload: { message_id: "retry-message-001" } };
+
+    const supabase = createWebhookQueueMockSupabase([
+
+      {
+
+        id: "existing-job",
+
+        provider: "sentdm",
+
+        external_id: "sentdm:retry-message-001",
+
+        status: "failed",
+
+        processed_at: "2026-07-02T00:00:00.000Z",
+
+        last_error: "transient_sentdm_lookup_failure",
+
+        payload: { stale: true },
+
+      },
+
+    ]);
+
+
+
+    const result = await enqueueSentDmInboundWebhookJob(supabase, {
+
+      payload,
+
+      eventType: "message.received",
+
+      ingestSource: "sentdm_webhook",
+
+    });
+
+
+
+    assert.equal(result.ok, true);
+
+    if (!result.ok) throw new Error("enqueue failed");
+
+    assert.equal(result.duplicate, false);
+
+    if (!result.duplicate) {
+
+      assert.equal(result.jobId, "existing-job");
+
+      assert.equal(result.requeued, true);
+
+    }
+
+    assert.equal(supabase.__rows[0].status, "pending");
+
+    assert.equal(supabase.__rows[0].processed_at, null);
+
+    assert.equal(supabase.__rows[0].last_error, null);
+
+    assert.deepEqual(supabase.__rows[0].payload, payload);
+
+  });
+
+
+
+  test("keeps completed duplicate jobs deduped", async () => {
+
+    const payload = { payload: { message_id: "completed-message-001" } };
+
+    const supabase = createWebhookQueueMockSupabase([
+
+      {
+
+        id: "completed-job",
+
+        provider: "sentdm",
+
+        external_id: "sentdm:completed-message-001",
+
+        status: "completed",
+
+      },
+
+    ]);
+
+
+
+    const result = await enqueueSentDmInboundWebhookJob(supabase, {
+
+      payload,
+
+      eventType: "message.received",
+
+      ingestSource: "sentdm_webhook",
+
+    });
+
+
+
+    assert.equal(result.ok, true);
+
+    if (!result.ok) throw new Error("enqueue failed");
+
+    assert.deepEqual(result, { ok: true, duplicate: true });
+
+    assert.equal(supabase.__rows[0].status, "completed");
 
   });
 

@@ -7,7 +7,6 @@ import {
   extractSentDmContactId,
   extractSentDmMessageExternalId,
   extractSentDmMessageIdForLookup,
-  hasSentDmInboundText,
   isDeliveryFailureStatus,
   logSentDmWebhookSummary,
   looksLikeInboundMessage,
@@ -340,7 +339,7 @@ export async function handleSentDmWebhookPost(
             error: processResult.error,
             legacyFields,
           }),
-          { status: 200 }
+          { status: 503 }
         );
       }
 
