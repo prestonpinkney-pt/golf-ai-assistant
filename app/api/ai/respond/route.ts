@@ -29,11 +29,13 @@ import {
   messagingAutoSendPolicy,
   resolveBusinessMessagingConfigFromDb,
 } from "@/lib/business-messaging-config";
+import { canCallerUseAiRespondForConversation } from "@/lib/ai/respond-auth";
 import { sendMessage } from "@/lib/send-message";
 import { getResolvedMessagingProvider } from "@/lib/messaging/provider-resolve";
 import {
-  gateInternalOrBusinessUser,
+  ApiAuthError,
   isInternalSecretAuthorizedRequest,
+  requireBusinessUser,
 } from "../../lib/require-auth";
 
 const supabase = createClient(
@@ -53,10 +55,20 @@ function readContactWhooshMemberNumber(contact: unknown): string | null {
 }
 
 export async function POST(req: Request) {
-  const denied = await gateInternalOrBusinessUser(req);
-  if (denied) return denied;
-
   const internalCaller = isInternalSecretAuthorizedRequest(req);
+  let dashboardBusinessId: string | null = null;
+
+  if (!internalCaller) {
+    try {
+      const ctx = await requireBusinessUser();
+      dashboardBusinessId = ctx.businessId;
+    } catch (e) {
+      if (e instanceof ApiAuthError) {
+        return NextResponse.json({ error: e.message }, { status: e.statusCode });
+      }
+      throw e;
+    }
+  }
 
   try {
     const body = await req.json();
@@ -82,6 +94,19 @@ export async function POST(req: Request) {
           error: conversationError?.message || "Conversation not found",
         },
         { status: 500 }
+      );
+    }
+
+    if (
+      !canCallerUseAiRespondForConversation({
+        internalCaller,
+        businessId: dashboardBusinessId,
+        conversation: conversation as { business_id?: string | null },
+      })
+    ) {
+      return NextResponse.json(
+        { success: false, error: "Conversation not found" },
+        { status: 404 }
       );
     }
 
