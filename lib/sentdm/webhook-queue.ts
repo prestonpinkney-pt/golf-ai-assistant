@@ -51,7 +51,7 @@ export async function enqueueSentDmInboundWebhookJob(
           requeued: true,
         };
       }
-      if (requeued.error) {
+      if ("error" in requeued) {
         return { ok: false, error: requeued.error };
       }
     }
