@@ -340,7 +340,7 @@ export async function handleSentDmWebhookPost(
             error: processResult.error,
             legacyFields,
           }),
-          { status: 200 }
+          { status: 503 }
         );
       }
 
