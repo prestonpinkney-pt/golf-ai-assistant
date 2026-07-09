@@ -8,6 +8,32 @@ export type SentDmWebhookJobIngestSource =
   | "sentdm_webhook"
   | "sentdm_inbound_route";
 
+async function requeueFailedDuplicateWebhookJob(
+  supabase: SupabaseClient,
+  externalId: string
+): Promise<string | null> {
+  const iso = new Date().toISOString();
+  const { data, error } = await supabase
+    .from("webhook_jobs")
+    .update({
+      status: "pending",
+      last_error: null,
+      processed_at: null,
+      updated_at: iso,
+    })
+    .eq("external_id", externalId)
+    .eq("status", "failed")
+    .select("id")
+    .maybeSingle();
+
+  if (error) {
+    console.warn("[webhook-jobs] failed duplicate requeue:", error.message);
+    return null;
+  }
+
+  return typeof data?.id === "string" ? data.id : null;
+}
+
 export async function enqueueSentDmInboundWebhookJob(
   supabase: SupabaseClient,
   input: {
@@ -37,6 +63,15 @@ export async function enqueueSentDmInboundWebhookJob(
     .maybeSingle();
 
   if (error?.code === "23505") {
+    if (external_id) {
+      const jobId = await requeueFailedDuplicateWebhookJob(
+        supabase,
+        external_id
+      );
+      if (jobId) {
+        return { ok: true, jobId, duplicate: false };
+      }
+    }
     return { ok: true, duplicate: true };
   }
 
