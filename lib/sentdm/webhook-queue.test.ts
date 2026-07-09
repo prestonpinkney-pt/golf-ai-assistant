@@ -214,7 +214,7 @@ describe("enqueueSentDmInboundWebhookJob", () => {
     );
 
     assert.equal(result.ok, true);
-    if (!result.ok) throw new Error(result.error);
+    if (!result.ok) throw new Error("enqueue failed");
     assert.equal(result.duplicate, false);
     if (!result.duplicate) {
       assert.equal(result.jobId, "job-failed");
@@ -243,7 +243,7 @@ describe("enqueueSentDmInboundWebhookJob", () => {
     );
 
     assert.equal(result.ok, true);
-    if (!result.ok) throw new Error(result.error);
+    if (!result.ok) throw new Error("enqueue failed");
     assert.equal(result.duplicate, true);
     assert.equal(rows[0].status, "completed");
   });
