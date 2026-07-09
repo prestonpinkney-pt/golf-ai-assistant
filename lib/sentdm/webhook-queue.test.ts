@@ -24,6 +24,8 @@ import {
 
 } from "./webhook-job-dedupe";
 
+import { enqueueSentDmInboundWebhookJob } from "./webhook-queue";
+
 import {
 
   SENTDM_DEV_UNSIGNED_LOG,
@@ -57,6 +59,76 @@ const fixtures = JSON.parse(readFileSync(fixturesPath, "utf8")) as Record<
   unknown
 
 >;
+
+type MockWebhookJobRow = {
+  id: string;
+  external_id: string | null;
+  status: string;
+  last_error?: string | null;
+  processed_at?: string | null;
+  updated_at?: string | null;
+  [key: string]: unknown;
+};
+
+function createWebhookJobQueueMock(rows: MockWebhookJobRow[]) {
+  return {
+    from(table: string) {
+      assert.equal(table, "webhook_jobs");
+      let pendingInsert: Record<string, unknown> | null = null;
+      let pendingUpdate: Record<string, unknown> | null = null;
+      const filters: Array<{ field: string; value: unknown }> = [];
+
+      const api = {
+        insert(row: Record<string, unknown>) {
+          pendingInsert = row;
+          return api;
+        },
+        update(patch: Record<string, unknown>) {
+          pendingUpdate = patch;
+          return api;
+        },
+        select(_cols?: string) {
+          return api;
+        },
+        eq(field: string, value: unknown) {
+          filters.push({ field, value });
+          return api;
+        },
+        async maybeSingle() {
+          if (pendingInsert) {
+            const externalId = pendingInsert.external_id as string | null;
+            if (externalId && rows.some((row) => row.external_id === externalId)) {
+              return {
+                data: null,
+                error: { code: "23505", message: "duplicate key value" },
+              };
+            }
+
+            const row = {
+              id: `job-${rows.length + 1}`,
+              ...pendingInsert,
+            } as MockWebhookJobRow;
+            rows.push(row);
+            return { data: { id: row.id }, error: null };
+          }
+
+          if (pendingUpdate) {
+            const row = rows.find((candidate) =>
+              filters.every((filter) => candidate[filter.field] === filter.value)
+            );
+            if (!row) return { data: null, error: null };
+            Object.assign(row, pendingUpdate);
+            return { data: { id: row.id }, error: null };
+          }
+
+          return { data: null, error: null };
+        },
+      };
+
+      return api;
+    },
+  };
+}
 
 
 
@@ -118,6 +190,63 @@ describe("computeWebhookJobDedupeKey", () => {
 
   });
 
+});
+
+describe("enqueueSentDmInboundWebhookJob", () => {
+  test("requeues failed duplicate webhook job for provider retry", async () => {
+    const rows: MockWebhookJobRow[] = [
+      {
+        id: "job-failed",
+        external_id: "sentdm:retry-001",
+        status: "failed",
+        last_error: "lookup failed",
+        processed_at: "2026-07-09T10:00:00.000Z",
+      },
+    ];
+
+    const result = await enqueueSentDmInboundWebhookJob(
+      createWebhookJobQueueMock(rows) as never,
+      {
+        payload: { message_id: "retry-001" },
+        eventType: "message.received",
+        ingestSource: "sentdm_webhook",
+      }
+    );
+
+    assert.equal(result.ok, true);
+    if (!result.ok) throw new Error("enqueue failed");
+    assert.equal(result.duplicate, false);
+    if (!result.duplicate) {
+      assert.equal(result.jobId, "job-failed");
+    }
+    assert.equal(rows[0].status, "pending");
+    assert.equal(rows[0].last_error, null);
+    assert.equal(rows[0].processed_at, null);
+  });
+
+  test("keeps completed duplicate webhook job ignored", async () => {
+    const rows: MockWebhookJobRow[] = [
+      {
+        id: "job-completed",
+        external_id: "sentdm:done-001",
+        status: "completed",
+      },
+    ];
+
+    const result = await enqueueSentDmInboundWebhookJob(
+      createWebhookJobQueueMock(rows) as never,
+      {
+        payload: { message_id: "done-001" },
+        eventType: "message.received",
+        ingestSource: "sentdm_webhook",
+      }
+    );
+
+    assert.equal(result.ok, true);
+    if (!result.ok) throw new Error("enqueue failed");
+    assert.equal(result.duplicate, true);
+    assert.equal(rows[0].status, "completed");
+  });
 });
 
 
