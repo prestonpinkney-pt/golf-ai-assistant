@@ -24,6 +24,8 @@ import {
 
 } from "./webhook-job-dedupe";
 
+import { enqueueSentDmInboundWebhookJob } from "./webhook-queue";
+
 import {
 
   SENTDM_DEV_UNSIGNED_LOG,
@@ -524,5 +526,133 @@ describe("sentDmWebhookSignatureHeaderPresence", () => {
 
   });
 
+});
+
+describe("enqueueSentDmInboundWebhookJob duplicate recovery", () => {
+  function duplicateSupabase(existing: {
+    id: string;
+    provider: string;
+    external_id: string;
+    status: string;
+    payload?: Record<string, unknown>;
+    last_error?: string | null;
+    processed_at?: string | null;
+  }) {
+    const row = { ...existing };
+
+    return {
+      row,
+      from(table: string) {
+        assert.equal(table, "webhook_jobs");
+        const state: {
+          mode: "insert" | "select" | "update" | null;
+          patch: Record<string, unknown> | null;
+          filters: Record<string, unknown>;
+        } = { mode: null, patch: null, filters: {} };
+
+        const api = {
+          insert(_inserted: Record<string, unknown>) {
+            state.mode = "insert";
+            return api;
+          },
+          select(_columns?: string) {
+            if (!state.mode) state.mode = "select";
+            return api;
+          },
+          update(patch: Record<string, unknown>) {
+            state.mode = "update";
+            state.patch = patch;
+            return api;
+          },
+          eq(field: string, value: unknown) {
+            state.filters[field] = value;
+            return api;
+          },
+          async maybeSingle() {
+            if (state.mode === "insert") {
+              return {
+                data: null,
+                error: { code: "23505", message: "duplicate key value" },
+              };
+            }
+
+            if (state.mode === "select") {
+              const matches =
+                state.filters.provider === row.provider &&
+                state.filters.external_id === row.external_id;
+              return { data: matches ? row : null, error: null };
+            }
+
+            if (state.mode === "update") {
+              if (state.filters.id !== row.id) {
+                return { data: null, error: null };
+              }
+              Object.assign(row, state.patch);
+              return { data: { id: row.id }, error: null };
+            }
+
+            return { data: null, error: null };
+          },
+        };
+
+        return api;
+      },
+    };
+  }
+
+  test("requeues an existing failed duplicate webhook job", async () => {
+    const payload = {
+      type: "message.received",
+      payload: { message_id: "msg-failed-001", text: "new attempt" },
+    };
+    const fake = duplicateSupabase({
+      id: "job-failed-001",
+      provider: "sentdm",
+      external_id: "sentdm:msg-failed-001",
+      status: "failed",
+      payload: { old: true },
+      last_error: "transient failure",
+      processed_at: "2026-07-10T00:00:00.000Z",
+    });
+
+    const result = await enqueueSentDmInboundWebhookJob(fake as never, {
+      payload,
+      eventType: "message.received",
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.deepEqual(result, {
+      ok: true,
+      jobId: "job-failed-001",
+      duplicate: false,
+    });
+    assert.equal(fake.row.status, "pending");
+    assert.deepEqual(fake.row.payload, payload);
+    assert.equal(fake.row.last_error, null);
+    assert.equal(fake.row.processed_at, null);
+  });
+
+  test("keeps completed duplicate webhook jobs idempotent", async () => {
+    const fake = duplicateSupabase({
+      id: "job-completed-001",
+      provider: "sentdm",
+      external_id: "sentdm:msg-completed-001",
+      status: "completed",
+      payload: { original: true },
+    });
+
+    const result = await enqueueSentDmInboundWebhookJob(fake as never, {
+      payload: {
+        type: "message.received",
+        payload: { message_id: "msg-completed-001", text: "same" },
+      },
+      eventType: "message.received",
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.deepEqual(result, { ok: true, duplicate: true });
+    assert.equal(fake.row.status, "completed");
+    assert.deepEqual(fake.row.payload, { original: true });
+  });
 });
 
