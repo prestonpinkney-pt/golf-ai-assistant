@@ -15,6 +15,10 @@ begin
     from public.webhook_jobs j
     where j.status = 'pending'
        or (
+         j.status = 'failed'
+         and coalesce(j.attempts, 0) < 5
+       )
+       or (
          j.status = 'processing'
          and j.updated_at < now() - interval '15 minutes'
        )
@@ -34,4 +38,4 @@ end;
 $$;
 
 comment on function public.claim_webhook_jobs_batch(integer) is
-  'Claims pending or stale processing webhook_jobs rows (SKIP LOCKED); service_role only.';
+  'Claims pending, failed retryable, or stale processing webhook_jobs rows (SKIP LOCKED); service_role only.';
