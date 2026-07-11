@@ -276,12 +276,15 @@ export async function handleSentDmWebhookPost(
     }
 
     await logMessagingAudit(supabase, {
-      event_type: "webhook_job_created",
+      event_type: enqueued.requeued
+        ? "webhook_failed_job_requeued"
+        : "webhook_job_created",
       entity_type: "webhook_job",
       entity_id: enqueued.jobId,
       metadata: {
         provider: "sentdm",
         event_type: eventType,
+        requeued: Boolean(enqueued.requeued),
       },
     });
 
@@ -340,7 +343,7 @@ export async function handleSentDmWebhookPost(
             error: processResult.error,
             legacyFields,
           }),
-          { status: 200 }
+          { status: 503 }
         );
       }
 

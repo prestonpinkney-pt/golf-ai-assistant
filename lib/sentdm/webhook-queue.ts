@@ -16,7 +16,7 @@ export async function enqueueSentDmInboundWebhookJob(
     ingestSource: SentDmWebhookJobIngestSource;
   }
 ): Promise<
-  | { ok: true; jobId: string; duplicate: false }
+  | { ok: true; jobId: string; duplicate: false; requeued?: boolean }
   | { ok: true; duplicate: true }
   | { ok: false; error: string }
 > {
@@ -37,6 +37,39 @@ export async function enqueueSentDmInboundWebhookJob(
     .maybeSingle();
 
   if (error?.code === "23505") {
+    if (external_id) {
+      const { data: requeued, error: requeueError } = await supabase
+        .from("webhook_jobs")
+        .update({
+          event_type: input.eventType,
+          payload: input.payload,
+          metadata: { ingest_source: input.ingestSource },
+          status: "pending",
+          last_error: null,
+          processed_at: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("provider", "sentdm")
+        .eq("external_id", external_id)
+        .eq("status", "failed")
+        .select("id")
+        .maybeSingle();
+
+      if (requeueError) {
+        return { ok: false, error: requeueError.message };
+      }
+
+      const requeuedJobId = requeued?.id as string | undefined;
+      if (requeuedJobId) {
+        return {
+          ok: true,
+          jobId: requeuedJobId,
+          duplicate: false,
+          requeued: true,
+        };
+      }
+    }
+
     return { ok: true, duplicate: true };
   }
 
