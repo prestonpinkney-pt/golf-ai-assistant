@@ -88,7 +88,7 @@ test("failed duplicate webhook job is requeued instead of ignored", async () => 
     .map((call) => [call.column, call.value]);
   assert.deepEqual(eqs, [
     ["provider", "sentdm"],
-    ["external_id", "msg-123"],
+    ["external_id", "sentdm:msg-123"],
     ["status", "failed"],
   ]);
 });
