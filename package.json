@@ -13,7 +13,7 @@
     "test:webhook": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/messaging/cooling-off.test.ts lib/sentdm/webhook-queue.test.ts lib/sentdm/webhook-logging.test.ts lib/sentdm/enrich-inbound-body.test.ts lib/sentdm/sentdm-inbound-eligibility.test.ts && node --import ./tests/stub-server-only.cjs --import ./tests/inbound-integration-preload.mjs --import tsx --test --experimental-test-module-mocks lib/sentdm/inbound-loop-integration.test.ts",
     "test:booking": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/ai/sms-booking-flow.test.ts lib/sentdm/inbound-sms-booking-phase.test.ts",
     "test:revenue-recovery": "node --import ./tests/stub-server-only.cjs --import tsx --test lib/payments/process-square-booking-payment-hold.test.ts",
-    "test:ci": "npm run test:sentdm && npm run test:webhook && npm run test:booking && npm run test:revenue-recovery",
+    "test:ci": "node --test tests/package-dependencies.test.mjs && npm run test:sentdm && npm run test:webhook && npm run test:booking && npm run test:revenue-recovery",
     "verify:messaging-env": "node scripts/verify-messaging-env.mjs",
     "drain:sentdm-webhook-jobs": "node --import ./tests/stub-server-only.cjs --import tsx scripts/drain-sentdm-webhook-jobs.mjs",
     "test:sentdm-webhook:smoke": "node scripts/test-sentdm-webhook.mjs inbound-text",
@@ -37,6 +37,7 @@
     "postcss": "^8.5.10",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "server-only": "^0.0.1",
     "tailwindcss": "^4.2.4"
   },
   "devDependencies": {

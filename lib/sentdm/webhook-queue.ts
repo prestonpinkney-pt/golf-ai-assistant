@@ -8,6 +8,16 @@ export type SentDmWebhookJobIngestSource =
   | "sentdm_webhook"
   | "sentdm_inbound_route";
 
+export type EnqueuedSentDmWebhookJob =
+  | { ok: true; jobId: string; duplicate: false }
+  | {
+      ok: true;
+      duplicate: true;
+      jobId: string | null;
+      jobStatus: string | null;
+    }
+  | { ok: false; error: string };
+
 export async function enqueueSentDmInboundWebhookJob(
   supabase: SupabaseClient,
   input: {
@@ -15,11 +25,7 @@ export async function enqueueSentDmInboundWebhookJob(
     eventType: string;
     ingestSource: SentDmWebhookJobIngestSource;
   }
-): Promise<
-  | { ok: true; jobId: string; duplicate: false }
-  | { ok: true; duplicate: true }
-  | { ok: false; error: string }
-> {
+): Promise<EnqueuedSentDmWebhookJob> {
   const external_id = computeWebhookJobDedupeKey(input.payload);
   const row = {
     provider: "sentdm",
@@ -37,7 +43,33 @@ export async function enqueueSentDmInboundWebhookJob(
     .maybeSingle();
 
   if (error?.code === "23505") {
-    return { ok: true, duplicate: true };
+    if (!external_id) {
+      return { ok: true, duplicate: true, jobId: null, jobStatus: null };
+    }
+
+    const { data: existing, error: lookupError } = await supabase
+      .from("webhook_jobs")
+      .select("id, status")
+      .eq("provider", "sentdm")
+      .eq("external_id", external_id)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (lookupError) {
+      console.warn(
+        "[webhook_jobs] duplicate lookup failed:",
+        lookupError.message
+      );
+      return { ok: true, duplicate: true, jobId: null, jobStatus: null };
+    }
+
+    return {
+      ok: true,
+      duplicate: true,
+      jobId: typeof existing?.id === "string" ? existing.id : null,
+      jobStatus: typeof existing?.status === "string" ? existing.status : null,
+    };
   }
 
   if (error) {
