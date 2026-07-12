@@ -25,6 +25,12 @@ export type WebhookJobRow = {
   metadata?: Record<string, unknown> | null;
 };
 
+type ClaimableWebhookJobRow = WebhookJobRow & {
+  status?: string | null;
+  attempts?: number | string | null;
+  updated_at?: string | null;
+};
+
 export type SentDmWebhookJobRunResult = {
   jobStatus: "completed" | "failed";
   message_id: string | null;
@@ -353,6 +359,77 @@ function normalizeRpcJobRows(data: unknown): WebhookJobRow[] {
     }));
 }
 
+function isStaleProcessing(updatedAt: string | null | undefined): boolean {
+  if (!updatedAt) return true;
+  const parsed = Date.parse(updatedAt);
+  if (!Number.isFinite(parsed)) return true;
+  return parsed < Date.now() - 15 * 60 * 1000;
+}
+
+function canClaimWebhookJob(row: ClaimableWebhookJobRow): boolean {
+  if (row.status === "pending" || row.status === "failed") return true;
+  return row.status === "processing" && isStaleProcessing(row.updated_at);
+}
+
+function normalizeAttempts(value: number | string | null | undefined): number {
+  const n = typeof value === "number" ? value : Number(value ?? 0);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+async function claimSingleWebhookJobDirectly(
+  supabase: SupabaseClient,
+  jobId: string
+): Promise<WebhookJobRow | null> {
+  const { data, error } = await supabase
+    .from("webhook_jobs")
+    .select("id, payload, metadata, status, attempts, updated_at")
+    .eq("id", jobId)
+    .maybeSingle();
+
+  if (error) {
+    console.warn("[webhook-jobs] direct claim lookup:", error.message);
+    return null;
+  }
+
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+
+  const row = data as ClaimableWebhookJobRow;
+  if (!canClaimWebhookJob(row)) {
+    return null;
+  }
+
+  const iso = new Date().toISOString();
+  const { error: updateError } = await supabase
+    .from("webhook_jobs")
+    .update({
+      status: "processing",
+      attempts: normalizeAttempts(row.attempts) + 1,
+      last_error: null,
+      processed_at: null,
+      updated_at: iso,
+    })
+    .eq("id", jobId);
+
+  if (updateError) {
+    console.warn("[webhook-jobs] direct claim update:", updateError.message);
+    return null;
+  }
+
+  return {
+    id: String(row.id),
+    payload:
+      row.payload && typeof row.payload === "object" ?
+        (row.payload as Record<string, unknown>)
+      : {},
+    metadata:
+      row.metadata && typeof row.metadata === "object" ?
+        (row.metadata as Record<string, unknown>)
+      : {},
+  };
+}
+
 /** Pending → processing for one job id (via RPC); then runs pipeline. */
 export async function processSentDmWebhookJobFromPending(
   supabase: SupabaseClient,
@@ -364,7 +441,8 @@ export async function processSentDmWebhookJobFromPending(
 
   if (error) {
     console.warn("[webhook-jobs] begin_webhook_job RPC:", error.message);
-    return null;
+    const row = await claimSingleWebhookJobDirectly(supabase, jobId);
+    return row ? runQueuedSentDmInboundJob(supabase, row) : null;
   }
 
   const rows = normalizeRpcJobRows(data);

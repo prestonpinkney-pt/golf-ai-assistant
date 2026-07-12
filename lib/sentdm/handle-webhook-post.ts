@@ -16,7 +16,10 @@ import {
   type SentDmWebhookLogSummary,
   type SentDmWebhookVerification,
 } from "@/lib/messaging/sentdm-webhook";
-import { processSentDmWebhookJobFromPending } from "@/lib/sentdm/process-webhook-job";
+import {
+  processSentDmWebhookJobFromPending,
+  type SentDmWebhookJobRunResult,
+} from "@/lib/sentdm/process-webhook-job";
 import { computeWebhookJobDedupeKey } from "@/lib/sentdm/webhook-job-dedupe";
 import { enqueueSentDmInboundWebhookJob, type SentDmWebhookJobIngestSource } from "@/lib/sentdm/webhook-queue";
 
@@ -119,6 +122,94 @@ function buildInboundIntegrationResponse(input: {
     ...(input.skipReason ? { skip_reason: input.skipReason } : {}),
     received: true,
   };
+}
+
+function buildProcessingResultResponse(input: {
+  processResult: SentDmWebhookJobRunResult | null;
+  eventType: string;
+  messageIdForLookup: string | null;
+  webhookContactId: string | null;
+  verificationMode: string;
+  jobId: string;
+  legacyFields: Record<string, unknown>;
+}) {
+  const {
+    processResult,
+    eventType,
+    messageIdForLookup,
+    webhookContactId,
+    verificationMode,
+    jobId,
+    legacyFields,
+  } = input;
+
+  if (!processResult) {
+    return NextResponse.json(
+      buildInboundIntegrationResponse({
+        eventType,
+        message_id: messageIdForLookup,
+        contactId: webhookContactId,
+        status: "failed",
+        verificationMode,
+        job_id: jobId,
+        error: "webhook_job_claim_failed",
+        legacyFields,
+      }),
+      { status: 503 }
+    );
+  }
+
+  if (processResult.skipped) {
+    return NextResponse.json(
+      buildInboundIntegrationResponse({
+        eventType,
+        message_id: processResult.message_id ?? messageIdForLookup,
+        contactId: webhookContactId,
+        status: "skipped",
+        verificationMode,
+        job_id: jobId,
+        skipReason: processResult.skipReason,
+        legacyFields,
+      }),
+      { status: 200 }
+    );
+  }
+
+  if (processResult.jobStatus === "failed") {
+    return NextResponse.json(
+      buildInboundIntegrationResponse({
+        eventType,
+        message_id: processResult.message_id ?? messageIdForLookup,
+        contactId: processResult.contactId ?? webhookContactId,
+        status: "failed",
+        verificationMode,
+        job_id: jobId,
+        error: processResult.error,
+        legacyFields,
+      }),
+      { status: 503 }
+    );
+  }
+
+  return NextResponse.json(
+    buildInboundIntegrationResponse({
+      eventType,
+      message_id: processResult.message_id ?? messageIdForLookup,
+      contactId: processResult.contactId ?? webhookContactId,
+      status: "processed",
+      conversation_id: processResult.conversation_id,
+      inbound_message_id: processResult.inbound_message_id,
+      inbound_event_id: processResult.inbound_event_id,
+      verificationMode,
+      job_id: jobId,
+      legacyFields,
+    }),
+    { status: 200 }
+  );
+}
+
+function isRetryableDuplicateJobStatus(status: string | null | undefined): boolean {
+  return status === "pending" || status === "failed" || status === "processing";
 }
 
 function maybeWarnMissingExternalId(
@@ -248,6 +339,60 @@ export async function handleSentDmWebhookPost(
     }
 
     if (enqueued.duplicate) {
+      if (
+        enqueued.jobId &&
+        isRetryableDuplicateJobStatus(enqueued.jobStatus)
+      ) {
+        await logMessagingAudit(supabase, {
+          event_type: "webhook_duplicate_retry",
+          entity_type: "webhook_job",
+          entity_id: enqueued.jobId,
+          metadata: {
+            provider: "sentdm",
+            dedupe_key: computeWebhookJobDedupeKey(body),
+            event_type: eventType,
+            prior_status: enqueued.jobStatus,
+          },
+        });
+
+        const summary = emitFinalWebhookLog(options.route, logCtx, {
+          queued: false,
+          duplicate: true,
+          reason: "duplicate_job_retry",
+        });
+        maybeLogInboundTextHint(options.route, summary);
+
+        if ((messageIdForLookup?.trim().length ?? 0) > 0) {
+          const processResult = await processSentDmWebhookJobFromPending(
+            supabase,
+            enqueued.jobId
+          );
+          return buildProcessingResultResponse({
+            processResult,
+            eventType,
+            messageIdForLookup,
+            webhookContactId,
+            verificationMode,
+            jobId: enqueued.jobId,
+            legacyFields,
+          });
+        }
+
+        scheduleInboundJob(enqueued.jobId);
+        return NextResponse.json(
+          buildInboundIntegrationResponse({
+            eventType,
+            message_id: messageIdForLookup,
+            contactId: webhookContactId,
+            status: "queued",
+            verificationMode,
+            job_id: enqueued.jobId,
+            legacyFields,
+          }),
+          { status: 200 }
+        );
+      }
+
       await logMessagingAudit(supabase, {
         event_type: "webhook_duplicate_ignored",
         entity_type: "webhook_job",
@@ -295,70 +440,15 @@ export async function handleSentDmWebhookPost(
         supabase,
         enqueued.jobId
       );
-
-      if (!processResult) {
-        return NextResponse.json(
-          buildInboundIntegrationResponse({
-            eventType,
-            message_id: messageIdForLookup,
-            contactId: webhookContactId,
-            status: "failed",
-            verificationMode,
-            job_id: enqueued.jobId,
-            error: "webhook_job_claim_failed",
-            legacyFields,
-          }),
-          { status: 503 }
-        );
-      }
-
-      if (processResult.skipped) {
-        return NextResponse.json(
-          buildInboundIntegrationResponse({
-            eventType,
-            message_id: processResult.message_id ?? messageIdForLookup,
-            contactId: webhookContactId,
-            status: "skipped",
-            verificationMode,
-            job_id: enqueued.jobId,
-            skipReason: processResult.skipReason,
-            legacyFields,
-          }),
-          { status: 200 }
-        );
-      }
-
-      if (processResult.jobStatus === "failed") {
-        return NextResponse.json(
-          buildInboundIntegrationResponse({
-            eventType,
-            message_id: processResult.message_id ?? messageIdForLookup,
-            contactId: processResult.contactId ?? webhookContactId,
-            status: "failed",
-            verificationMode,
-            job_id: enqueued.jobId,
-            error: processResult.error,
-            legacyFields,
-          }),
-          { status: 200 }
-        );
-      }
-
-      return NextResponse.json(
-        buildInboundIntegrationResponse({
-          eventType,
-          message_id: processResult.message_id ?? messageIdForLookup,
-          contactId: processResult.contactId ?? webhookContactId,
-          status: "processed",
-          conversation_id: processResult.conversation_id,
-          inbound_message_id: processResult.inbound_message_id,
-          inbound_event_id: processResult.inbound_event_id,
-          verificationMode,
-          job_id: enqueued.jobId,
-          legacyFields,
-        }),
-        { status: 200 }
-      );
+      return buildProcessingResultResponse({
+        processResult,
+        eventType,
+        messageIdForLookup,
+        webhookContactId,
+        verificationMode,
+        jobId: enqueued.jobId,
+        legacyFields,
+      });
     }
 
     scheduleInboundJob(enqueued.jobId);

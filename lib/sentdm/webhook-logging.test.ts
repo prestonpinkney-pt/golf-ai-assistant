@@ -149,6 +149,41 @@ describe("Sent.dm webhook log planning", () => {
     assert.equal(source.includes("queued: false,\n    })"), false);
   });
 
+  test("legacy Sent webhook route delegates to canonical queue handler", () => {
+    const source = readFileSync(
+      join(process.cwd(), "app/api/webhooks/sent/route.ts"),
+      "utf8"
+    );
+    assert.ok(source.includes("handleSentDmWebhookPost"));
+    assert.ok(source.includes("legacyRoute: true"));
+    assert.equal(source.includes("generateCloseOSReply"), false);
+    assert.equal(source.includes("sendSentMessage"), false);
+    assert.equal(source.includes("createSupabaseServiceClient"), false);
+  });
+
+  test("failed inbound job processing remains retryable", () => {
+    const handlerSource = readFileSync(
+      join(process.cwd(), "lib/sentdm/handle-webhook-post.ts"),
+      "utf8"
+    );
+    const migrationSource = readFileSync(
+      join(
+        process.cwd(),
+        "supabase/migrations/20260712110300_webhook_jobs_retry_failed.sql"
+      ),
+      "utf8"
+    );
+
+    assert.match(
+      handlerSource,
+      /processResult\.jobStatus === "failed"[\s\S]*\{ status: 503 \}/
+    );
+    assert.match(handlerSource, /event_type: "webhook_duplicate_retry"/);
+    assert.match(migrationSource, /create or replace function public\.begin_webhook_job/);
+    assert.match(migrationSource, /j\.status = 'failed'/);
+    assert.match(migrationSource, /coalesce\(j\.attempts, 0\) < 5/);
+  });
+
   test("inbound text-only does not warn about missing external_id", () => {
     const body = loadFixture("inbound-text-only.local.json");
     const looksInbound = looksLikeInboundMessage(body);
