@@ -10,9 +10,9 @@ export const revalidate = 0;
  * 1. Payments → revenue_events (rolling window)
  * 2. Customer directory pagination → customer_profiles (phone/email for recovery)
  *
- * Vercel cron schedule: every 6 hours (see vercel.json) — requires CRON_SECRET.
+ * Vercel cron schedule: daily at 07:00 UTC (see vercel.json) — requires CRON_SECRET.
  */
-export async function POST(request: NextRequest) {
+export async function GET(request: NextRequest) {
   const denied = gateCron(request);
   if (denied) return denied;
 
@@ -37,4 +37,8 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+export async function POST(request: NextRequest) {
+  return GET(request);
 }
