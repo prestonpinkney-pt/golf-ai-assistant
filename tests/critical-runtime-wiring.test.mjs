@@ -42,8 +42,19 @@ test("webhook job migration includes single-job claim and failed retry", () => {
   const migration = readText(
     "supabase/migrations/20260524120000_webhook_jobs_reclaim_stale.sql"
   );
+  const lockdown = readText(
+    "supabase/migrations/20260714110000_lock_down_webhook_jobs.sql"
+  );
 
+  assert.match(migration, /create table if not exists public\.webhook_jobs/);
   assert.match(migration, /create or replace function public\.begin_webhook_job/);
   assert.match(migration, /j\.status = 'failed'/);
   assert.match(migration, /j\.attempts < 5/);
+  assert.match(lockdown, /enable row level security/);
+  assert.match(
+    lockdown,
+    /revoke execute on function public\.begin_webhook_job\(uuid\)/
+  );
+  assert.match(lockdown, /from public, anon, authenticated/);
+  assert.match(lockdown, /to service_role/);
 });

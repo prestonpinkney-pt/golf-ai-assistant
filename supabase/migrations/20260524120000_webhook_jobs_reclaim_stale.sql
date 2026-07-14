@@ -1,5 +1,32 @@
 -- Reclaim webhook_jobs stuck in `processing` (e.g. after() timeout) so cron can retry.
 
+create table if not exists public.webhook_jobs (
+  id uuid primary key default gen_random_uuid(),
+  provider text not null,
+  event_type text not null,
+  external_id text null,
+  payload jsonb not null default '{}'::jsonb,
+  metadata jsonb not null default '{}'::jsonb,
+  status text not null default 'pending',
+  attempts integer not null default 0,
+  last_error text null,
+  processed_at timestamptz null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  constraint webhook_jobs_attempts_nonnegative check (attempts >= 0)
+);
+
+create unique index if not exists webhook_jobs_provider_external_id_key
+  on public.webhook_jobs (provider, external_id)
+  where external_id is not null;
+
+create index if not exists webhook_jobs_claim_idx
+  on public.webhook_jobs (status, created_at);
+
+alter table public.webhook_jobs enable row level security;
+revoke all on table public.webhook_jobs from public, anon, authenticated;
+grant all on table public.webhook_jobs to service_role;
+
 create or replace function public.begin_webhook_job(p_id uuid)
 returns setof public.webhook_jobs
 language plpgsql
@@ -71,3 +98,10 @@ $$;
 
 comment on function public.claim_webhook_jobs_batch(integer) is
   'Claims pending, failed, or stale processing webhook_jobs rows (SKIP LOCKED); service_role only.';
+
+revoke execute on function public.begin_webhook_job(uuid)
+  from public, anon, authenticated;
+revoke execute on function public.claim_webhook_jobs_batch(integer)
+  from public, anon, authenticated;
+grant execute on function public.begin_webhook_job(uuid) to service_role;
+grant execute on function public.claim_webhook_jobs_batch(integer) to service_role;
