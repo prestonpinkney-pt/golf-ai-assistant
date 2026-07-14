@@ -30,6 +30,14 @@ test("dashboard AI responses enforce conversation tenant ownership", () => {
   assert.match(route, /await requireBusinessUser\(\)/);
 });
 
+test("completed Square payments finalize CloseOS booking holds", () => {
+  const route = readText("app/api/webhooks/square/route.ts");
+
+  assert.match(route, /processSquarePaymentCompletedForBookingHold/);
+  assert.match(route, /closeosBookingIdFromOrder\(order\)/);
+  assert.match(route, /squarePaymentId: payment\.id/);
+});
+
 test("webhook job migration includes single-job claim and failed retry", () => {
   const migration = readText(
     "supabase/migrations/20260524120000_webhook_jobs_reclaim_stale.sql"
