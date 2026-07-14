@@ -95,7 +95,7 @@ async function fetchAgendaSlots(agendaDate: string): Promise<
   }
 }
 
-function slotToWindow(
+export function slotToWindow(
   raw: Record<string, unknown>,
   normalized: WhooshAggSlotRow,
   agendaDate: string,
@@ -108,7 +108,7 @@ function slotToWindow(
   const parsedStart = parseSlotLocalDateTime({ agendaDateYmd: agendaDate, timeRaw });
   if (!parsedStart?.isValid) return null;
 
-  if (!isSlotEligibleForSmsPublicSimulator(parsedStart) && remainingCapacity(normalized) <= 0) {
+  if (!isSlotEligibleForSmsPublicSimulator(parsedStart)) {
     return null;
   }
 

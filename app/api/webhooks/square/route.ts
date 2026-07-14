@@ -2,8 +2,11 @@ import { createClient } from "@supabase/supabase-js";
 import { type NextRequest, NextResponse } from "next/server";
 import { decryptToken } from "@/lib/square-token-crypto";
 import { verifySquareWebhookSignature } from "@/lib/square-webhook-signature";
+import { processSquarePaymentCompletedForBookingHold } from "@/lib/closeos/process-square-booking-payment-hold";
 import { BUSINESS_ID } from "../../config";
 const SQUARE_VERSION = "2025-01-23";
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type SquareWebhookBody = {
   type?: string;
@@ -39,6 +42,8 @@ type SquareConnection = {
 type SquareOrder = {
   id: string;
   customer_id?: string;
+  reference_id?: string;
+  metadata?: Record<string, string | undefined>;
   line_items?: Array<{
     name?: string;
     quantity?: string;
@@ -49,6 +54,20 @@ type SquareOrder = {
     variation_name?: string;
   }>;
 };
+
+function closeosBookingIdFromOrder(order: SquareOrder | null): string | null {
+  const candidates = [
+    order?.metadata?.closeos_booking_id,
+    order?.metadata?.closeosBookingId,
+    order?.metadata?.CloseOS_Booking_Id,
+    order?.reference_id,
+  ];
+  const value = candidates.find(
+    (candidate) =>
+      typeof candidate === "string" && UUID_RE.test(candidate.trim())
+  );
+  return value?.trim() ?? null;
+}
 
 function getSupabaseAdmin() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -295,6 +314,17 @@ export async function POST(request: NextRequest) {
       accessToken,
       orderId: payment.order_id,
     });
+    const closeosBookingId = closeosBookingIdFromOrder(order);
+    const bookingHoldResult = closeosBookingId
+      ? await processSquarePaymentCompletedForBookingHold({
+          supabase,
+          accessTokenSquare: accessToken,
+          closeosBookingId,
+          squarePaymentId: payment.id,
+          orderId: payment.order_id,
+          amountCents,
+        })
+      : null;
 
     const externalCustomerId =
       payment.customer_id ?? order?.customer_id ?? null;
@@ -388,6 +418,7 @@ export async function POST(request: NextRequest) {
       externalCustomerId,
       customerProfileId,
       revenueUpdated: true,
+      bookingHold: bookingHoldResult,
     });
   } catch (error) {
     return NextResponse.json(

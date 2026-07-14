@@ -24,6 +24,8 @@ import {
 
 } from "./webhook-job-dedupe";
 
+import { enqueueSentDmInboundWebhookJob } from "./webhook-queue";
+
 import {
 
   SENTDM_DEV_UNSIGNED_LOG,
@@ -524,5 +526,108 @@ describe("sentDmWebhookSignatureHeaderPresence", () => {
 
   });
 
+});
+
+function fakeDuplicateJobSupabase(existing: {
+  id: string;
+  status: string;
+  updated_at: string;
+  attempts: number;
+}) {
+  let updatedPatch: Record<string, unknown> | null = null;
+  return {
+    get updatedPatch() {
+      return updatedPatch;
+    },
+    from(table: string) {
+      assert.equal(table, "webhook_jobs");
+      return {
+        insert() {
+          return {
+            select() {
+              return {
+                async maybeSingle() {
+                  return {
+                    data: null,
+                    error: { code: "23505", message: "duplicate key" },
+                  };
+                },
+              };
+            },
+          };
+        },
+        select() {
+          return {
+            eq() {
+              return this;
+            },
+            async maybeSingle() {
+              return { data: existing, error: null };
+            },
+          };
+        },
+        update(patch: Record<string, unknown>) {
+          updatedPatch = patch;
+          return {
+            eq() {
+              return {
+                select() {
+                  return {
+                    async maybeSingle() {
+                      return { data: { id: existing.id }, error: null };
+                    },
+                  };
+                },
+              };
+            },
+          };
+        },
+      };
+    },
+  };
+}
+
+describe("enqueueSentDmInboundWebhookJob duplicate retries", () => {
+  test("failed duplicate webhook job is requeued instead of ignored", async () => {
+    const supabase = fakeDuplicateJobSupabase({
+      id: "job-failed",
+      status: "failed",
+      updated_at: new Date().toISOString(),
+      attempts: 1,
+    });
+
+    const result = await enqueueSentDmInboundWebhookJob(supabase as never, {
+      payload: { payload: { message_id: "retry-msg-1" } },
+      eventType: "message.received",
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.deepEqual(result, {
+      ok: true,
+      jobId: "job-failed",
+      duplicate: false,
+    });
+    assert.equal(supabase.updatedPatch?.status, "pending");
+    assert.equal(supabase.updatedPatch?.last_error, null);
+    assert.equal(supabase.updatedPatch?.processed_at, null);
+  });
+
+  test("completed duplicate webhook job remains ignored", async () => {
+    const supabase = fakeDuplicateJobSupabase({
+      id: "job-completed",
+      status: "completed",
+      updated_at: new Date().toISOString(),
+      attempts: 1,
+    });
+
+    const result = await enqueueSentDmInboundWebhookJob(supabase as never, {
+      payload: { payload: { message_id: "done-msg-1" } },
+      eventType: "message.received",
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.deepEqual(result, { ok: true, duplicate: true });
+    assert.equal(supabase.updatedPatch, null);
+  });
 });
 

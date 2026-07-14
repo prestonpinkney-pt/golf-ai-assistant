@@ -34,7 +34,9 @@ import { getResolvedMessagingProvider } from "@/lib/messaging/provider-resolve";
 import {
   gateInternalOrBusinessUser,
   isInternalSecretAuthorizedRequest,
+  requireBusinessUser,
 } from "../../lib/require-auth";
+import { conversationAccessibleToBusiness } from "@/lib/conversations/conversation-tenant";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -82,6 +84,19 @@ export async function POST(req: Request) {
           error: conversationError?.message || "Conversation not found",
         },
         { status: 500 }
+      );
+    }
+
+    if (
+      !internalCaller &&
+      !conversationAccessibleToBusiness(
+        conversation as { business_id?: string | null },
+        (await requireBusinessUser()).businessId
+      )
+    ) {
+      return NextResponse.json(
+        { success: false, error: "Conversation not found" },
+        { status: 404 }
       );
     }
 

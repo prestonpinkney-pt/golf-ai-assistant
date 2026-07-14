@@ -149,6 +149,17 @@ describe("Sent.dm webhook log planning", () => {
     assert.equal(source.includes("queued: false,\n    })"), false);
   });
 
+  test("legacy sent webhook delegates to canonical queue handler", () => {
+    const source = readFileSync(
+      join(process.cwd(), "app/api/webhooks/sent/route.ts"),
+      "utf8"
+    );
+    assert.ok(source.includes("handleSentDmWebhookPost"));
+    assert.ok(source.includes("legacyRoute: true"));
+    assert.equal(source.includes("generateCloseOSReply"), false);
+    assert.equal(source.includes("sendSentMessage"), false);
+  });
+
   test("inbound text-only does not warn about missing external_id", () => {
     const body = loadFixture("inbound-text-only.local.json");
     const looksInbound = looksLikeInboundMessage(body);
