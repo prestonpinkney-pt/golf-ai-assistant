@@ -22,6 +22,14 @@ test("Square customer directory cron target exists and revenue cron supports GET
   assert.match(directoryRoute, /syncSquareCustomerDirectory/);
 });
 
+test("dashboard AI responses enforce conversation tenant ownership", () => {
+  const route = readText("app/api/ai/respond/route.ts");
+
+  assert.match(route, /conversationAccessibleToBusiness/);
+  assert.match(route, /!internalCaller/);
+  assert.match(route, /await requireBusinessUser\(\)/);
+});
+
 test("webhook job migration includes single-job claim and failed retry", () => {
   const migration = readText(
     "supabase/migrations/20260524120000_webhook_jobs_reclaim_stale.sql"
