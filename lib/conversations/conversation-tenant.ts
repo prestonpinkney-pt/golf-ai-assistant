@@ -1,12 +1,12 @@
 /**
- * When `business_id` is set on a conversation, it must match the signed-in workspace.
- * Null means legacy row (pre-migration) — allow until backfill.
+ * Conversations without an explicit tenant cannot be safely exposed through
+ * service-role-backed dashboard APIs. Legacy rows must be backfilled before
+ * they become accessible.
  */
 export function conversationAccessibleToBusiness(
   conversation: { business_id?: string | null },
   businessId: string
 ): boolean {
   const rowBiz = conversation.business_id ?? null;
-  if (rowBiz == null) return true;
-  return rowBiz === businessId;
+  return rowBiz !== null && rowBiz === businessId;
 }
