@@ -44,6 +44,9 @@ export function sentDmWebhookSignatureHeaderPresence(
     "x-sent-dm-signature",
     "x-sentdm-secret",
     "x-sent-dm-secret",
+    "x-sentdm-timestamp",
+    "x-sent-dm-timestamp",
+    "sentdm-timestamp",
   ] as const;
   const out: Record<string, boolean> = {};
   for (const k of keys) {
