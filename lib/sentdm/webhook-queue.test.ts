@@ -32,6 +32,8 @@ import {
 
   isSentDmUnsignedDevWebhooksAllowed,
 
+  isSentDmUnsignedWebhooksAllowed,
+
   sentDmWebhookSignatureHeaderPresence,
 
   verifySentDmAuthenticity,
@@ -327,6 +329,40 @@ describe("verifySentDmAuthenticity", () => {
     });
 
     const r = verifySentDmAuthenticity(req, body);
+
+    assert.equal(r.ok, false);
+
+    if (!r.ok) assert.match(r.reason, /Missing/i);
+
+  });
+
+  test("production ignores the legacy unsigned webhook escape hatch", () => {
+
+    Object.assign(process.env, {
+
+      NODE_ENV: "production",
+
+      SENTDM_WEBHOOK_SECRET: "secret",
+
+      SENTDM_ALLOW_UNSIGNED_WEBHOOKS: "true",
+
+    });
+
+    const body = "{}";
+
+    const req = new NextRequest("http://localhost/api/sentdm/webhook", {
+
+      method: "POST",
+
+      headers: { "content-type": "application/json" },
+
+      body,
+
+    });
+
+    const r = verifySentDmAuthenticity(req, body);
+
+    assert.equal(isSentDmUnsignedWebhooksAllowed(), false);
 
     assert.equal(r.ok, false);
 

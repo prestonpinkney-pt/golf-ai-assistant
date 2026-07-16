@@ -167,13 +167,13 @@ export function isSentDmUnsignedDevWebhooksAllowed(): boolean {
 }
 
 /**
- * True when `SENTDM_ALLOW_UNSIGNED_WEBHOOKS=true` (any environment).
- * Use when Sent.dm is not configured to sign webhook requests.
- * Webhooks are accepted without signature verification — set this only when
- * Sent.dm signing is unavailable and remove once signing is configured.
+ * Legacy unsigned-webhook escape hatch for non-production environments only.
+ * Production must always verify provider signatures, even if a stale deployment
+ * still has SENTDM_ALLOW_UNSIGNED_WEBHOOKS=true.
  */
 export function isSentDmUnsignedWebhooksAllowed(): boolean {
   return (
+    process.env.NODE_ENV !== "production" &&
     process.env.SENTDM_ALLOW_UNSIGNED_WEBHOOKS?.trim().toLowerCase() === "true"
   );
 }
