@@ -12,7 +12,7 @@ export const revalidate = 0;
  *
  * Vercel cron schedule: every 6 hours (see vercel.json) — requires CRON_SECRET.
  */
-export async function POST(request: NextRequest) {
+export async function GET(request: NextRequest) {
   const denied = gateCron(request);
   if (denied) return denied;
 
@@ -37,4 +37,8 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+export async function POST(request: NextRequest) {
+  return GET(request);
 }
