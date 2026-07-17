@@ -1,4 +1,4 @@
--- Reclaim webhook_jobs stuck in `processing` (e.g. after() timeout) so cron can retry.
+-- Ensure webhook jobs are durable, retryable, and service-role-only.
 
 create table if not exists public.webhook_jobs (
   id uuid primary key default gen_random_uuid(),
@@ -15,6 +15,19 @@ create table if not exists public.webhook_jobs (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.webhook_jobs
+  add column if not exists provider text,
+  add column if not exists event_type text,
+  add column if not exists external_id text,
+  add column if not exists payload jsonb not null default '{}'::jsonb,
+  add column if not exists metadata jsonb not null default '{}'::jsonb,
+  add column if not exists status text not null default 'pending',
+  add column if not exists attempts integer not null default 0,
+  add column if not exists last_error text,
+  add column if not exists processed_at timestamptz,
+  add column if not exists created_at timestamptz not null default now(),
+  add column if not exists updated_at timestamptz not null default now();
 
 create unique index if not exists webhook_jobs_provider_external_id_key
   on public.webhook_jobs (provider, external_id)
