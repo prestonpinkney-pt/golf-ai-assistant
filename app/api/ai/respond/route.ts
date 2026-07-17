@@ -31,9 +31,11 @@ import {
 } from "@/lib/business-messaging-config";
 import { sendMessage } from "@/lib/send-message";
 import { getResolvedMessagingProvider } from "@/lib/messaging/provider-resolve";
+import { conversationAccessibleToBusiness } from "@/lib/conversations/conversation-tenant";
 import {
   gateInternalOrBusinessUser,
   isInternalSecretAuthorizedRequest,
+  requireBusinessUser,
 } from "../../lib/require-auth";
 
 const supabase = createClient(
@@ -57,6 +59,9 @@ export async function POST(req: Request) {
   if (denied) return denied;
 
   const internalCaller = isInternalSecretAuthorizedRequest(req);
+  const dashboardBusinessId = internalCaller
+    ? null
+    : (await requireBusinessUser()).businessId;
 
   try {
     const body = await req.json();
@@ -82,6 +87,16 @@ export async function POST(req: Request) {
           error: conversationError?.message || "Conversation not found",
         },
         { status: 500 }
+      );
+    }
+
+    if (
+      dashboardBusinessId &&
+      !conversationAccessibleToBusiness(conversation, dashboardBusinessId)
+    ) {
+      return NextResponse.json(
+        { success: false, error: "Conversation not found" },
+        { status: 404 }
       );
     }
 
