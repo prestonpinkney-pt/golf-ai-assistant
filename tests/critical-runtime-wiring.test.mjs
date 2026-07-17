@@ -33,10 +33,11 @@ test("dashboard conversation access fails closed", () => {
 
 test("failed Sent.dm jobs remain retryable and fail provider acknowledgement", () => {
   const handler = read("lib/sentdm/handle-webhook-post.ts");
-  const failedBranch = handler.slice(
-    handler.indexOf('if (processResult.jobStatus === "failed")'),
-    handler.indexOf('status: "processed"')
+  const failedBranchStart = handler.indexOf(
+    'if (processResult.jobStatus === "failed")'
   );
+  assert.notEqual(failedBranchStart, -1);
+  const failedBranch = handler.slice(failedBranchStart, failedBranchStart + 900);
   assert.match(failedBranch, /\{ status: 503 \}/);
 
   const migration = read(
