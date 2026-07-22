@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildCloseOsAiRecommendation } from "@/app/api/lib/closeos-ai-intelligence";
 import { mapWhooshCacheRowToWindow } from "@/lib/whoosh/load-availability-windows";
+import { refreshWhooshSlowTimeOpportunities } from "@/lib/whoosh/slow-time-opportunities";
 
 test("mapWhooshCacheRowToWindow normalizes Supabase cache rows", () => {
   const window = mapWhooshCacheRowToWindow({
@@ -102,4 +103,127 @@ test("Whoosh-verified Sunday copy uses Sunday wording without exact times", () =
 
   assert.ok(rec.recommendedMessage.includes("Sunday"));
   assert.ok(!rec.recommendedMessage.match(/\d{1,2}:\d{2}/));
+});
+
+test("slow-time opportunities only use profiles from the requested business", async () => {
+  const insertedOpportunities: Record<string, unknown>[] = [];
+  const profiles = [
+    {
+      id: "profile-a",
+      business_id: "biz-a",
+      phone: "+15551111111",
+      exclude_from_ai_targeting: false,
+      visit_count: 2,
+      total_spend_cents: 5000,
+    },
+    {
+      id: "profile-b",
+      business_id: "biz-b",
+      phone: "+15552222222",
+      exclude_from_ai_targeting: false,
+      visit_count: 3,
+      total_spend_cents: 7500,
+    },
+  ];
+
+  const supabase = {
+    from(table: string) {
+      if (table === "whoosh_availability_windows") {
+        const query = {
+          select() {
+            return query;
+          },
+          eq() {
+            return query;
+          },
+          gte() {
+            return query;
+          },
+          lte() {
+            return query;
+          },
+          order() {
+            return query;
+          },
+          in: async () => ({
+            data: [
+              {
+                whoosh_window_id: "window-1",
+                starts_at: "2026-07-23T18:00:00.000Z",
+                ends_at: "2026-07-23T19:00:00.000Z",
+                timezone: "America/Los_Angeles",
+                resource_type: "simulator",
+                bookable: true,
+              },
+            ],
+            error: null,
+          }),
+        };
+        return query;
+      }
+
+      if (table === "customer_profiles") {
+        let businessId: string | null = null;
+        const query = {
+          select() {
+            return query;
+          },
+          eq(column: string, value: unknown) {
+            if (column === "business_id") businessId = String(value);
+            return query;
+          },
+          not() {
+            return query;
+          },
+          order() {
+            return query;
+          },
+          limit: async () => ({
+            data: businessId
+              ? profiles.filter((profile) => profile.business_id === businessId)
+              : profiles,
+            error: null,
+          }),
+        };
+        return query;
+      }
+
+      if (table === "ai_opportunities") {
+        const selectQuery = {
+          eq() {
+            return selectQuery;
+          },
+          in() {
+            return selectQuery;
+          },
+          maybeSingle: async () => ({ data: null, error: null }),
+        };
+        return {
+          select() {
+            return selectQuery;
+          },
+          insert: async (payload: Record<string, unknown>) => {
+            insertedOpportunities.push(payload);
+            return { error: null };
+          },
+        };
+      }
+
+      throw new Error(`Unexpected table ${table}`);
+    },
+  };
+
+  const result = await refreshWhooshSlowTimeOpportunities({
+    supabase: supabase as never,
+    businessId: "biz-a",
+    startDate: "2026-07-23",
+    endDate: "2026-07-30",
+  });
+
+  assert.equal(result.opportunitiesUpserted, 1);
+  assert.deepEqual(
+    insertedOpportunities.map((row) => row.customer_profile_id),
+    ["profile-a"]
+  );
+  assert.equal(insertedOpportunities[0]?.business_id, "biz-a");
 });
