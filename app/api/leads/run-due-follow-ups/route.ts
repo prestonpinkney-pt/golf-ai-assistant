@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { resolveOutboundSmsConsentGate } from "@/lib/messaging/outbound-sms-consent";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { sendMessage } from "@/lib/send-message";
 import { gateCron } from "../../lib/require-auth";
@@ -106,6 +107,36 @@ export async function POST(req: Request) {
         failedCount += 1;
         console.error(
           `[run-due-follow-ups] Skipping lead ${lead.id}: missing valid E.164 phone`
+        );
+        continue;
+      }
+
+      const { data: contact, error: contactLookupError } = await supabaseAdmin
+        .from("contacts")
+        .select("sms_opt_out, cooling_off_until")
+        .eq("phone", to)
+        .maybeSingle();
+
+      const consent = resolveOutboundSmsConsentGate({
+        contact: contact
+          ? {
+              sms_opt_out: Boolean(contact.sms_opt_out),
+              cooling_off_until:
+                typeof contact.cooling_off_until === "string"
+                  ? contact.cooling_off_until
+                  : null,
+            }
+          : null,
+        lookupError: contactLookupError,
+      });
+      if (!consent.allowed) {
+        if (consent.status === 503) {
+          failedCount += 1;
+        } else {
+          skippedCount += 1;
+        }
+        console.error(
+          `[run-due-follow-ups] Skipping lead ${lead.id}: ${consent.error}`
         );
         continue;
       }
