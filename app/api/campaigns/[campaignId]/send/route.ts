@@ -1,6 +1,10 @@
 import { ApiAuthError, requireBusinessUser } from "@/app/api/lib/require-auth";
 import { refreshCampaignRollup } from "@/lib/campaigns/rollup";
 import {
+  campaignConversationAttachmentFilters,
+  interpretCampaignContactLookup,
+} from "@/lib/campaigns/campaign-send-safety";
+import {
   evaluateCampaignRecipientPolicy,
   evaluateCampaignSendWindow,
   evaluateCampaignTestAllowlist,
@@ -205,11 +209,55 @@ export async function POST(
       continue;
     }
 
-    const { data: contact } = await supabase
+    const contactLookup = await supabase
       .from("contacts")
       .select("id, name, phone, sms_opt_out, cooling_off_until")
       .eq("phone", toPhone)
       .maybeSingle();
+    const contactResolution = interpretCampaignContactLookup({
+      data: (contactLookup.data as
+        | {
+            id: string;
+            name?: string | null;
+            phone?: string | null;
+            sms_opt_out?: boolean | null;
+            cooling_off_until?: string | null;
+          }
+        | null) ?? null,
+      error: contactLookup.error,
+    });
+    if (!contactResolution.ok) {
+      const now = new Date().toISOString();
+      await supabase
+        .from("campaign_messages")
+        .update({
+          status: "failed",
+          failed_at: now,
+          error_message:
+            "Unable to verify contact SMS consent; send blocked",
+          updated_at: now,
+        })
+        .eq("id", messageId);
+      await logMessagingAudit(supabase, {
+        event_type: "campaign_send_blocked_contact_lookup",
+        entity_type: "campaign_message",
+        entity_id: messageId,
+        metadata: {
+          business_id: businessId,
+          user_id: userId,
+          campaign_id: campaignId,
+          phone: toPhone,
+          detail: contactResolution.detail,
+        },
+      });
+      results.push({
+        id: messageId,
+        outcome: "failed",
+        error: "Unable to verify contact SMS consent",
+      });
+      continue;
+    }
+    const contact = contactResolution.contact;
 
     if (contact?.sms_opt_out) {
       const now = new Date().toISOString();
@@ -280,7 +328,7 @@ export async function POST(
     const policy = await evaluateCampaignRecipientPolicy(supabase, {
       contactId: (contact?.id as string | undefined) ?? null,
       phone: toPhone,
-      smsOptOut: false,
+      smsOptOut: Boolean(contact?.sms_opt_out),
     });
     if (!policy.allowed) {
       const now = new Date().toISOString();
@@ -315,10 +363,15 @@ export async function POST(
     let leadId: string | null = null;
 
     if (contactId) {
+      const conversationFilters = campaignConversationAttachmentFilters({
+        contactId,
+        businessId,
+      });
       const { data: conv } = await supabase
         .from("conversations")
         .select("id, lead_id")
-        .eq("contact_id", contactId)
+        .eq("contact_id", conversationFilters.contact_id)
+        .eq("business_id", conversationFilters.business_id)
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();

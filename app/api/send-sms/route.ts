@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { sendMessage } from "../../../lib/send-message";
+import { resolveOutboundSmsConsentGate } from "@/lib/messaging/outbound-sms-consent";
+import { createSupabaseServiceRoleClient } from "@/lib/supabase/admin";
 import { gateInternalOrBusinessUser } from "../lib/require-auth";
 
 const MAX_MESSAGE_LENGTH = 1600;
@@ -53,6 +55,32 @@ export async function POST(req: Request) {
   }
 
   try {
+    const supabase = createSupabaseServiceRoleClient();
+    const { data: contact, error: contactLookupError } = await supabase
+      .from("contacts")
+      .select("sms_opt_out, cooling_off_until")
+      .eq("phone", to)
+      .maybeSingle();
+
+    const consent = resolveOutboundSmsConsentGate({
+      contact: contact
+        ? {
+            sms_opt_out: Boolean(contact.sms_opt_out),
+            cooling_off_until:
+              typeof contact.cooling_off_until === "string"
+                ? contact.cooling_off_until
+                : null,
+          }
+        : null,
+      lookupError: contactLookupError,
+    });
+    if (!consent.allowed) {
+      return NextResponse.json(
+        { error: consent.error },
+        { status: consent.status }
+      );
+    }
+
     const result = await sendMessage({
       channel: "sms",
       to,
