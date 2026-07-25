@@ -10,7 +10,9 @@ import {
   whooshServerFetch,
 } from "@/lib/whoosh/client";
 import {
+  isRawSlotExplicitlyUnavailable,
   normalizeRawIntegrationSlot,
+  remainingCapacity,
   whooshSlotResourceId,
 } from "@/lib/whoosh/availability";
 import {
@@ -55,12 +57,6 @@ function matchesResourceFilter(
   return true;
 }
 
-function remainingCapacity(slot: WhooshAggSlotRow): number {
-  const cap = slot.capacity ?? 1;
-  const used = slot.used_capacity ?? 0;
-  return Math.max(0, Math.max(cap, 1) - Math.max(used, 0));
-}
-
 function enumerateDates(startDate: string, endDate: string): string[] {
   const tz = getWhooshTimezone();
   let cursor = DateTime.fromISO(startDate, { zone: tz }).startOf("day");
@@ -102,6 +98,8 @@ function slotToWindow(
   timezone: string,
   durationMinutes: number
 ): WhooshAvailabilityWindow | null {
+  if (isRawSlotExplicitlyUnavailable(raw)) return null;
+
   const timeRaw = normalized.time;
   if (!timeRaw) return null;
 
