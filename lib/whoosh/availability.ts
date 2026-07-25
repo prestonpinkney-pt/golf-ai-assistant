@@ -69,6 +69,47 @@ function asIntNullable(v: unknown): number | null {
   return null;
 }
 
+/**
+ * Whoosh agenda payloads may mark inventory closed via boolean/status fields
+ * even when capacity/used_capacity are missing or stale.
+ */
+export function isRawSlotExplicitlyUnavailable(
+  raw: Record<string, unknown>
+): boolean {
+  if (raw.available === false || raw.is_available === false) return true;
+
+  const remaining = asIntNullable(raw.remaining_spots);
+  if (remaining !== null && remaining <= 0) return true;
+
+  const status =
+    typeof raw.status === "string" ? raw.status.trim().toLowerCase() : "";
+  if (
+    status === "unavailable" ||
+    status === "booked" ||
+    status === "full" ||
+    status === "closed" ||
+    status === "blocked"
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Remaining bookable seats for a normalized Whoosh slot.
+ * `capacity: 0` must stay closed — never inflate it to 1.
+ * Missing capacity still defaults to one open seat when used_capacity is absent,
+ * matching historical Whoosh payloads that omit capacity on open slots.
+ */
+export function remainingCapacity(slot: WhooshAggSlotRow): number {
+  const used = Math.max(slot.used_capacity ?? 0, 0);
+  if (slot.capacity == null) {
+    return Math.max(0, 1 - used);
+  }
+  return Math.max(0, slot.capacity - used);
+}
+
 export function normalizeRawIntegrationSlot(
   raw: Record<string, unknown>
 ): WhooshAggSlotRow | null {
@@ -82,14 +123,43 @@ export function normalizeRawIntegrationSlot(
     asTrimmed(raw.slot_date, 64) ??
     asTrimmed(raw.agenda_date, 64);
 
+  const capacity =
+    asIntNullable(raw.capacity) ?? asIntNullable(raw.max_capacity);
+  let used_capacity = asIntNullable(raw.used_capacity ?? raw.used);
+  const remaining = asIntNullable(raw.remaining_spots);
+  const explicitlyUnavailable = isRawSlotExplicitlyUnavailable(raw);
+
+  if (used_capacity == null && capacity != null && remaining != null) {
+    used_capacity = Math.max(0, capacity - Math.max(remaining, 0));
+  }
+
+  if (explicitlyUnavailable) {
+    if (capacity != null) {
+      used_capacity = Math.max(used_capacity ?? 0, capacity);
+    } else {
+      // Force remainingCapacity() → 0 when Whoosh marks the slot closed
+      // without a numeric capacity field.
+      return {
+        course_id: asTrimmed(raw.course_id, 160),
+        course_name: asTrimmed(raw.course_name, 400),
+        slot_date: slotDate ?? undefined,
+        agenda_date: slotDate ?? undefined,
+        time,
+        capacity: 0,
+        used_capacity: 0,
+        type: asTrimmed(raw.type, 120),
+      };
+    }
+  }
+
   return {
     course_id: asTrimmed(raw.course_id, 160),
     course_name: asTrimmed(raw.course_name, 400),
     slot_date: slotDate ?? undefined,
     agenda_date: slotDate ?? undefined,
     time,
-    capacity: asIntNullable(raw.capacity),
-    used_capacity: asIntNullable(raw.used_capacity ?? raw.used),
+    capacity,
+    used_capacity,
     type: asTrimmed(raw.type, 120),
   };
 }
@@ -165,12 +235,6 @@ function passesSimulatorCourseFilter(courseName: string | null, slotType: string
   return true;
 }
 
-function remainingCapacity(slot: WhooshAggSlotRow): number {
-  const cap = slot.capacity ?? 1;
-  const used = slot.used_capacity ?? 0;
-  return Math.max(0, Math.max(cap, 1) - Math.max(used, 0));
-}
-
 /**
  * Lessons use the same public simulator inventory lanes unless/until vendor tags lesson bays.
  */
@@ -224,6 +288,8 @@ export async function getWhooshAvailability(
     const out: NormalizedWhooshAvailabilitySlot[] = [];
 
     for (const rawRecord of slotsFetched.list) {
+      if (isRawSlotExplicitlyUnavailable(rawRecord)) continue;
+
       const normalized = normalizeRawIntegrationSlot(rawRecord);
       const agenda = (
         normalized?.slot_date ??
