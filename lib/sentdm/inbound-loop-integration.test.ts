@@ -12,6 +12,8 @@ import { createInboundLoopMockSupabase } from "./test/inbound-loop-mock-supabase
 declare global {
   // eslint-disable-next-line no-var
   var __closeosGenerateAiDecisionCalls: number | undefined;
+  // eslint-disable-next-line no-var
+  var __closeosComplianceSendAttempts: unknown[] | undefined;
 }
 
 const fixtures = JSON.parse(
@@ -32,6 +34,14 @@ function resetAiCalls() {
   globalThis.__closeosGenerateAiDecisionCalls = 0;
 }
 
+function complianceSends() {
+  return globalThis.__closeosComplianceSendAttempts ?? [];
+}
+
+function resetComplianceSends() {
+  globalThis.__closeosComplianceSendAttempts = [];
+}
+
 before(async () => {
   const inboundLoop = await import("./inbound-loop");
   const webhookJob = await import("./process-webhook-job");
@@ -49,6 +59,7 @@ function envelopeWithText(base: Record<string, unknown>, text: string) {
 describe("inbound-loop integration (mocked Supabase + AI)", () => {
   beforeEach(() => {
     resetAiCalls();
+    resetComplianceSends();
     process.env.CLOSEOS_QUIET_HOURS_ENABLED = "false";
     process.env.OPENAI_API_KEY = "test_openai_key_stub_unit";
   });
@@ -131,11 +142,69 @@ describe("inbound-loop integration (mocked Supabase + AI)", () => {
 
     assert.equal(result.ok, true);
     assert.equal((result.body as { control_reply?: string }).control_reply, "opt_out");
+    assert.equal((result.body as { compliance_sent?: boolean }).compliance_sent, true);
     assert.equal(aiCalls(), 0);
+    assert.equal(complianceSends().length, 1);
 
     const contact = supabase.__tables.contacts.find((c) => c.phone === "+15551234567");
     assert.equal(contact?.sms_opt_out, true);
     assert.equal(contact?.cooling_off_until, undefined);
+  });
+
+  test("HELP acknowledgement sends even when AI auto-send is disabled", async () => {
+    const supabase = createInboundLoopMockSupabase();
+    const base = fixtures.inbound_membership_question_envelope as Record<
+      string,
+      unknown
+    >;
+    const envelope = envelopeWithText(base, "HELP");
+
+    const result = await runSentDmInboundConversationLoop({
+      supabase,
+      rawPayload: envelope,
+      externalId: "fixture-help-001",
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal((result.body as { control_reply?: string }).control_reply, "help");
+    assert.equal((result.body as { compliance_sent?: boolean }).compliance_sent, true);
+    assert.equal(aiCalls(), 0);
+    assert.equal(complianceSends().length, 1);
+  });
+
+  test("START clears opt-out and sends ack when AI auto-send is disabled", async () => {
+    const supabase = createInboundLoopMockSupabase();
+    supabase.__tables.contacts.push({
+      id: "contact-opted-out",
+      phone: "+15551234567",
+      sms_opt_out: true,
+      sms_opt_out_at: new Date().toISOString(),
+      sms_opt_out_reason: "STOP",
+    });
+
+    const base = fixtures.inbound_membership_question_envelope as Record<
+      string,
+      unknown
+    >;
+    const envelope = envelopeWithText(base, "START");
+
+    const result = await runSentDmInboundConversationLoop({
+      supabase,
+      rawPayload: envelope,
+      externalId: "fixture-start-001",
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal((result.body as { control_reply?: string }).control_reply, "opt_in");
+    assert.equal((result.body as { compliance_sent?: boolean }).compliance_sent, true);
+    assert.equal(aiCalls(), 0);
+    assert.equal(complianceSends().length, 1);
+
+    const contact = supabase.__tables.contacts.find((c) => c.phone === "+15551234567");
+    assert.equal(contact?.sms_opt_out, false);
+    assert.equal(contact?.sms_opt_out_at, null);
   });
 
   test("cooled-off contact does not receive auto-reply", async () => {
@@ -201,6 +270,7 @@ describe("inbound-loop integration (mocked Supabase + AI)", () => {
 describe("webhook job processor → inbound-loop", () => {
   beforeEach(() => {
     resetAiCalls();
+    resetComplianceSends();
     process.env.CLOSEOS_QUIET_HOURS_ENABLED = "false";
     process.env.OPENAI_API_KEY = "test_openai_key_stub_unit";
   });

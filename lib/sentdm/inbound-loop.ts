@@ -22,6 +22,7 @@ import { maybeUpdateConversationSummary } from "@/lib/agent/conversation-summary
 import { businessRulesGate } from "@/lib/agent/business-rules-gate";
 import {
   getHelpResponseForConfig,
+  getOptInAcknowledgementForConfig,
   messagingAutoSendPolicy,
   resolveBusinessMessagingConfigFromDb,
 } from "@/lib/business-messaging-config";
@@ -811,13 +812,9 @@ export async function runSentDmInboundConversationLoop(params: {
         };
       }
 
+      // Compliance STOP acks must send even when AI auto-send is disabled.
       let sendOk = false;
-      if (
-        outMsg &&
-        isLikelyE164Phone(phone) &&
-        businessConfig.autoSendEnabled &&
-        stopPersist.trim().length
-      ) {
+      if (outMsg && isLikelyE164Phone(phone) && stopPersist.trim().length) {
         try {
           const sendRes = await sendSentDmMessage({
             to: phone.trim(),
@@ -965,11 +962,11 @@ export async function runSentDmInboundConversationLoop(params: {
         };
       }
 
+      // Compliance HELP acks must send even when AI auto-send is disabled.
       let helpSendOk = false;
       if (
         helpOutMsg &&
         isLikelyE164Phone(phone) &&
-        businessConfig.autoSendEnabled &&
         helpPersist.trim().length
       ) {
         try {
@@ -1025,6 +1022,171 @@ export async function runSentDmInboundConversationLoop(params: {
           control_reply: "help",
           conversation_id: conversation!.id,
           compliance_sent: helpSendOk,
+        },
+      };
+    }
+
+    if (detectCarrierComplianceKind(messageText) === "start") {
+      await supabase
+        .from("contacts")
+        .update({
+          sms_opt_out: false,
+          sms_opt_out_at: null,
+          sms_opt_out_reason: null,
+        })
+        .eq("id", contact!.id as string);
+
+      contact = {
+        ...(contact as DbRow),
+        sms_opt_out: false,
+        sms_opt_out_at: null,
+        sms_opt_out_reason: null,
+      };
+
+      await audit(supabase, {
+        event_type: "sentdm_loop_start_handled",
+        entity_type: "contact",
+        entity_id: String(contact!.id),
+        metadata: { conversation_id: conversation!.id },
+      });
+
+      const startBase = getOptInAcknowledgementForConfig(businessConfig).slice(
+        0,
+        businessConfig.maxSmsLength
+      );
+      let startPersist = startBase;
+      if (inboundChannel === "sms") {
+        const f = finalizeLiveSmsOutboundText({
+          draftReply: startBase,
+          channel: inboundChannel,
+          businessName: businessConfig.name,
+          assistantName: businessConfig.assistantName,
+          shouldDiscloseAutomation: false,
+          bookingConfirmedByWhoosh: false,
+        });
+        startPersist = f.responseText.slice(0, businessConfig.maxSmsLength);
+        if (f.confirmationGuardBlocked) {
+          await logMessagingAudit(supabase, {
+            event_type: "sms_booking_confirmation_blocked",
+            entity_type: "conversation",
+            entity_id: String(conversation!.id),
+            metadata: {
+              source: "sentdm_inbound_loop",
+              pathway: "compliance_start_reply",
+            },
+          });
+        }
+      }
+
+      const { data: startOutMsg, error: startInsertErr } = await supabase
+        .from("messages")
+        .insert({
+          conversation_id: conversation!.id as string,
+          contact_id: contact!.id as string,
+          lead_id: lead!.id as string,
+          contact_phone: phone,
+          direction: "outbound",
+          channel: inboundChannel,
+          message_text: startPersist,
+          body: startPersist,
+          sender_type: "ai",
+          status: PENDING_SEND,
+          delivery_status: "not_sent",
+          ai_generated: false,
+          intent: "sms_opt_in",
+          metadata: {
+            compliance_start_confirm: true,
+            inbound_message_id: inboundMessage.id,
+            business_id: businessConfig.id,
+          },
+        })
+        .select()
+        .single();
+
+      if (startInsertErr || !startOutMsg) {
+        await failInbound(
+          startInsertErr?.message ?? "start_outbound_missing",
+          "start_out_insert"
+        );
+        return {
+          ok: false,
+          statusCode: 500,
+          body: { step: "start_outbound", error: startInsertErr?.message },
+        };
+      }
+
+      // Compliance START acks must send even when AI auto-send is disabled.
+      let startSendOk = false;
+      if (
+        startOutMsg &&
+        isLikelyE164Phone(phone) &&
+        startPersist.trim().length
+      ) {
+        try {
+          const sendRes = await sendSentDmMessage({
+            to: phone.trim(),
+            message: startPersist,
+            channel: inboundChannel === "rcs" ? "rcs" : "sms",
+            name:
+              typeof contact?.name === "string" ? contact.name : null,
+            businessName: businessConfig.name,
+            idempotencyKey: String(startOutMsg.id),
+          });
+          startSendOk = true;
+          const sentAt = new Date().toISOString();
+          await supabase
+            .from("messages")
+            .update({
+              status: sendRes.status ?? "queued",
+              delivery_status: sendRes.status ?? "queued",
+              provider: sendRes.provider,
+              external_id: sendRes.external_id,
+              provider_message_id: sendRes.external_id,
+              sent_at: sentAt,
+            })
+            .eq("id", startOutMsg.id);
+          await supabase
+            .from("conversations")
+            .update({
+              last_outbound_at: sentAt,
+              last_ai_message_at: sentAt,
+            })
+            .eq("id", conversation!.id as string);
+        } catch (e: unknown) {
+          console.error("[sentdm/inbound-loop] start send:", e);
+          await audit(supabase, {
+            event_type: "sentdm_loop_start_send_failed",
+            entity_type: "message",
+            entity_id: String(startOutMsg.id),
+            metadata: { error: safeErrorMessage(e, "send_failed") },
+          });
+        }
+      }
+
+      await logMessagingAudit(supabase, {
+        event_type: "sms_opt_in_detected",
+        entity_type: "contact",
+        entity_id: contact!.id as string,
+        metadata: {
+          message: messageText,
+          conversation_id: conversation!.id,
+          inbound_event_id: inboundEventId,
+          business_id: businessConfig.id,
+        },
+      });
+
+      await supabase
+        .from("inbound_events")
+        .update({ status: "processed" })
+        .eq("id", inboundEventId);
+
+      return {
+        ok: true,
+        statusCode: 200,
+        body: {
+          control_reply: "opt_in",
+          conversation_id: conversation!.id,
+          compliance_sent: startSendOk,
         },
       };
     }

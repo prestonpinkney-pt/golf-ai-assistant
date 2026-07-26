@@ -4,6 +4,7 @@ import { describe, test } from "node:test";
 import {
   detectCarrierComplianceKind,
   isCarrierHelpKeyword,
+  isCarrierStartKeyword,
   isCarrierStopKeyword,
   normalizeCarrierKeywordMessage,
 } from "./carrier-compliance";
@@ -23,8 +24,16 @@ describe("carrier compliance keywords", () => {
     assert.ok(isCarrierHelpKeyword(normalizeCarrierKeywordMessage("INFO")));
   });
 
+  test("START / UNSTOP / SUBSCRIBE map to start branch (handled before AI)", () => {
+    assert.equal(detectCarrierComplianceKind("START"), "start");
+    assert.equal(detectCarrierComplianceKind("unstop"), "start");
+    assert.equal(detectCarrierComplianceKind("SUBSCRIBE"), "start");
+    assert.ok(isCarrierStartKeyword(normalizeCarrierKeywordMessage("START")));
+  });
+
   test("normal conversation text does not trigger compliance shortcuts", () => {
     assert.equal(detectCarrierComplianceKind("Do you offer memberships?"), null);
     assert.equal(isCarrierStopKeyword("please stop asking"), false);
+    assert.equal(isCarrierStartKeyword("please start my lesson"), false);
   });
 });
