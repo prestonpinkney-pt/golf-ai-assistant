@@ -35,6 +35,7 @@ const testBusinessConfig = {
 };
 
 globalThis.__closeosGenerateAiDecisionCalls = 0;
+globalThis.__closeosComplianceSendAttempts = [];
 
 registerMock("lib/business-messaging-config.ts", {
   namedExports: {
@@ -47,6 +48,9 @@ registerMock("lib/business-messaging-config.ts", {
       riskyResponseTerms: config.riskyResponseTerms,
     }),
     getHelpResponseForConfig: () => "Reply HELP for assistance.",
+    getOptInAcknowledgementForConfig: (config) =>
+      config.optInResponse?.trim() ||
+      `You're subscribed to SMS from ${config.name}. Reply STOP to unsubscribe anytime.`,
   },
 });
 
@@ -81,8 +85,15 @@ registerMock("lib/sentdm/inbound-sms-booking-phase.ts", {
 
 registerMock("lib/sentdm/send-message.ts", {
   namedExports: {
-    sendSentDmMessage: async () => {
-      throw new Error("sendSentDmMessage must not run when auto_send is disabled");
+    // AI auto-send stays off in this preload; compliance STOP/HELP/START may still send.
+    sendSentDmMessage: async (input) => {
+      globalThis.__closeosComplianceSendAttempts.push(input);
+      return {
+        success: true,
+        provider: "sentdm",
+        external_id: `sdm-compliance-${globalThis.__closeosComplianceSendAttempts.length}`,
+        status: "queued",
+      };
     },
   },
 });
