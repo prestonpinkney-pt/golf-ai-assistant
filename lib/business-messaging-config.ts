@@ -301,7 +301,10 @@ async function lookupBusiness(
   const routedBusinessId = requestedToNumber
     ? await lookupBusinessIdByPhone(supabase, requestedToNumber)
     : null;
-  const requestedBusinessId = cleanString(input.businessId) || routedBusinessId;
+  // Destination phone is authoritative for inbound SMS tenant routing.
+  // Preferring payload business_id would let a forged/stale webhook body
+  // attach conversations to the wrong workspace when to_number is present.
+  const requestedBusinessId = routedBusinessId || cleanString(input.businessId);
   const requestedBusinessSlug = cleanString(input.businessSlug);
 
   if (!requestedBusinessId && !requestedBusinessSlug) {
@@ -415,18 +418,28 @@ export function resolveBusinessMessagingConfig(input?: {
     typeof input?.businessSlug === "string" ? input.businessSlug.trim() : "";
   const requestedToNumber = cleanPhone(input?.toNumber);
 
-  const matched = configured.find((business) => {
-    if (requestedBusinessId && business.id === requestedBusinessId) return true;
-    if (requestedBusinessSlug && business.slug === requestedBusinessSlug) return true;
-    if (
-      requestedToNumber &&
-      (business.smsFromNumber === requestedToNumber ||
-        business.inboundNumbers?.includes(requestedToNumber))
-    ) {
-      return true;
-    }
-    return false;
-  });
+  // Two-pass match: destination phone is authoritative for inbound tenant
+  // routing. A single find() that also checks business_id would still return
+  // the first id match even when a later entry owns the to_number.
+  const matchedByPhone =
+    requestedToNumber ?
+      configured.find(
+        (business) =>
+          cleanPhone(business.smsFromNumber) === requestedToNumber ||
+          (Array.isArray(business.inboundNumbers) &&
+            business.inboundNumbers.some(
+              (n) => cleanPhone(n) === requestedToNumber
+            ))
+      )
+    : undefined;
+
+  const matched =
+    matchedByPhone ??
+    configured.find((business) => {
+      if (requestedBusinessId && business.id === requestedBusinessId) return true;
+      if (requestedBusinessSlug && business.slug === requestedBusinessSlug) return true;
+      return false;
+    });
 
   return matched ? normalizeConfig(matched, fallback) : fallback;
 }
