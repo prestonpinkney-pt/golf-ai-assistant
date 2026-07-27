@@ -418,20 +418,28 @@ export function resolveBusinessMessagingConfig(input?: {
     typeof input?.businessSlug === "string" ? input.businessSlug.trim() : "";
   const requestedToNumber = cleanPhone(input?.toNumber);
 
-  const matched = configured.find((business) => {
-    // Prefer destination-phone match over payload business_id/slug so inbound
-    // SMS cannot be redirected by a mismatched body business_id.
-    if (
-      requestedToNumber &&
-      (business.smsFromNumber === requestedToNumber ||
-        business.inboundNumbers?.includes(requestedToNumber))
-    ) {
-      return true;
-    }
-    if (requestedBusinessId && business.id === requestedBusinessId) return true;
-    if (requestedBusinessSlug && business.slug === requestedBusinessSlug) return true;
-    return false;
-  });
+  // Two-pass match: destination phone is authoritative for inbound tenant
+  // routing. A single find() that also checks business_id would still return
+  // the first id match even when a later entry owns the to_number.
+  const matchedByPhone =
+    requestedToNumber ?
+      configured.find(
+        (business) =>
+          cleanPhone(business.smsFromNumber) === requestedToNumber ||
+          (Array.isArray(business.inboundNumbers) &&
+            business.inboundNumbers.some(
+              (n) => cleanPhone(n) === requestedToNumber
+            ))
+      )
+    : undefined;
+
+  const matched =
+    matchedByPhone ??
+    configured.find((business) => {
+      if (requestedBusinessId && business.id === requestedBusinessId) return true;
+      if (requestedBusinessSlug && business.slug === requestedBusinessSlug) return true;
+      return false;
+    });
 
   return matched ? normalizeConfig(matched, fallback) : fallback;
 }
