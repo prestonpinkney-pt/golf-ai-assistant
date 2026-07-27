@@ -301,7 +301,10 @@ async function lookupBusiness(
   const routedBusinessId = requestedToNumber
     ? await lookupBusinessIdByPhone(supabase, requestedToNumber)
     : null;
-  const requestedBusinessId = cleanString(input.businessId) || routedBusinessId;
+  // Destination phone is authoritative for inbound SMS tenant routing.
+  // Preferring payload business_id would let a forged/stale webhook body
+  // attach conversations to the wrong workspace when to_number is present.
+  const requestedBusinessId = routedBusinessId || cleanString(input.businessId);
   const requestedBusinessSlug = cleanString(input.businessSlug);
 
   if (!requestedBusinessId && !requestedBusinessSlug) {
@@ -416,8 +419,8 @@ export function resolveBusinessMessagingConfig(input?: {
   const requestedToNumber = cleanPhone(input?.toNumber);
 
   const matched = configured.find((business) => {
-    if (requestedBusinessId && business.id === requestedBusinessId) return true;
-    if (requestedBusinessSlug && business.slug === requestedBusinessSlug) return true;
+    // Prefer destination-phone match over payload business_id/slug so inbound
+    // SMS cannot be redirected by a mismatched body business_id.
     if (
       requestedToNumber &&
       (business.smsFromNumber === requestedToNumber ||
@@ -425,6 +428,8 @@ export function resolveBusinessMessagingConfig(input?: {
     ) {
       return true;
     }
+    if (requestedBusinessId && business.id === requestedBusinessId) return true;
+    if (requestedBusinessSlug && business.slug === requestedBusinessSlug) return true;
     return false;
   });
 

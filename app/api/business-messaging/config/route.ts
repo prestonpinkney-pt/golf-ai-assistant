@@ -11,6 +11,7 @@ import {
   parseMessagingProviderId,
 } from "@/lib/messaging/provider-resolve";
 import { resolveBusinessMessagingConfigFromDb } from "@/lib/business-messaging-config";
+import { evaluateMessagingPhoneOwnership } from "@/lib/business-messaging-phone-ownership";
 
 type ConfigPayload = {
   businessId?: unknown;
@@ -341,6 +342,44 @@ export async function PUT(req: Request) {
   }
 
   for (const phoneNumber of phoneNumbers) {
+    const { data: existingNumber, error: existingNumberLookupError } = await supabase
+      .from("business_messaging_numbers")
+      .select("business_id")
+      .eq("phone_number", phoneNumber)
+      .maybeSingle();
+
+    if (existingNumberLookupError) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: existingNumberLookupError.message,
+          phone_number: phoneNumber,
+        },
+        { status: 500 }
+      );
+    }
+
+    const ownership = evaluateMessagingPhoneOwnership({
+      requestingBusinessId: business.id,
+      existingOwnerBusinessId:
+        existingNumber && typeof existingNumber.business_id === "string" ?
+          existingNumber.business_id
+        : null,
+    });
+
+    if (!ownership.ok) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Phone number is already registered to another business and cannot be claimed.",
+          phone_number: phoneNumber,
+          code: ownership.reason,
+        },
+        { status: 409 }
+      );
+    }
+
     const { error: numberError } = await supabase
       .from("business_messaging_numbers")
       .upsert(
