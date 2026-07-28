@@ -196,6 +196,63 @@ describe("inbound-loop integration (mocked Supabase + AI)", () => {
       1
     );
   });
+
+  test("incomplete prior attempt resumes instead of false duplicate", async () => {
+    const supabase = createInboundLoopMockSupabase();
+    const envelope = fixtures.inbound_membership_question_envelope as Record<
+      string,
+      unknown
+    >;
+    const ext = "fixture-incomplete-resume-010";
+
+    const first = await runSentDmInboundConversationLoop({
+      supabase,
+      rawPayload: envelope,
+      externalId: ext,
+      ingestSource: "sentdm_webhook",
+    });
+    assert.equal(first.ok, true);
+
+    // Simulate a crash after inbound insert but before outbound reply:
+    // strip outbound rows and leave only the inbound external_id row.
+    supabase.__tables.messages = supabase.__tables.messages.filter(
+      (m) => m.direction === "inbound" && m.external_id === ext
+    );
+    assert.equal(
+      supabase.__countMessages((m) => m.direction === "inbound" && m.external_id === ext),
+      1
+    );
+    assert.equal(
+      supabase.__countMessages((m) => m.direction === "outbound"),
+      0
+    );
+
+    resetAiCalls();
+    const resumed = await runSentDmInboundConversationLoop({
+      supabase,
+      rawPayload: envelope,
+      externalId: ext,
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.equal(resumed.ok, true);
+    assert.equal(
+      (resumed.body as { duplicate?: boolean }).duplicate,
+      undefined
+    );
+    assert.equal(aiCalls(), 1);
+    assert.equal(
+      supabase.__countMessages((m) => m.direction === "inbound" && m.external_id === ext),
+      1,
+      "must not insert a second inbound row for the same external_id"
+    );
+    assert.ok(
+      supabase.__countMessages(
+        (m) => m.direction === "outbound" && m.ai_generated === true
+      ) >= 1,
+      "resume must create an outbound AI reply"
+    );
+  });
 });
 
 describe("webhook job processor → inbound-loop", () => {
