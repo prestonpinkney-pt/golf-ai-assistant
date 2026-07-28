@@ -137,7 +137,17 @@ export function createInboundLoopMockSupabase() {
           b.filters = [];
           return { data: first, error: null };
         }
-        return { data: null, error: null };
+        let rows = filterRows(b.table, b.filters);
+        if (b.orderField) {
+          rows = [...rows].sort((a, c) => {
+            const av = String(a[b.orderField!] ?? "");
+            const cv = String(c[b.orderField!] ?? "");
+            return b.orderAsc ? av.localeCompare(cv) : cv.localeCompare(av);
+          });
+        }
+        if (b.limitN != null) rows = rows.slice(0, b.limitN);
+        b.filters = [];
+        return { data: rows, error: null };
       },
       single: async () => {
         if (b.pendingInsert || b.pendingUpdate) {

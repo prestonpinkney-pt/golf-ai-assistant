@@ -26,6 +26,7 @@ import {
   resolveBusinessMessagingConfigFromDb,
 } from "@/lib/business-messaging-config";
 import { detectCarrierComplianceKind } from "@/lib/sentdm/carrier-compliance";
+import { outboundLinkedToInboundMessage } from "@/lib/sentdm/inbound-external-id-dedupe";
 import { computeInboundProviderSendDecision } from "@/lib/sentdm/live-agent-outbound";
 import {
   computeCoolingOffUntil,
@@ -645,68 +646,103 @@ export async function runSentDmInboundConversationLoop(params: {
       metadata: {},
     });
 
+    let inboundMessage: DbRow | null = null;
+
     if (externalId) {
-      const { data: dupeMsg } = await supabase
+      const { data: existingInbound } = await supabase
         .from("messages")
-        .select("id")
+        .select("*")
         .eq("conversation_id", conversation!.id as string)
         .eq("external_id", externalId)
         .maybeSingle();
-      if (dupeMsg) {
-        await supabase
-          .from("inbound_events")
-          .update({ status: "processed", error_message: null })
-          .eq("id", inboundEventId);
+
+      if (existingInbound) {
+        const { data: outboundRows } = await supabase
+          .from("messages")
+          .select("id, metadata")
+          .eq("conversation_id", conversation!.id as string)
+          .eq("direction", "outbound");
+
+        const outboundList = Array.isArray(outboundRows) ?
+          outboundRows
+        : outboundRows ?
+          [outboundRows]
+        : [];
+
+        if (
+          outboundLinkedToInboundMessage({
+            inboundMessageId: String(existingInbound.id),
+            outboundMessages: outboundList as Array<{ metadata?: unknown }>,
+          })
+        ) {
+          await supabase
+            .from("inbound_events")
+            .update({ status: "processed", error_message: null })
+            .eq("id", inboundEventId);
+          await audit(supabase, {
+            event_type: "sentdm_loop_inbound_duplicate",
+            entity_type: "message",
+            entity_id: String(existingInbound.id),
+            metadata: { external_id: externalId },
+          });
+          return {
+            ok: true,
+            statusCode: 200,
+            body: { duplicate: true, dedup_external_id: externalId },
+          };
+        }
+
+        // Prior attempt persisted the inbound row then failed before an outbound
+        // reply — resume instead of acknowledging a false duplicate.
+        inboundMessage = existingInbound as DbRow;
         await audit(supabase, {
-          event_type: "sentdm_loop_inbound_duplicate",
+          event_type: "sentdm_loop_inbound_resume_incomplete",
           entity_type: "message",
-          entity_id: String(dupeMsg.id),
+          entity_id: String(existingInbound.id),
           metadata: { external_id: externalId },
         });
-        return {
-          ok: true,
-          statusCode: 200,
-          body: { duplicate: true, dedup_external_id: externalId },
-        };
       }
     }
 
-    const { data: inboundMessage, error: msgErr } = await supabase
-      .from("messages")
-      .insert({
-        conversation_id: conversation!.id as string,
-        contact_id: contact!.id as string,
-        lead_id: lead!.id as string,
-        contact_phone: phone,
-        direction: "inbound",
-        channel: inboundChannel,
-        message_text: messageText,
-        body: messageText,
-        sender_type: "customer",
-        status: "received",
-        provider: "sentdm",
-        external_id: externalId,
-        provider_message_id: externalId,
-        delivery_status: "received",
-        metadata: {
-          inbound_event_id: inboundEventId,
-          business_id: businessConfig.id,
-          business_slug: businessConfig.slug,
-        },
-      })
-      .select()
-      .single();
+    if (!inboundMessage) {
+      const { data: insertedInbound, error: msgErr } = await supabase
+        .from("messages")
+        .insert({
+          conversation_id: conversation!.id as string,
+          contact_id: contact!.id as string,
+          lead_id: lead!.id as string,
+          contact_phone: phone,
+          direction: "inbound",
+          channel: inboundChannel,
+          message_text: messageText,
+          body: messageText,
+          sender_type: "customer",
+          status: "received",
+          provider: "sentdm",
+          external_id: externalId,
+          provider_message_id: externalId,
+          delivery_status: "received",
+          metadata: {
+            inbound_event_id: inboundEventId,
+            business_id: businessConfig.id,
+            business_slug: businessConfig.slug,
+          },
+        })
+        .select()
+        .single();
 
-    if (msgErr || !inboundMessage) {
-      await failInbound(
-        msgErr?.message ?? "inbound_message_insert_failed",
-        "message_create"
-      );
-      return {
-        ok: false,
-        statusCode: 500,
-        body: { step: "inbound_message", error: msgErr?.message },
-      };
+      if (msgErr || !insertedInbound) {
+        await failInbound(
+          msgErr?.message ?? "inbound_message_insert_failed",
+          "message_create"
+        );
+        return {
+          ok: false,
+          statusCode: 500,
+          body: { step: "inbound_message", error: msgErr?.message },
+        };
+      }
+      inboundMessage = insertedInbound as DbRow;
     }
 
     const nowIso = new Date().toISOString();

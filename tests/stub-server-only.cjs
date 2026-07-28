@@ -35,6 +35,11 @@ Module._resolveFilename = function patchedResolveFilename(
   isMain,
   options
 ) {
+  if (request === "server-only") {
+    // Experimental test-module mocks resolve via _resolveFilename before _load;
+    // point at this stub file so require("server-only") does not MODULE_NOT_FOUND.
+    return __filename;
+  }
   const aliased = resolveAliasPath(request);
   if (aliased) {
     return origResolveFilename.call(this, aliased, parent, isMain, options);
