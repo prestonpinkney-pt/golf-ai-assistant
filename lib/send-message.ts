@@ -1,4 +1,7 @@
-import { resolveSentDmApiKey } from "@/lib/sentdm/send-message";
+import {
+  parseSentDmV3SendResponse,
+  resolveSentDmApiKey,
+} from "@/lib/sentdm/send-message";
 
 type SendMessageResult = {
   success: boolean;
@@ -85,19 +88,16 @@ export async function sendMessage(input: {
     );
   }
 
+  const parsed = parseSentDmV3SendResponse(data);
+  if (parsed.success === false) {
+    throw new Error(`Sent.dm send rejected: ${JSON.stringify(data)}`);
+  }
+
   return {
     success: true,
     provider: "sentdm",
-    external_id:
-      typeof data?.id === "string"
-        ? data.id
-        : typeof data?.messageId === "string"
-        ? data.messageId
-        : null,
-    status:
-      typeof data?.status === "string"
-        ? data.status
-        : "queued",
+    external_id: parsed.external_id,
+    status: parsed.status,
     raw: data,
   };
 }
