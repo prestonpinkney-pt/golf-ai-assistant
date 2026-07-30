@@ -2307,6 +2307,90 @@ export async function runCloseOsSmsBookingAugmentation(params: {
         }
       }
 
+      /**
+       * Soft CloseOS payment holds never reserve capacity in Whoosh. Members and
+       * payment-hold-disabled paths skip the Square hold branch above and would
+       * otherwise POST Whoosh against a bay still claimed by an active hold —
+       * overselling when the held guest later pays.
+       */
+      if (pick.serviceType === "simulator") {
+        const directPathCorrelation = pickSlotCorrelationIds(pick);
+        try {
+          if (
+            await hasActiveSimulatorHoldConflict(params.supabase, {
+              businessId: params.businessId,
+              bayResourceId: directPathCorrelation.bayResourceId,
+              slotStartIso: pick.startTime,
+              slotEndIso: selectedEndTime,
+            })
+          ) {
+            await emitSmsBookingAudit(
+              params.supabase,
+              params.conversationId,
+              params.businessId,
+              "sms_booking_hold_failed",
+              {
+                reason: "hold_collision_active_direct_whoosh",
+                bay: directPathCorrelation.bayResourceId,
+                member_path: memberResolved.memberNumberPresent,
+              },
+            );
+            return {
+              kind: "direct_outbound",
+              bypassRiskyResponseGuard: false,
+              bookingConfirmedByWhoosh: false,
+              replyText: BOOKING_CONFIRMATION_HANDOFF_REPLY,
+              debug: {
+                intent: "booking_create",
+                whooshAvailabilityAttempted: true,
+                whooshBookingAttempted: false,
+                whooshBookingConfirmed: false,
+                durationDefaulted: durationDefaultedDebug,
+                requiredDetailsMissing: [],
+                selectedSlotSource: "whoosh",
+                reason: "simulator_hold_blocked_direct_whoosh_overlap",
+                ...smsOfferDebugNoFreshLookup,
+              },
+            };
+          }
+        } catch (directHoldCheckErr: unknown) {
+          console.error(
+            "[sms-booking-flow] direct-path hold conflict check failed:",
+            directHoldCheckErr,
+          );
+          await emitSmsBookingAudit(
+            params.supabase,
+            params.conversationId,
+            params.businessId,
+            "sms_booking_hold_failed",
+            {
+              reason: "hold_conflict_check_failed_direct_whoosh",
+              error_preview:
+                directHoldCheckErr instanceof Error ?
+                  directHoldCheckErr.message.slice(0, 220)
+                : "unknown_error",
+            },
+          );
+          return {
+            kind: "direct_outbound",
+            bypassRiskyResponseGuard: false,
+            bookingConfirmedByWhoosh: false,
+            replyText: BOOKING_CONFIRMATION_HANDOFF_REPLY,
+            debug: {
+              intent: "booking_create",
+              whooshAvailabilityAttempted: true,
+              whooshBookingAttempted: false,
+              whooshBookingConfirmed: false,
+              durationDefaulted: durationDefaultedDebug,
+              requiredDetailsMissing: [],
+              selectedSlotSource: "whoosh",
+              reason: "simulator_hold_conflict_check_failed_direct_whoosh",
+              ...smsOfferDebugNoFreshLookup,
+            },
+          };
+        }
+      }
+
       const integrationWirePreview = buildWhooshIntegrationBookingWire(
         bookingCreateParams,
         memberResolved,
