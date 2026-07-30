@@ -1753,6 +1753,68 @@ describe("sms-booking-flow", () => {
       assert.strictEqual(held.length, 1);
     });
 
+    test("member direct Whoosh path refuses slot overlapping an active soft hold", async () => {
+      const conv = "00000000-0000-4000-a100-000000000306";
+      const sb = new FakeBookingSupabase();
+
+      const slot = sampleBaySlots1100Thru1130Jun17()[0]!;
+      sb.closeos_bookings_rows.push({
+        id: "00000000-0000-0000-0001-100000002206",
+        business_id: "00000000-0000-0000-0000-000000000099",
+        bay_id: slot.bayOrResourceId.trim(),
+        status: "held_pending_payment",
+        expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        start_time: slot.startTime,
+        end_time: slot.endTime,
+        conversation_id: null,
+      });
+
+      const slots = sampleBaySlots1100Thru1130Jun17();
+      whooshAvailabilityClient.getAvailability = async () => ({
+        ok: true,
+        slots,
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-17",
+        slotRowsLoaded: slots.length,
+        bookingRowsLoaded: 0,
+      });
+
+      let whooshBookingCalls = 0;
+      whooshBookingClient.createBooking = async () => {
+        whooshBookingCalls += 1;
+        throw new Error("should_not_post_whoosh_over_soft_hold");
+      };
+
+      const bookingSeed =
+        "Book simulator 2035-06-17 Sunday morning solo myself hourly simulator booking reservation";
+
+      await runAugment({
+        inboundText: bookingSeed,
+        playbook: "simulator",
+        conversationId: conv,
+        sb,
+        contactMemberNumber: "member-live-fixture-99",
+      });
+
+      const sel = await runAugment({
+        inboundText: "1",
+        playbook: "simulator",
+        conversationId: conv,
+        sb,
+        conversationHistory: inboundOnlyHistory([bookingSeed]),
+        contactMemberNumber: "member-live-fixture-99",
+      });
+
+      const out = expectDirectOutbound(sel.flow);
+      assert.strictEqual(out.replyText, BOOKING_CONFIRMATION_HANDOFF_REPLY);
+      assert.strictEqual(out.debug.reason, "simulator_hold_blocked_direct_whoosh_overlap");
+      assert.strictEqual(whooshBookingCalls, 0);
+      assert.strictEqual(
+        sb.closeos_bookings_rows.filter((r) => String(r.status) === "held_pending_payment").length,
+        1,
+      );
+    });
+
     test("Square checkout creation failure swaps to booked handoff and marks square_link_failed", async () => {
       squarePaymentHoldCheckoutClient.createBookingHoldCheckoutLink = async () => {
         throw new Error("square_checkout_test_failure_preview");
