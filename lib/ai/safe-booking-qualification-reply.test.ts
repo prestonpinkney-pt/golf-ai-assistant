@@ -197,3 +197,41 @@ describe("safe booking qualification vs carrier gates", () => {
     assert.equal(auto.reason, "auto_send_disabled");
   });
 });
+
+describe("Whoosh confirmation vs risky_response_claim", () => {
+  const whooshConfirmedDecision: AiResponseDecision = {
+    intent: "booking_flow_direct",
+    confidence: 0.93,
+    risk_level: "low",
+    can_auto_send: true,
+    escalation_required: false,
+    escalation_reason: null,
+    reply_text:
+      "Confirmed for Mon Jun 4 6:30 PM (Primetime Golf — Downtown Oakland). Ref C-900",
+  };
+
+  test("Whoosh Confirmed-for copy is blocked without bypassRiskyResponseTerms", () => {
+    const auto = getAutoSendDecision({
+      inboundText: "1",
+      decision: whooshConfirmedDecision,
+      channel: "sms",
+      phone: E164,
+      policy: { ...AI_AUTO_SEND_POLICY, enabled: true, minConfidence: 0.5 },
+    });
+    assert.equal(auto.shouldAutoSend, false);
+    assert.equal(auto.reason, "risky_response_claim");
+  });
+
+  test("Whoosh Confirmed-for copy auto-sends when bypassRiskyResponseTerms is set", () => {
+    const auto = getAutoSendDecision({
+      inboundText: "1",
+      decision: whooshConfirmedDecision,
+      channel: "sms",
+      phone: E164,
+      bypassRiskyResponseTerms: true,
+      policy: { ...AI_AUTO_SEND_POLICY, enabled: true, minConfidence: 0.5 },
+    });
+    assert.equal(auto.shouldAutoSend, true);
+    assert.equal(auto.reason, "low_risk_sms_reply");
+  });
+});

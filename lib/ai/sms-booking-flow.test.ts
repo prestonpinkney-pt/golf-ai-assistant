@@ -669,6 +669,11 @@ describe("sms-booking-flow", () => {
 
     const booked = expectDirectOutbound(sel.flow);
     assert.strictEqual(booked.bookingConfirmedByWhoosh, true);
+    assert.strictEqual(
+      booked.bypassRiskyResponseGuard,
+      true,
+      "Whoosh-confirmed SMS must bypass risky_response_claim or auto-send never delivers confirmation"
+    );
     assert.match(booked.replyText, /Confirmed for/i);
   });
 
