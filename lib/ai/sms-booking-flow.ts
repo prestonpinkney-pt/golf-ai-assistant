@@ -2473,7 +2473,9 @@ export async function runCloseOsSmsBookingAugmentation(params: {
 
       return {
         kind: "direct_outbound",
-        bypassRiskyResponseGuard: false,
+        // Whoosh-confirmed copy intentionally starts with "Confirmed for…"; that substring is in
+        // DEFAULT_RISKY_RESPONSE_TERMS, so auto-send must bypass the claim guard for this vetted path.
+        bypassRiskyResponseGuard: bookingConfirmedByWhoosh,
         bookingConfirmedByWhoosh,
         replyText,
         debug: {
