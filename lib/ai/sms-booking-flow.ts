@@ -1753,10 +1753,22 @@ export async function runCloseOsSmsBookingAugmentation(params: {
     freshLookupReason: freshLookupExplanation,
   };
 
-  if (!storedAvailabilityEval.ok && latestInboundHasNumericOfferPick) {
-    const alreadyUsedOffer =
-      storedAvailabilityEval.reason === "stored_offer_already_fulfilled" ||
-      storedAvailabilityEval.reason === "stored_offer_already_consumed";
+  const alreadyUsedOffer =
+    !storedAvailabilityEval.ok &&
+    (storedAvailabilityEval.reason === "stored_offer_already_fulfilled" ||
+      storedAvailabilityEval.reason === "stored_offer_already_consumed");
+
+  const reusedOfferPickAttempt =
+    alreadyUsedOffer &&
+    !latestInboundIsNewBookingRequest &&
+    (latestInboundHasNumericOfferPick ||
+      inboundMentionsLikelyOfferedClock(trimmedInbound) ||
+      customerAffirmsWithoutSlotDigitChoice(trimmedInbound));
+
+  if (
+    (!storedAvailabilityEval.ok && latestInboundHasNumericOfferPick) ||
+    reusedOfferPickAttempt
+  ) {
     return {
       kind: "direct_outbound",
       bypassRiskyResponseGuard: false,

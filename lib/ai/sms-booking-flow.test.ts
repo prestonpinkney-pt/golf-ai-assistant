@@ -1115,15 +1115,22 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(picks.length, 1);
     assert.strictEqual(picks[0]?.bayOrResourceId.trim(), "whoosh-slot-1130");
 
-    await runAugment({
+    const second = await runAugment({
       inboundText: "I want to book 11:15 am thanks",
       playbook: "simulator",
       conversationId: conv,
       sb,
       conversationHistory: inboundOnlyHistory([seed, "11:30 is good"]),
     });
-    assert.strictEqual(picks.length, 2);
-    assert.strictEqual(picks[1]?.bayOrResourceId.trim(), "whoosh-slot-1115");
+    assert.strictEqual(
+      picks.length,
+      1,
+      "after a successful book, a second clock pick from the same offer must not Whoosh-create again"
+    );
+    const secondOut = expectDirectOutbound(second.flow);
+    assert.strictEqual(secondOut.bookingConfirmedByWhoosh, false);
+    assert.match(secondOut.replyText, /already set/i);
+    assert.strictEqual(secondOut.debug.reason, "numeric_slot_pick_after_offer_fulfilled");
   });
 
   test("fresh booking wording ignores recent stored offers and runs a new availability lookup", async () => {
