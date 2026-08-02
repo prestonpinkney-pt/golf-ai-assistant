@@ -28,7 +28,9 @@ import { estimateSimulatorBookingUsdCents } from "@/lib/primetime/simulator-quot
 import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
+  evaluateStoredAvailabilityOfferForSms,
   extractSimulatorDurationMinutes,
+  isStoredAvailabilityOfferConsumed,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
   squarePaymentHoldCheckoutClient,
@@ -251,9 +253,22 @@ class FakeBookingSupabase {
         }
         const created_at =
           typeof row.created_at === "string" ? row.created_at : new Date().toISOString();
-        store.rows.push({ ...row, created_at });
+        const id =
+          typeof row.id === "string" && row.id.trim() ? row.id : randomUUID();
+        store.rows.push({ ...row, id, created_at });
         return { error: null };
       },
+      update: (patch: Record<string, unknown>) => ({
+        eq: async (field: string, val: unknown) => {
+          const idx = store.rows.findIndex((r) => r[field] === val);
+          if (idx >= 0) {
+            Object.assign(store.rows[idx], patch, {
+              updated_at: new Date().toISOString(),
+            });
+          }
+          return { error: null };
+        },
+      }),
       select(_cols: string) {
         const filters: Record<string, unknown> = {};
         const chain = {
@@ -931,6 +946,129 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(wire.transportation, "cart");
     const booked = expectDirectOutbound(sel.flow);
     assert.strictEqual(booked.bookingConfirmedByWhoosh, true);
+
+    const offerRow = sb.rows.find(
+      (r) =>
+        String(r.action_type) === "availability_lookup" &&
+        String(r.status) === "completed" &&
+        r.raw_payload &&
+        typeof r.raw_payload === "object"
+    );
+    assert.ok(offerRow, "expected availability offer row");
+    assert.ok(
+      isStoredAvailabilityOfferConsumed(offerRow!.raw_payload as Record<string, unknown>),
+      "successful Whoosh book should consume the stored offer"
+    );
+  });
+
+  test("repeat slot pick within offer window does not call createBooking again", async () => {
+    process.env.WHOOSH_BOOKING_API_ENABLED = "true";
+    process.env.WHOOSH_BOOKING_POST_PATH = "/fake-booking-path";
+
+    const conv = "00000000-0000-4000-a000-00000000e1d1";
+    const sb = new FakeBookingSupabase();
+    const biz = "00000000-0000-0000-0000-000000000099";
+    const cid = "00000000-0000-4000-a000-000000000002";
+    const seed =
+      "I want to book simulator bay 2035-06-17 morning for two players hourly reservation booking";
+
+    sb.rows.push({
+      id: "offer-row-double-book-guard",
+      business_id: biz,
+      conversation_id: conv,
+      contact_id: cid,
+      provider: "whoosh",
+      action_type: "availability_lookup",
+      status: "completed",
+      service_type: "simulator",
+      requested_date: "2035-06-17",
+      party_size: 2,
+      duration_minutes: 60,
+      raw_payload: {
+        agenda_date: "2035-06-17",
+        offered_slots: wireStoredOffersFromBaySlots(sampleBaySlots1100Thru1130Jun17()),
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    let createCalls = 0;
+    whooshBookingClient.createBooking = async () => {
+      createCalls += 1;
+      return whooshBookingOk({
+        bookingId: `bk-double-${createCalls}`,
+        confirmationNumber: `C-${createCalls}`,
+        startTime: "2035-06-17T18:00:00.000Z",
+        endTime: "2035-06-17T19:00:00.000Z",
+        raw: {},
+      });
+    };
+
+    const first = await runAugment({
+      inboundText: "1",
+      playbook: "simulator",
+      conversationId: conv,
+      contactId: cid,
+      sb,
+      conversationHistory: inboundOnlyHistory([seed]),
+    });
+    const firstOut = expectDirectOutbound(first.flow);
+    assert.strictEqual(firstOut.bookingConfirmedByWhoosh, true);
+    assert.strictEqual(createCalls, 1);
+
+    const second = await runAugment({
+      inboundText: "1",
+      playbook: "simulator",
+      conversationId: conv,
+      contactId: cid,
+      sb,
+      conversationHistory: inboundOnlyHistory([seed, "1"]),
+    });
+    const secondOut = expectDirectOutbound(second.flow);
+    assert.strictEqual(createCalls, 1, "second pick must not POST another Whoosh booking");
+    assert.strictEqual(secondOut.bookingConfirmedByWhoosh, false);
+    assert.match(secondOut.replyText, /already set/i);
+    assert.strictEqual(secondOut.debug.reason, "numeric_slot_pick_after_offer_fulfilled");
+    assert.ok(
+      secondOut.debug.storedOfferRejectedReason === "stored_offer_already_fulfilled" ||
+        secondOut.debug.storedOfferRejectedReason === "stored_offer_already_consumed"
+    );
+  });
+
+  test("evaluateStoredAvailabilityOfferForSms rejects consumed payloads", () => {
+    const slots = sampleBaySlots1100Thru1130Jun17();
+    const base = {
+      id: "offer-1",
+      created_at: new Date().toISOString(),
+      business_id: "00000000-0000-0000-0000-000000000099",
+      conversation_id: "00000000-0000-4000-a000-00000000e1d2",
+      contact_id: "00000000-0000-4000-a000-000000000002",
+      requested_date: "2035-06-17",
+      service_type: "simulator",
+      party_size: 2,
+      duration_minutes: 60,
+      raw_payload: {
+        agenda_date: "2035-06-17",
+        offered_slots: wireStoredOffersFromBaySlots(slots),
+        offer_consumed_at: new Date().toISOString(),
+      },
+    };
+
+    const rejected = evaluateStoredAvailabilityOfferForSms({
+      row: base,
+      conversationContactId: base.contact_id,
+      conversationId: base.conversation_id,
+      businessId: base.business_id,
+      nowMs: Date.now(),
+      currentFactsIsoDate: "2035-06-17",
+      currentServiceType: "simulator",
+      browseDurationMinutes: 60,
+      currentPartyFromFactsOrNull: 2,
+      partyExplicitInLatestTranscript: true,
+      durationExplicitInLatestTranscript: true,
+      supersedeOffersForFreshBookingPhrase: false,
+    });
+    assert.strictEqual(rejected.ok, false);
+    if (!rejected.ok) assert.strictEqual(rejected.reason, "stored_offer_already_consumed");
   });
 
   test("offer follow-up resolves 11:30 phrasing against stored slots", async () => {
