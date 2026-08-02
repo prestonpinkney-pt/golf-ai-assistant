@@ -802,6 +802,7 @@ function deserializeOfferedSlotsFromPayload(payload: Record<string, unknown>): N
 
 /** Persisted SMS offer snapshot (`booking_actions` availability_lookup completed row). */
 export type CompletedAvailabilityOfferRow = {
+  id: string | null;
   created_at: string | null;
   business_id: string | null;
   conversation_id: string | null;
@@ -815,6 +816,15 @@ export type CompletedAvailabilityOfferRow = {
 
 const STORED_OFFER_MAX_AGE_MS = 10 * 60 * 1000;
 
+/** True when an availability offer was already used for a hold/book. */
+export function isStoredAvailabilityOfferConsumed(
+  payload: Record<string, unknown> | null | undefined
+): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const consumedAt = payload.offer_consumed_at;
+  return typeof consumedAt === "string" && consumedAt.trim().length > 0;
+}
+
 function coerceYmdComparable(value: unknown): string | null {
   if (value === null || value === undefined) return null;
   if (typeof value === "string") {
@@ -824,6 +834,10 @@ function coerceYmdComparable(value: unknown): string | null {
   const n = typeof value === "number" ? value : Number.NaN;
   if (Number.isFinite(n) && n > 40000) return DateTime.fromMillis(n).toUTC().toFormat("yyyy-MM-dd");
   return null;
+}
+
+function serviceTypeKey(serviceType: WhooshServiceType): "lesson" | "event" | "simulator" {
+  return serviceType === "lesson" ? "lesson" : serviceType === "event" ? "event" : "simulator";
 }
 
 async function fetchLatestCompletedAvailabilityOfferRow(
@@ -839,7 +853,7 @@ async function fetchLatestCompletedAvailabilityOfferRow(
   let query = supabase
     .from("booking_actions")
     .select(
-      "created_at, business_id, conversation_id, contact_id, requested_date, service_type, party_size, duration_minutes, raw_payload"
+      "id, created_at, business_id, conversation_id, contact_id, requested_date, service_type, party_size, duration_minutes, raw_payload"
     )
     .eq("business_id", params.businessId)
     .eq("action_type", "availability_lookup")
@@ -847,10 +861,7 @@ async function fetchLatestCompletedAvailabilityOfferRow(
 
   if (params.conversationId) query = query.eq("conversation_id", params.conversationId);
   if (params.contactId) query = query.eq("contact_id", params.contactId);
-  query = query.eq(
-    "service_type",
-    params.serviceType === "lesson" ? "lesson" : params.serviceType === "event" ? "event" : "simulator"
-  );
+  query = query.eq("service_type", serviceTypeKey(params.serviceType));
   if (params.requestedDateIso) query = query.eq("requested_date", params.requestedDateIso);
 
   const { data, error } = await query.order("created_at", { ascending: false }).limit(1).maybeSingle();
@@ -867,6 +878,7 @@ async function fetchLatestCompletedAvailabilityOfferRow(
     raw !== null && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
 
   return {
+    id: typeof d.id === "string" && d.id.trim() ? d.id : d.id != null ? String(d.id) : null,
     created_at: typeof d.created_at === "string" ? d.created_at : null,
     business_id:
       typeof d.business_id === "string" ?
@@ -901,6 +913,83 @@ async function fetchLatestCompletedAvailabilityOfferRow(
       : null,
     raw_payload: payload,
   };
+}
+
+/**
+ * True when this conversation already completed a booking/hold for the same service
+ * within the stored-offer window — blocks replaying the same enumerated pick.
+ */
+async function hasRecentCompletedBookingCreateForOffer(
+  supabase: SupabaseClient,
+  params: {
+    businessId: string;
+    conversationId: string | null;
+    contactId: string | null;
+    serviceType: WhooshServiceType;
+    nowMs: number;
+    offerCreatedAtMs: number | null;
+  }
+): Promise<boolean> {
+  if (!params.conversationId) return false;
+
+  let query = supabase
+    .from("booking_actions")
+    .select("created_at, selected_start_time")
+    .eq("business_id", params.businessId)
+    .eq("conversation_id", params.conversationId)
+    .eq("action_type", "booking_create")
+    .eq("status", "completed")
+    .eq("service_type", serviceTypeKey(params.serviceType));
+
+  if (params.contactId) query = query.eq("contact_id", params.contactId);
+
+  const { data, error } = await query.order("created_at", { ascending: false }).limit(1).maybeSingle();
+  if (error?.message) {
+    console.error("[sms-booking-flow] booking_create fulfillment SELECT failed:", error.message);
+    return false;
+  }
+  if (!data || typeof data !== "object") return false;
+
+  const createdAt = typeof (data as { created_at?: unknown }).created_at === "string"
+    ? (data as { created_at: string }).created_at
+    : null;
+  const createdMs = createdAt ? Date.parse(createdAt) : Number.NaN;
+  if (!Number.isFinite(createdMs)) return false;
+  if (params.nowMs - createdMs > STORED_OFFER_MAX_AGE_MS) return false;
+  if (
+    params.offerCreatedAtMs !== null &&
+    Number.isFinite(params.offerCreatedAtMs) &&
+    createdMs + 1 < params.offerCreatedAtMs
+  ) {
+    /* Booking completed before this offer was minted — allow a fresh pick. */
+    return false;
+  }
+  return true;
+}
+
+async function markStoredAvailabilityOfferConsumed(
+  supabase: SupabaseClient,
+  offer: CompletedAvailabilityOfferRow | null
+): Promise<void> {
+  if (!offer?.id) return;
+  if (isStoredAvailabilityOfferConsumed(offer.raw_payload)) return;
+
+  const nextPayload: Record<string, unknown> = {
+    ...offer.raw_payload,
+    offer_consumed_at: new Date().toISOString(),
+  };
+
+  const { error } = await supabase
+    .from("booking_actions")
+    .update({
+      raw_payload: nextPayload,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", offer.id);
+
+  if (error?.message) {
+    console.error("[sms-booking-flow] failed to mark stored offer consumed:", error.message);
+  }
 }
 
 /** True when inbound clearly starts a fresh booking inquiry (suppresses stale enumerated offers). */
@@ -972,6 +1061,8 @@ export function evaluateStoredAvailabilityOfferForSms(params: {
   /** Only compare browse duration once simulator/Lesson minutes are explicit from transcript vs defaults. */
   durationExplicitInLatestTranscript: boolean;
   supersedeOffersForFreshBookingPhrase: boolean;
+  /** Prior completed booking_create/hold for this conversation within the offer window. */
+  offerAlreadyFulfilled?: boolean;
 }): StoredOfferEvaluateResult {
   const {
     row,
@@ -985,6 +1076,7 @@ export function evaluateStoredAvailabilityOfferForSms(params: {
     partyExplicitInLatestTranscript,
     durationExplicitInLatestTranscript,
     supersedeOffersForFreshBookingPhrase,
+    offerAlreadyFulfilled = false,
   } = params;
 
   const rowDate = coerceYmdComparable(row?.requested_date);
@@ -1004,6 +1096,12 @@ export function evaluateStoredAvailabilityOfferForSms(params: {
   if (!row || !row.raw_payload) return { ok: false, reason: "no_stored_offer_row", diagnostics };
 
   if (supersedeOffersForFreshBookingPhrase) return { ok: false, reason: "superseded_by_new_booking_request", diagnostics };
+
+  if (offerAlreadyFulfilled) return { ok: false, reason: "stored_offer_already_fulfilled", diagnostics };
+
+  if (isStoredAvailabilityOfferConsumed(row.raw_payload)) {
+    return { ok: false, reason: "stored_offer_already_consumed", diagnostics };
+  }
 
   const cid = conversationContactId ?? null;
   const rid = row.contact_id ?? null;
@@ -1573,6 +1671,7 @@ export async function runCloseOsSmsBookingAugmentation(params: {
 
   const latestInboundIsNewBookingRequest = latestInboundLooksLikeFreshBookingRequest(trimmedInbound);
 
+  const offerEvalNowMs = Date.now();
   const completedOfferRow = await fetchLatestCompletedAvailabilityOfferRow(
     params.supabase,
     {
@@ -1584,12 +1683,26 @@ export async function runCloseOsSmsBookingAugmentation(params: {
     }
   );
 
+  const offerCreatedAtMs = completedOfferRow?.created_at
+    ? Date.parse(completedOfferRow.created_at)
+    : Number.NaN;
+  const offerAlreadyFulfilled = completedOfferRow
+    ? await hasRecentCompletedBookingCreateForOffer(params.supabase, {
+        businessId: params.businessId,
+        conversationId: params.conversationId,
+        contactId: params.contactId,
+        serviceType: facts.serviceType,
+        nowMs: offerEvalNowMs,
+        offerCreatedAtMs: Number.isFinite(offerCreatedAtMs) ? offerCreatedAtMs : null,
+      })
+    : false;
+
   const storedAvailabilityEval = evaluateStoredAvailabilityOfferForSms({
     row: completedOfferRow,
     conversationContactId: params.contactId,
     conversationId: params.conversationId,
     businessId: params.businessId,
-    nowMs: Date.now(),
+    nowMs: offerEvalNowMs,
     currentFactsIsoDate: facts.isoDate,
     currentServiceType: facts.serviceType,
     browseDurationMinutes: browseDurationMinutesForStoredOfferEval,
@@ -1600,6 +1713,7 @@ export async function runCloseOsSmsBookingAugmentation(params: {
         facts.lessonDurationMinutes !== null
       : facts.simulatorDurationMinutes !== null,
     supersedeOffersForFreshBookingPhrase: latestInboundIsNewBookingRequest,
+    offerAlreadyFulfilled,
   });
 
   const offersAwaitingStored = storedAvailabilityEval.ok ? storedAvailabilityEval.slots : null;
@@ -1639,13 +1753,29 @@ export async function runCloseOsSmsBookingAugmentation(params: {
     freshLookupReason: freshLookupExplanation,
   };
 
-  if (!storedAvailabilityEval.ok && latestInboundHasNumericOfferPick) {
+  const alreadyUsedOffer =
+    !storedAvailabilityEval.ok &&
+    (storedAvailabilityEval.reason === "stored_offer_already_fulfilled" ||
+      storedAvailabilityEval.reason === "stored_offer_already_consumed");
+
+  const reusedOfferPickAttempt =
+    alreadyUsedOffer &&
+    !latestInboundIsNewBookingRequest &&
+    (latestInboundHasNumericOfferPick ||
+      inboundMentionsLikelyOfferedClock(trimmedInbound) ||
+      customerAffirmsWithoutSlotDigitChoice(trimmedInbound));
+
+  if (
+    (!storedAvailabilityEval.ok && latestInboundHasNumericOfferPick) ||
+    reusedOfferPickAttempt
+  ) {
     return {
       kind: "direct_outbound",
       bypassRiskyResponseGuard: false,
       bookingConfirmedByWhoosh: false,
-      replyText:
-        "I don't want to guess on an old set of times. What day and time should I check for you?",
+      replyText: alreadyUsedOffer
+        ? "You're already set from the times I sent. Text me if you need a different day or time."
+        : "I don't want to guess on an old set of times. What day and time should I check for you?",
       debug: {
         intent: "missing_details",
         whooshAvailabilityAttempted: false,
@@ -1654,7 +1784,9 @@ export async function runCloseOsSmsBookingAugmentation(params: {
         durationDefaulted: false,
         requiredDetailsMissing: ["date", "time_range"],
         selectedSlotSource: "none",
-        reason: "numeric_slot_pick_without_valid_stored_offer",
+        reason: alreadyUsedOffer
+          ? "numeric_slot_pick_after_offer_fulfilled"
+          : "numeric_slot_pick_without_valid_stored_offer",
         ...smsOfferDebugNoFreshLookup,
       },
     };
@@ -2240,6 +2372,8 @@ export async function runCloseOsSmsBookingAugmentation(params: {
             },
           });
 
+          await markStoredAvailabilityOfferConsumed(params.supabase, completedOfferRow);
+
           await emitSmsBookingAudit(
             params.supabase,
             params.conversationId,
@@ -2446,6 +2580,9 @@ export async function runCloseOsSmsBookingAugmentation(params: {
           persistCompleteInsert.errorMessage
         );
       }
+
+      /* Consume even if the booking_create row insert failed — Whoosh already booked. */
+      await markStoredAvailabilityOfferConsumed(params.supabase, completedOfferRow);
 
       await emitSmsBookingAudit(
         params.supabase,
