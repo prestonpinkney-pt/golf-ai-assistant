@@ -27,7 +27,9 @@ import { estimateSimulatorBookingUsdCents } from "@/lib/primetime/simulator-quot
 
 import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
+  collectBookingFacts,
   customerAffirmsWithoutSlotDigitChoice,
+  extractPartySize,
   extractSimulatorDurationMinutes,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
@@ -146,6 +148,43 @@ function wireStoredOffersFromBaySlots(
     raw: slot.raw ?? {},
   }));
 }
+
+describe("extractPartySize last-mention wins", () => {
+  test("later numeric party overrides earlier solo", () => {
+    assert.equal(
+      extractPartySize(
+        "I'd like a solo bay tomorrow afternoon. Actually make it 4 players please."
+      ),
+      4
+    );
+  });
+
+  test("later solo overrides earlier larger party", () => {
+    assert.equal(
+      extractPartySize("Book for 4 players. Changed my mind — just me."),
+      1
+    );
+  });
+
+  test("word party after solo upgrades party size", () => {
+    assert.equal(
+      extractPartySize("solo practice session then party of four"),
+      4
+    );
+  });
+
+  test("collectBookingFacts keeps last party across merged transcript", () => {
+    const anchor = DateTime.fromISO("2035-06-03T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    const facts = collectBookingFacts(
+      "simulator",
+      "Customer: solo tomorrow morning\nCustomer: actually 3 players for 1 hour",
+      anchor
+    );
+    assert.equal(facts.partySize, 3);
+  });
+});
 
 class FakeBookingSupabase {
   rows: Record<string, unknown>[] = [];
