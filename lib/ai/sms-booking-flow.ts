@@ -251,36 +251,55 @@ const DURATION_WORD_TO_HOURS: Record<string, number> = {
   six: 6,
 };
 
+/**
+ * Prefer the latest explicit party-size mention in the text.
+ * Earlier "solo"/"just me" must not stick after a later "4 players" upgrade.
+ */
 export function extractPartySize(fullText: string): number | null {
+  type Hit = { index: number; size: number };
+  const hits: Hit[] = [];
   const lower = fullText.toLowerCase();
-  if (/\bjust me\b|\bsolo\b|\bmyself\b|\bone player\b|\b1 player\b/.test(lower)) return 1;
-  if (/\bsolo\b\s*(practice)?\s*session\b/.test(lower)) return 1;
 
-  const wordParty =
-    /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:players?|people|person|ppl)\b/i.exec(
-      lower
-    );
-  if (wordParty?.[1]) {
-    const n = PARTY_WORD_TO_N[wordParty[1]];
-    if (n) return Math.min(Math.max(n, 1), 32);
+  const pushClamped = (index: number, size: number) => {
+    if (!Number.isFinite(size)) return;
+    hits.push({ index, size: Math.min(Math.max(Math.round(size), 1), 32) });
+  };
+
+  const soloRe =
+    /\bjust me\b|\bsolo\b|\bmyself\b|\bone player\b|\b1 player\b|\bsolo\b\s*(?:practice\s*)?session\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = soloRe.exec(lower)) !== null) {
+    pushClamped(m.index, 1);
   }
 
-  const partyOfWord =
-    /\bparty of\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/i.exec(lower);
-  if (partyOfWord?.[1]) {
-    const n = PARTY_WORD_TO_N[partyOfWord[1]];
-    if (n) return Math.min(Math.max(n, 1), 32);
+  const wordPartyRe =
+    /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:players?|people|person|ppl)\b/gi;
+  while ((m = wordPartyRe.exec(lower)) !== null) {
+    const n = PARTY_WORD_TO_N[m[1] ?? ""];
+    if (n) pushClamped(m.index, n);
   }
 
-  const m =
-    /\b(\d{1,2})\s*(players|player|people|person|ppl)\b/i.exec(fullText) ||
-    /\bparty of\s*(\d{1,2})\b/i.exec(fullText) ||
-    /\b(\d{1,2})\s*ppl\b/i.exec(fullText);
+  const partyOfWordRe =
+    /\bparty of\s+(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/gi;
+  while ((m = partyOfWordRe.exec(lower)) !== null) {
+    const n = PARTY_WORD_TO_N[m[1] ?? ""];
+    if (n) pushClamped(m.index, n);
+  }
 
-  if (!m) return null;
+  const numericRes: RegExp[] = [
+    /\b(\d{1,2})\s*(?:players|player|people|person|ppl)\b/gi,
+    /\bparty of\s*(\d{1,2})\b/gi,
+    /\b(\d{1,2})\s*ppl\b/gi,
+  ];
+  for (const re of numericRes) {
+    while ((m = re.exec(fullText)) !== null) {
+      pushClamped(m.index, Number(m[1]));
+    }
+  }
 
-  const num = Number(m[1]);
-  return Number.isFinite(num) ? Math.min(Math.max(Math.round(num), 1), 32) : null;
+  if (hits.length === 0) return null;
+  hits.sort((a, b) => a.index - b.index);
+  return hits[hits.length - 1]!.size;
 }
 
 export function extractLessonTrack(fullText: string): BookingFacts["lessonTrack"] {
@@ -491,7 +510,8 @@ function collectBookingFactsWithDateResolution(
     facts: {
       serviceType,
       isoDate: dateResolution.isoDate,
-      partySize: extractPartySize(transcript),
+      partySize:
+        extractPartySize(latestInboundText) ?? extractPartySize(transcript),
       preferredTimePhrase: extractPreferredTimePhrase(transcript),
       simulatorDurationMinutes:
         serviceType === "lesson" ? null :
