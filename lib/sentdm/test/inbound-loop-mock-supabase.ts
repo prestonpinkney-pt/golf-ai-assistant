@@ -25,6 +25,10 @@ export function createInboundLoopMockSupabase() {
   };
 
   let seq = 0;
+  /** When set, the next matching table update fails once (for fail-closed tests). */
+  let failNextUpdate:
+    | { table: string; message: string; when?: (patch: Row) => boolean }
+    | null = null;
 
   function nextId(table: string) {
     seq += 1;
@@ -126,6 +130,17 @@ export function createInboundLoopMockSupabase() {
           return { data: row, error: null };
         }
         if (b.pendingUpdate) {
+          if (
+            failNextUpdate &&
+            failNextUpdate.table === b.table &&
+            (!failNextUpdate.when || failNextUpdate.when(b.pendingUpdate))
+          ) {
+            const message = failNextUpdate.message;
+            failNextUpdate = null;
+            b.pendingUpdate = null;
+            b.filters = [];
+            return { data: null, error: { message } };
+          }
           const rows = filterRows(b.table, b.filters);
           for (const row of rows) {
             Object.assign(row, b.pendingUpdate, {
@@ -193,10 +208,22 @@ export function createInboundLoopMockSupabase() {
     __countMessages(filter?: (r: Row) => boolean) {
       return filter ? tables.messages.filter(filter).length : tables.messages.length;
     },
+    __failNextUpdate(
+      table: string,
+      message: string,
+      when?: (patch: Row) => boolean
+    ) {
+      failNextUpdate = { table, message, when };
+    },
   };
 
   return client as unknown as SupabaseClient & {
     __tables: typeof tables;
     __countMessages: (filter?: (r: Row) => boolean) => number;
+    __failNextUpdate: (
+      table: string,
+      message: string,
+      when?: (patch: Row) => boolean
+    ) => void;
   };
 }

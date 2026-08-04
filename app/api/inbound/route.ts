@@ -951,14 +951,37 @@ export async function POST(req: Request) {
 
     // 9. STOP handling
     if (isOptOutMessage(messageText)) {
-      await supabase
+      // Fail closed: do not ACK STOP or mark processed unless opt-out persisted.
+      const { data: optedOutContact, error: optOutErr } = await supabase
         .from("contacts")
         .update({
           sms_opt_out: true,
           sms_opt_out_at: new Date().toISOString(),
           sms_opt_out_reason: messageText,
         })
-        .eq("id", contact.id);
+        .eq("id", contact.id)
+        .select("id")
+        .maybeSingle();
+
+      if (optOutErr || !optedOutContact) {
+        await supabase
+          .from("inbound_events")
+          .update({
+            status: "failed",
+            error_message: optOutErr?.message || "opt_out_update_failed",
+            error_source: "stop_opt_out",
+          })
+          .eq("id", inboundEvent.id);
+
+        return NextResponse.json(
+          {
+            success: false,
+            error: optOutErr?.message || "opt_out_update_failed",
+            step: "stop_opt_out",
+          },
+          { status: 500 }
+        );
+      }
 
       await supabase.from("audit_logs").insert({
         event_type: "sms_opt_out_detected",
