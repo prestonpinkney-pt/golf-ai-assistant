@@ -167,10 +167,18 @@ describe("inbound-loop integration (mocked Supabase + AI)", () => {
     assert.equal(contact?.sms_opt_out, undefined);
 
     const inbound = supabase.__tables.inbound_events.find(
-      (e) => e.external_id === "fixture-stop-fail-closed-001"
+      (e) => e.error_source === "stop_opt_out"
     );
+    assert.ok(inbound, "expected inbound_events row marked stop_opt_out");
     assert.equal(inbound?.status, "failed");
-    assert.equal(inbound?.error_source, "stop_opt_out");
+    assert.equal(
+      inbound?.error_message,
+      "simulated_opt_out_update_failure"
+    );
+    assert.equal(
+      supabase.__tables.inbound_events.some((e) => e.status === "processed"),
+      false
+    );
 
     assert.equal(
       supabase.__countMessages(
