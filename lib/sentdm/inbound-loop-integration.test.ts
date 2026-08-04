@@ -138,6 +138,54 @@ describe("inbound-loop integration (mocked Supabase + AI)", () => {
     assert.equal(contact?.cooling_off_until, undefined);
   });
 
+  test("STOP fails closed when contact opt-out update errors", async () => {
+    const supabase = createInboundLoopMockSupabase();
+    supabase.__failNextUpdate(
+      "contacts",
+      "simulated_opt_out_update_failure",
+      (patch) => patch.sms_opt_out === true
+    );
+    const base = fixtures.inbound_membership_question_envelope as Record<
+      string,
+      unknown
+    >;
+    const envelope = envelopeWithText(base, "STOP");
+
+    const result = await runSentDmInboundConversationLoop({
+      supabase,
+      rawPayload: envelope,
+      externalId: "fixture-stop-fail-closed-001",
+      ingestSource: "sentdm_webhook",
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.statusCode, 500);
+    assert.equal((result.body as { step?: string }).step, "stop_opt_out");
+    assert.equal(aiCalls(), 0);
+
+    const contact = supabase.__tables.contacts.find((c) => c.phone === "+15551234567");
+    assert.equal(contact?.sms_opt_out, undefined);
+
+    const inbound = supabase.__tables.inbound_events.find(
+      (e) => e.external_id === "fixture-stop-fail-closed-001"
+    );
+    assert.equal(inbound?.status, "failed");
+    assert.equal(inbound?.error_source, "stop_opt_out");
+
+    assert.equal(
+      supabase.__countMessages(
+        (m) =>
+          m.direction === "outbound" &&
+          (m.intent === "stop" ||
+            Boolean(
+              (m.metadata as { compliance_stop_confirm?: boolean } | null)
+                ?.compliance_stop_confirm
+            ))
+      ),
+      0
+    );
+  });
+
   test("cooled-off contact does not receive auto-reply", async () => {
     const supabase = createInboundLoopMockSupabase();
     const future = new Date(Date.now() + 7 * 86_400_000).toISOString();

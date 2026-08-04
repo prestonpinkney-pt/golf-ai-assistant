@@ -728,14 +728,33 @@ export async function runSentDmInboundConversationLoop(params: {
     });
 
     if (detectCarrierComplianceKind(messageText) === "stop") {
-      await supabase
+      // Fail closed: never ACK STOP or mark processed unless opt-out persisted.
+      // Otherwise carriers/campaigns can keep texting a contact who believes they unsubscribed.
+      const { data: optedOutContact, error: optOutErr } = await supabase
         .from("contacts")
         .update({
           sms_opt_out: true,
           sms_opt_out_at: nowIso,
           sms_opt_out_reason: messageText,
         })
-        .eq("id", contact!.id as string);
+        .eq("id", contact!.id as string)
+        .select("id")
+        .maybeSingle();
+
+      if (optOutErr || !optedOutContact) {
+        await failInbound(
+          optOutErr?.message ?? "opt_out_update_failed",
+          "stop_opt_out"
+        );
+        return {
+          ok: false,
+          statusCode: 500,
+          body: {
+            step: "stop_opt_out",
+            error: optOutErr?.message ?? "opt_out_update_failed",
+          },
+        };
+      }
 
       await audit(supabase, {
         event_type: "sentdm_loop_stop_handled",
