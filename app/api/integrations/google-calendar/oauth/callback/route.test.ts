@@ -24,10 +24,14 @@ test("OAuth error query is reflected escaped (no XSS)", async () => {
     /text\/html/i
   );
   const html = await response.text();
+  // Tags must be escaped; attribute-like text inside escaped markup is inert.
   assert.equal(html.includes("<script>"), false);
   assert.equal(html.includes("<img"), false);
-  assert.equal(html.includes("onerror="), false);
   assert.ok(html.includes("&lt;img"));
   assert.ok(html.includes("&lt;script&gt;"));
   assert.ok(html.includes("Google OAuth returned:"));
+  assert.match(
+    html,
+    /Google OAuth returned: &lt;img src=x onerror=alert\(1\)&gt;&lt;script&gt;alert\(1\)&lt;\/script&gt;/
+  );
 });
