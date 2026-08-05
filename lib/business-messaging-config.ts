@@ -282,8 +282,11 @@ async function lookupBusinessIdByPhone(
     .maybeSingle();
 
   if (error) {
-    console.warn("[business-config] Phone routing lookup failed:", error.message);
-    return null;
+    // Fail closed: returning null here falls through to the default tenant
+    // and can attach inbound SMS / AI replies to the wrong business.
+    throw new Error(
+      `business_messaging_numbers lookup failed: ${error.message}`
+    );
   }
 
   return cleanString(data?.business_id);
