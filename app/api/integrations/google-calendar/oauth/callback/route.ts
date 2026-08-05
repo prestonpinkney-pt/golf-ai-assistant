@@ -7,6 +7,16 @@ type GoogleUserInfo = {
   email?: string;
 };
 
+/** Escape untrusted strings before interpolating into HTML responses. */
+export function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function getSupabaseAdmin() {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
@@ -35,6 +45,8 @@ function getOAuthClient() {
 }
 
 function successHtml(email: string) {
+  const safeBusinessId = escapeHtml(String(BUSINESS_ID ?? ""));
+  const safeEmail = escapeHtml(email);
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -52,8 +64,8 @@ function successHtml(email: string) {
   <body>
     <div class="card">
       <h1>Google Calendar Connected</h1>
-      <p>CloseOS successfully connected Google Calendar for business <code>${BUSINESS_ID}</code>.</p>
-      <p>Connected account: <code>${email}</code>.</p>
+      <p>CloseOS successfully connected Google Calendar for business <code>${safeBusinessId}</code>.</p>
+      <p>Connected account: <code>${safeEmail}</code>.</p>
       <p>You can close this window and run calendar sync from CloseOS.</p>
     </div>
   </body>
@@ -61,6 +73,7 @@ function successHtml(email: string) {
 }
 
 function failureHtml(message: string) {
+  const safeMessage = escapeHtml(message);
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -77,7 +90,7 @@ function failureHtml(message: string) {
   <body>
     <div class="card">
       <h1>Google Calendar Connection Failed</h1>
-      <p>${message}</p>
+      <p>${safeMessage}</p>
       <p>Please retry from <code>/api/integrations/google-calendar/oauth/start</code>.</p>
     </div>
   </body>
