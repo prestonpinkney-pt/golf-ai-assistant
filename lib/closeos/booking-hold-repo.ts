@@ -27,22 +27,85 @@ export function slotIntervalsOverlapUtc(
   return as < be && ae > bs;
 }
 
+function trimmedId(value: unknown): string {
+  if (typeof value === "string" && value.trim()) return value.trim();
+  if (value !== null && value !== undefined) {
+    const s = String(value).trim();
+    if (s) return s;
+  }
+  return "";
+}
+
+/** Collect bay / course / occurrence ids stored on a CloseOS hold row. */
+export function holdRowBayMatchKeys(row: {
+  bay_id?: unknown;
+  raw_payload?: unknown;
+}): string[] {
+  const keys = new Set<string>();
+  const bayId = trimmedId(row.bay_id);
+  if (bayId) keys.add(bayId);
+
+  const payload =
+    row.raw_payload !== null &&
+    typeof row.raw_payload === "object" &&
+    !Array.isArray(row.raw_payload) ?
+      (row.raw_payload as Record<string, unknown>)
+    : null;
+  if (!payload) return [...keys];
+
+  const snap =
+    payload.slot_snapshot !== null &&
+    typeof payload.slot_snapshot === "object" &&
+    !Array.isArray(payload.slot_snapshot) ?
+      (payload.slot_snapshot as Record<string, unknown>)
+    : null;
+  if (!snap) return [...keys];
+
+  const snapBay = trimmedId(snap.bayOrResourceId);
+  if (snapBay) keys.add(snapBay);
+
+  const raw =
+    snap.raw !== null && typeof snap.raw === "object" && !Array.isArray(snap.raw) ?
+      (snap.raw as Record<string, unknown>)
+    : null;
+  if (raw) {
+    for (const field of ["course_id", "bay_id", "id", "slot_id", "uuid", "agenda_slot_id"]) {
+      const v = trimmedId(raw[field]);
+      if (v) keys.add(v);
+    }
+  }
+
+  return [...keys];
+}
+
 export async function hasActiveSimulatorHoldConflict(
   supabase: SupabaseClient,
   input: {
     businessId: string;
     bayResourceId: string;
+    /**
+     * All identifiers that refer to the same physical bay or this slot occurrence.
+     * Used so adjacent Whoosh starts on one course_id collide even when bay_id was
+     * historically stored as a per-start occurrence id.
+     */
+    conflictBayIds?: string[];
     slotStartIso: string;
     slotEndIso: string;
     excludeCloseosBookingId?: string | null;
   }
 ): Promise<boolean> {
   const nowIso = new Date().toISOString();
+  const matchIds = new Set(
+    [input.bayResourceId, ...(input.conflictBayIds ?? [])]
+      .map((x) => trimmedId(x))
+      .filter(Boolean)
+  );
+  if (matchIds.size === 0) return false;
+
   const { data, error } = await supabase
     .from("closeos_bookings")
-    .select("id, start_time, end_time, status, expires_at")
+    .select("id, start_time, end_time, status, expires_at, bay_id, raw_payload")
     .eq("business_id", input.businessId)
-    .eq("bay_id", input.bayResourceId)
     .in("status", ["held_pending_payment", "paid_pending_whoosh", "paid_confirmed"]);
 
   if (error) throw new Error(error.message);
@@ -67,6 +130,9 @@ export async function hasActiveSimulatorHoldConflict(
 
     if (!slotIntervalsOverlapUtc(input.slotStartIso, input.slotEndIso, rss, rse))
       continue;
+
+    const rowKeys = holdRowBayMatchKeys(row as { bay_id?: unknown; raw_payload?: unknown });
+    if (!rowKeys.some((k) => matchIds.has(k))) continue;
 
     if (st === "paid_pending_whoosh") return true;
 
@@ -184,8 +250,14 @@ export async function finalizeCloseOsBookingAfterWhooshConfirm(
 
 /** Extract slot identifiers for Square metadata + collision keys. */
 export function pickSlotCorrelationIds(slot: NormalizedWhooshAvailabilitySlot): {
+  /**
+   * Physical bay / course id when Whoosh provides `course_id`; otherwise the
+   * normalized `bayOrResourceId` (often a per-start occurrence id).
+   */
   bayResourceId: string;
   slotIdExternal: string | null;
+  /** Union of physical bay + occurrence ids for soft-hold conflict matching. */
+  conflictBayIds: string[];
 } {
   const raw = slot.raw && typeof slot.raw === "object" && !Array.isArray(slot.raw) ?
       (slot.raw as Record<string, unknown>)
@@ -193,17 +265,28 @@ export function pickSlotCorrelationIds(slot: NormalizedWhooshAvailabilitySlot): 
 
   const id =
     [raw.id, raw.slot_id, raw.uuid, raw.agenda_slot_id]
-      .map((x) =>
-        typeof x === "string" && x.trim() ? x.trim() : x !== null ? String(x).trim() : ""
-      )
+      .map((x) => trimmedId(x))
       .find(Boolean) ?? "";
 
-  const bayResourceId = typeof slot.bayOrResourceId === "string" && slot.bayOrResourceId.trim() ?
+  const courseId = [raw.course_id]
+    .map((x) => trimmedId(x))
+    .find(Boolean) ?? "";
+
+  const bayOrResourceId =
+    typeof slot.bayOrResourceId === "string" && slot.bayOrResourceId.trim() ?
       slot.bayOrResourceId.trim()
     : "";
+
+  /** Prefer durable physical bay so overlapping adjacent starts collide. */
+  const bayResourceId = courseId || bayOrResourceId;
+
+  const conflictBayIds = [
+    ...new Set([bayResourceId, bayOrResourceId, courseId, id].filter(Boolean)),
+  ];
 
   return {
     bayResourceId,
     slotIdExternal: id || null,
+    conflictBayIds,
   };
 }

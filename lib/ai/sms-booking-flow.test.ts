@@ -1604,7 +1604,8 @@ describe("sms-booking-flow", () => {
 
       const lastHold = sb.closeos_bookings_rows.at(-1)!;
       assert.strictEqual(lastHold.status, "held_pending_payment");
-      assert.strictEqual(lastHold.bay_id, "whoosh-slot-1115");
+      /** Soft-hold bay_id must be the physical course_id so adjacent starts collide. */
+      assert.strictEqual(lastHold.bay_id, "fc56dd17-ad78-4861-983b-bf7ec7d3233c");
       assert.strictEqual(lastHold.duration_minutes, 60);
     });
 
@@ -1683,7 +1684,7 @@ describe("sms-booking-flow", () => {
       assert.strictEqual(out.debug.foundStoredOffer, true);
       assert.strictEqual(out.debug.contactMatch, true);
       const lastHold = sb.closeos_bookings_rows.at(-1)!;
-      assert.strictEqual(lastHold.bay_id, "whoosh-slot-1115");
+      assert.strictEqual(lastHold.bay_id, "fc56dd17-ad78-4861-983b-bf7ec7d3233c");
       assert.notStrictEqual(lastHold.bay_id, "other-phone-slot-2");
     });
 
@@ -1751,6 +1752,79 @@ describe("sms-booking-flow", () => {
           r.start_time === slot.startTime
       );
       assert.strictEqual(held.length, 1);
+    });
+
+    test("adjacent Whoosh start on same course_id collides with active soft hold", async () => {
+      const conv = "00000000-0000-4000-a100-000000000307";
+      const sb = new FakeBookingSupabase();
+
+      const slots = sampleBaySlots1100Thru1130Jun17();
+      const heldSlot = slots[0]!;
+      /** Occurrence-keyed legacy bay_id + snapshot course_id (live hold shape). */
+      sb.closeos_bookings_rows.push({
+        id: "00000000-0000-0000-0001-100000002207",
+        business_id: "00000000-0000-0000-0000-000000000099",
+        bay_id: heldSlot.bayOrResourceId.trim(),
+        status: "held_pending_payment",
+        expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+        start_time: heldSlot.startTime,
+        end_time: heldSlot.endTime,
+        conversation_id: null,
+        raw_payload: {
+          slot_snapshot: {
+            startTime: heldSlot.startTime,
+            endTime: heldSlot.endTime,
+            bayOrResourceId: heldSlot.bayOrResourceId,
+            resourceName: heldSlot.resourceName,
+            serviceType: heldSlot.serviceType,
+            priceEstimate: heldSlot.priceEstimate,
+            raw: heldSlot.raw,
+          },
+        },
+      });
+
+      whooshAvailabilityClient.getAvailability = async () => ({
+        ok: true,
+        slots,
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-17",
+        slotRowsLoaded: slots.length,
+        bookingRowsLoaded: 0,
+      });
+
+      let whooshBookingCalls = 0;
+      whooshBookingClient.createBooking = async () => {
+        whooshBookingCalls += 1;
+        throw new Error("should_not_post_whoosh_over_adjacent_hold");
+      };
+
+      const bookingSeed =
+        "Book simulator 2035-06-17 Sunday morning solo myself hourly simulator booking reservation";
+
+      await runAugment({
+        inboundText: bookingSeed,
+        playbook: "simulator",
+        conversationId: conv,
+        sb,
+      });
+
+      /** Pick 11:15 — overlaps the 11:00–12:00 hold on the same course_id. */
+      const sel = await runAugment({
+        inboundText: "2",
+        playbook: "simulator",
+        conversationId: conv,
+        sb,
+        conversationHistory: inboundOnlyHistory([bookingSeed]),
+      });
+
+      const out = expectDirectOutbound(sel.flow);
+      assert.strictEqual(out.replyText, BOOKING_CONFIRMATION_HANDOFF_REPLY);
+      assert.strictEqual(out.debug.reason, "simulator_square_hold_blocked_overlap");
+      assert.strictEqual(whooshBookingCalls, 0);
+      assert.strictEqual(
+        sb.closeos_bookings_rows.filter((r) => String(r.status) === "held_pending_payment").length,
+        1
+      );
     });
 
     test("Square checkout creation failure swaps to booked handoff and marks square_link_failed", async () => {

@@ -2017,6 +2017,7 @@ export async function runCloseOsSmsBookingAugmentation(params: {
             await hasActiveSimulatorHoldConflict(params.supabase, {
               businessId: params.businessId,
               bayResourceId: correlation.bayResourceId,
+              conflictBayIds: correlation.conflictBayIds,
               slotStartIso: pick.startTime,
               slotEndIso: selectedEndTime,
             })
