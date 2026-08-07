@@ -29,6 +29,8 @@ import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
   extractSimulatorDurationMinutes,
+  inboundIsStrictSlotSelectionForOffers,
+  resolveOfferedSlotPickIndex,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
   squarePaymentHoldCheckoutClient,
@@ -279,6 +281,69 @@ class FakeBookingSupabase {
     };
   }
 }
+
+describe("ordinal slot pick false positives", () => {
+  const slots: NormalizedWhooshAvailabilitySlot[] = [
+    {
+      startTime: "2035-06-17T18:00:00.000Z",
+      endTime: "2035-06-17T19:00:00.000Z",
+      bayOrResourceId: "bay-1",
+      resourceName: "Bay 1",
+      serviceType: "simulator",
+      priceEstimate: null,
+      raw: { agenda_date: "2035-06-17" },
+    },
+    {
+      startTime: "2035-06-17T19:00:00.000Z",
+      endTime: "2035-06-17T20:00:00.000Z",
+      bayOrResourceId: "bay-2",
+      resourceName: "Bay 2",
+      serviceType: "simulator",
+      priceEstimate: null,
+      raw: { agenda_date: "2035-06-17" },
+    },
+    {
+      startTime: "2035-06-17T20:00:00.000Z",
+      endTime: "2035-06-17T21:00:00.000Z",
+      bayOrResourceId: "bay-3",
+      resourceName: "Bay 3",
+      serviceType: "simulator",
+      priceEstimate: null,
+      raw: { agenda_date: "2035-06-17" },
+    },
+  ];
+
+  test("conversational first/second/third phrases are not slot picks", () => {
+    for (const phrase of [
+      "first time here",
+      "this is my first visit",
+      "my first lesson was great",
+      "second thoughts",
+      "looking forward to my third round",
+    ]) {
+      assert.equal(
+        resolveOfferedSlotPickIndex(phrase, slots),
+        null,
+        `should not pick a slot for ${JSON.stringify(phrase)}`
+      );
+      assert.equal(
+        inboundIsStrictSlotSelectionForOffers(phrase, slots),
+        false,
+        `should not treat ${JSON.stringify(phrase)} as a strict slot selection`
+      );
+    }
+  });
+
+  test("real ordinal slot selections still resolve", () => {
+    assert.equal(resolveOfferedSlotPickIndex("first", slots), 0);
+    assert.equal(resolveOfferedSlotPickIndex("the first one", slots), 0);
+    assert.equal(resolveOfferedSlotPickIndex("first slot", slots), 0);
+    assert.equal(resolveOfferedSlotPickIndex("book the first", slots), 0);
+    assert.equal(resolveOfferedSlotPickIndex("second", slots), 1);
+    assert.equal(resolveOfferedSlotPickIndex("the third option", slots), 2);
+    assert.equal(resolveOfferedSlotPickIndex("1st", slots), 0);
+  });
+});
 
 describe("sms-booking-flow", () => {
   const savedAvail = whooshAvailabilityClient.getAvailability.bind(whooshAvailabilityClient);

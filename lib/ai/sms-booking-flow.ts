@@ -1081,18 +1081,67 @@ export function inboundMentionsLikelyOfferedClock(subject: string): boolean {
   return false;
 }
 
+/**
+ * Ordinal / "1st" slot picks. Must NOT treat conversational "first time" / "second thoughts"
+ * as selecting offered slot 1/2 while a stored availability offer is live.
+ */
 function matchOrdinalOfferIndex(inbound: string, offerCount: number): number | null {
-  const lower = inbound.toLowerCase();
-  if (/\b(?:first)\b(?:\s*(?:one|slot|option|choice|pick|opening|bay))?\b|\b1\s*st\b/.test(lower))
-    return offerCount >= 1 ? 0 : null;
-  if (/\b(?:second)\b(?:\s*(?:one|slot|option|choice|pick|opening|bay))?\b|\b2\s*nd\b/.test(lower))
-    return offerCount >= 2 ? 1 : null;
+  const lower = inbound.toLowerCase().trim();
+  if (!lower) return null;
+
+  /** "first time visiting", "second thoughts", "third lesson", etc. are not slot picks. */
   if (
-    /\b(?:third|3\s*rd)\b(?:\s*(?:one|slot|option|choice|pick|opening|bay))?\b|\b(?:the\s+)?third\b/.test(
+    /\b(?:first|second|third)\s+(?:time|times|visit|visits|lesson|lessons|round|rounds|thoughts?|impression|day|week|month|year|priority)\b/.test(
       lower
     )
-  )
+  ) {
+    return null;
+  }
+  if (
+    /\b(?:my|our|the)\s+(?:first|second|third)\s+(?:time|visit|lesson|round)\b/.test(lower)
+  ) {
+    return null;
+  }
+
+  const standaloneOrdinal = (word: "first" | "second" | "third"): boolean =>
+    new RegExp(`^(?:the\\s+)?${word}(?:\\s+one)?[.!?,]*$`, "i").test(lower);
+
+  const slotNounOrdinal = (word: "first" | "second" | "third"): boolean =>
+    new RegExp(
+      `\\b(?:the\\s+)?${word}\\s+(?:one|slot|option|choice|pick|opening|bay)\\b`,
+      "i"
+    ).test(lower);
+
+  const bookVerbOrdinal = (word: "first" | "second" | "third"): boolean =>
+    new RegExp(
+      `\\b(?:book(?:ing)?|grab|want|i'?ll\\s+take|take|choose|pick)\\b[\\s\\S]{0,48}\\b(?:the\\s+)?${word}\\b`,
+      "i"
+    ).test(lower);
+
+  if (
+    standaloneOrdinal("first") ||
+    slotNounOrdinal("first") ||
+    bookVerbOrdinal("first") ||
+    /\b1\s*st\b/.test(lower)
+  ) {
+    return offerCount >= 1 ? 0 : null;
+  }
+  if (
+    standaloneOrdinal("second") ||
+    slotNounOrdinal("second") ||
+    bookVerbOrdinal("second") ||
+    /\b2\s*nd\b/.test(lower)
+  ) {
+    return offerCount >= 2 ? 1 : null;
+  }
+  if (
+    standaloneOrdinal("third") ||
+    slotNounOrdinal("third") ||
+    bookVerbOrdinal("third") ||
+    /\b3\s*rd\b/.test(lower)
+  ) {
     return offerCount >= 3 ? 2 : null;
+  }
   if (/\blast\s+(one|slot|option|choice|pick|opening|bay)\b/.test(lower))
     return offerCount >= 1 ? offerCount - 1 : null;
   const oneTwoThree =
