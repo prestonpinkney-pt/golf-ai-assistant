@@ -43,7 +43,13 @@ export async function hasActiveSimulatorHoldConflict(
     .select("id, start_time, end_time, status, expires_at")
     .eq("business_id", input.businessId)
     .eq("bay_id", input.bayResourceId)
-    .in("status", ["held_pending_payment", "paid_pending_whoosh", "paid_confirmed"]);
+    .in("status", [
+      "held_pending_payment",
+      "paid_pending_whoosh",
+      "paid_confirmed",
+      /** Paid customer still owns the bay until ops reconcile Whoosh. */
+      "paid_whoosh_failed",
+    ]);
 
   if (error) throw new Error(error.message);
 
@@ -78,9 +84,34 @@ export async function hasActiveSimulatorHoldConflict(
      * do not mint another hold overlapping it.
      */
     if (st === "paid_confirmed") return true;
+
+    /** Paid but Whoosh failed — keep exclusive claim so a second guest cannot oversell. */
+    if (st === "paid_whoosh_failed") return true;
   }
 
   return false;
+}
+
+/**
+ * Compare-and-swap claim: only one Square webhook worker may move
+ * `held_pending_payment` → `paid_pending_whoosh` before calling Whoosh.
+ */
+export async function claimCloseOsBookingPaidPendingWhoosh(
+  supabase: SupabaseClient,
+  id: string,
+  fields: Record<string, unknown>
+): Promise<"claimed" | "lost_race"> {
+  const { data, error } = await supabase
+    .from("closeos_bookings")
+    .update(fields as never)
+    .eq("id", id)
+    .eq("status", "held_pending_payment")
+    .select("id")
+    .maybeSingle();
+
+  if (error?.message) throw new Error(error.message);
+  if (data && typeof (data as { id?: unknown }).id === "string") return "claimed";
+  return "lost_race";
 }
 
 export type CloseOsBookingInsert = {

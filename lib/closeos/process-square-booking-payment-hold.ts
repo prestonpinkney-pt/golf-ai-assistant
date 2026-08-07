@@ -7,6 +7,7 @@ import {
   BOOKING_CONFIRMATION_HANDOFF_REPLY,
 } from "@/lib/ai/booking-outbound-guard";
 import {
+  claimCloseOsBookingPaidPendingWhoosh,
   finalizeCloseOsBookingAfterWhooshConfirm,
   getCloseOsBookingById,
   type CloseOsBookingStatus,
@@ -267,7 +268,19 @@ export async function processSquarePaymentCompletedForBookingHold(opts: {
     return { handled: true, outcomeSummary: "ignored_cancelled_hold" };
   }
 
-  if (rowStatus !== "held_pending_payment" && rowStatus !== "paid_pending_whoosh") {
+  /**
+   * Another worker already claimed this payment for Whoosh. Do not re-POST —
+   * Square often delivers payment.created + payment.updated close together.
+   */
+  if (rowStatus === "paid_pending_whoosh") {
+    const existingProviderId = rowRawPayload(row).provider_booking_id;
+    if (typeof existingProviderId === "string" && existingProviderId.trim()) {
+      return { handled: true, outcomeSummary: "already_confirmed_noop" };
+    }
+    return { handled: true, outcomeSummary: "whoosh_finalize_in_progress_noop" };
+  }
+
+  if (rowStatus !== "held_pending_payment") {
     return {
       handled: true,
       outcomeSummary: `ignored_non_hold_prior_status:${rowStatus}`,
@@ -336,7 +349,7 @@ export async function processSquarePaymentCompletedForBookingHold(opts: {
     return { handled: true, outcomeSummary: "expired_hold_paid_need_review" };
   }
 
-  await finalizeCloseOsBookingAfterWhooshConfirm(opts.supabase, closeosBookingId, {
+  const claim = await claimCloseOsBookingPaidPendingWhoosh(opts.supabase, closeosBookingId, {
     payment_status: "paid",
     paid_at: curIso,
     status: "paid_pending_whoosh" satisfies CloseOsBookingStatus,
@@ -346,6 +359,21 @@ export async function processSquarePaymentCompletedForBookingHold(opts: {
     }),
     updated_at: curIso,
   });
+
+  if (claim === "lost_race") {
+    const again = await getCloseOsBookingById(opts.supabase, closeosBookingId);
+    const againStatus = typeof again?.status === "string" ? again.status : "";
+    if (againStatus === "paid_confirmed") {
+      return { handled: true, outcomeSummary: "already_confirmed_noop" };
+    }
+    if (againStatus === "paid_pending_whoosh") {
+      return { handled: true, outcomeSummary: "whoosh_finalize_in_progress_noop" };
+    }
+    return {
+      handled: true,
+      outcomeSummary: `ignored_non_hold_prior_status:${againStatus || "unknown"}`,
+    };
+  }
 
   const slot = parseSlotSnapshot(row);
   const ps = typeof row.party_size === "number" && row.party_size > 0 ? row.party_size : 1;

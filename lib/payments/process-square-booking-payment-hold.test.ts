@@ -100,16 +100,57 @@ function createBookingHoldFakeSb(input: {
         },
 
         update(patch: Record<string, unknown>) {
-          return {
+          const filters: Record<string, unknown> = {};
+          const api = {
             eq(field: string, val: unknown) {
-              const idStr = typeof val === "string" ? val : "";
-              const cur = bookings.get(idStr);
-              if (table === "closeos_bookings" && cur && field === "id") {
-                Object.assign(cur, patch);
-              }
-              return Promise.resolve({ error: null });
+              filters[field] = val;
+              return api;
+            },
+            select(_sel?: string) {
+              return {
+                maybeSingle: async () => {
+                  if (table !== "closeos_bookings") {
+                    return { data: null, error: null };
+                  }
+                  const idStr = typeof filters.id === "string" ? filters.id : "";
+                  const cur = bookings.get(idStr);
+                  if (!cur) return { data: null, error: null };
+                  if (
+                    typeof filters.status === "string" &&
+                    String(cur.status) !== filters.status
+                  ) {
+                    return { data: null, error: null };
+                  }
+                  Object.assign(cur, patch);
+                  return { data: { id: idStr }, error: null };
+                },
+              };
+            },
+            then(
+              resolve: (v: { error: null }) => unknown,
+              reject?: (e: unknown) => unknown
+            ) {
+              return Promise.resolve()
+                .then(async () => {
+                  if (table === "closeos_bookings") {
+                    const idStr = typeof filters.id === "string" ? filters.id : "";
+                    const cur = bookings.get(idStr);
+                    if (cur) {
+                      if (
+                        typeof filters.status === "string" &&
+                        String(cur.status) !== filters.status
+                      ) {
+                        return { error: null };
+                      }
+                      Object.assign(cur, patch);
+                    }
+                  }
+                  return { error: null };
+                })
+                .then(resolve, reject);
             },
           };
+          return api;
         },
       };
     },
@@ -578,5 +619,48 @@ describe("processSquarePaymentCompletedForBookingHold", () => {
     assert.ok(!(sendCalls[0]?.message ?? "").includes("Confirmed for"));
     assert.ok((sendCalls[0]?.message ?? "").includes("trouble completing"));
     assert.equal(typeof snap.last_error_summary, "string");
+  });
+
+  test("paid_pending_whoosh webhook retry does not re-POST Whoosh", async () => {
+    process.env.WHOOSH_BOOKING_GUEST_MEMBER_NUMBER = "guest-unit";
+    let whooshAttempts = 0;
+    const id = randomUUID();
+    const contactId = randomUUID();
+    const { supabase, getBookingSnapshot } = createBookingHoldFakeSb({
+      booking: makeHoldRow({
+        id,
+        contact_id: contactId,
+        status: "paid_pending_whoosh",
+        payment_status: "paid",
+      }),
+    });
+
+    const res = await processSquarePaymentCompletedForBookingHold({
+      supabase,
+      accessTokenSquare: "tok",
+      closeosBookingId: id,
+      squarePaymentId: "dup_while_pending_whoosh",
+      amountCents: 8400,
+      deps: {
+        now: FIXED_WEBHOOK_AT,
+        createWhooshBooking: async (): Promise<WhooshBookingResult> => {
+          whooshAttempts += 1;
+          return {
+            ok: true,
+            outcome: "confirmed",
+            bookingId: "should-not-run",
+            requestId: null,
+            confirmationNumber: null,
+            startTime: "2026-05-09T03:40:00.000Z",
+            endTime: "2026-05-09T04:40:00.000Z",
+            raw: {},
+          };
+        },
+      },
+    });
+
+    assert.equal(res.outcomeSummary, "whoosh_finalize_in_progress_noop");
+    assert.equal(whooshAttempts, 0);
+    assert.equal(getBookingSnapshot().status, "paid_pending_whoosh");
   });
 });
