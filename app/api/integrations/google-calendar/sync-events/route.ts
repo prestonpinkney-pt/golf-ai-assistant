@@ -12,6 +12,7 @@ import {
 } from "../../../lib/lesson-whoosh-identity";
 import { BUSINESS_ID } from "../../../config";
 import { findCustomerProfileIdByContact } from "../../../lib/google-calendar-customer-match";
+import { resolveCancelledReservationWrite } from "@/lib/google-calendar/cancelled-event-sync";
 
 const PREFERRED_GOOGLE_CALENDAR_EMAIL =
   process.env.CLOSEOS_GOOGLE_CALENDAR_ACCOUNT_EMAIL?.trim().toLowerCase() ??
@@ -319,6 +320,109 @@ async function syncCalendar(input: {
 
       const startsAt = event.start?.dateTime ?? event.start?.date ?? null;
       const endsAt = event.end?.dateTime ?? event.end?.date ?? null;
+      const status = mapGoogleStatus(event.status);
+
+      // Cancelled/deleted events frequently omit start/end (or send year-2000
+      // placeholders). Apply cancellation before the no-time skip so already
+      // synced bookings do not stay stuck as "booked".
+      if (status === "cancelled") {
+        const externalId =
+          typeof event.id === "string" ? event.id.trim() : "";
+        let hasExistingReservation = false;
+
+        if (externalId) {
+          const { data: existingReservation, error: existingError } =
+            await supabase
+              .from("booking_reservations")
+              .select("id")
+              .eq("business_id", BUSINESS_ID)
+              .eq("source", "google_calendar")
+              .eq("external_id", externalId)
+              .maybeSingle();
+
+          if (existingError) {
+            throw new Error(existingError.message);
+          }
+          hasExistingReservation = Boolean(existingReservation?.id);
+        }
+
+        const write = resolveCancelledReservationWrite({
+          externalId,
+          startsAt,
+          endsAt,
+          hasExistingReservation,
+        });
+
+        if (write.kind === "skip") {
+          skippedNoTime += 1;
+          continue;
+        }
+
+        if (write.kind === "status_only") {
+          const { error: cancelError } = await supabase
+            .from("booking_reservations")
+            .update({
+              status: "cancelled",
+              raw_payload: event,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("business_id", BUSINESS_ID)
+            .eq("source", "google_calendar")
+            .eq("external_id", write.externalId);
+
+          if (cancelError) {
+            throw new Error(cancelError.message);
+          }
+
+          cancelledEvents += 1;
+          syncedEvents += 1;
+          continue;
+        }
+
+        const { error: cancelledUpsertError } = await supabase
+          .from("booking_reservations")
+          .upsert(
+            {
+              business_id: BUSINESS_ID,
+              customer_profile_id: null,
+              calendar_id: calendar.id,
+              resource_id: null,
+              reservation_type: classifyReservationType({
+                title,
+                description,
+                location,
+              }),
+              status: "cancelled",
+              title,
+              description,
+              location,
+              starts_at: write.startsAt,
+              ends_at: write.endsAt,
+              customer_name: null,
+              customer_email: null,
+              customer_phone: null,
+              instructor_name: null,
+              instructor_email: null,
+              attendee_emails: [],
+              source: "google_calendar",
+              external_id: write.externalId,
+              html_link: event.htmlLink ?? null,
+              raw_payload: event,
+              updated_at: new Date().toISOString(),
+            },
+            {
+              onConflict: "business_id,source,external_id",
+            }
+          );
+
+        if (cancelledUpsertError) {
+          throw new Error(cancelledUpsertError.message);
+        }
+
+        cancelledEvents += 1;
+        syncedEvents += 1;
+        continue;
+      }
 
       if (!startsAt || !endsAt) {
         skippedNoTime += 1;
@@ -403,12 +507,6 @@ async function syncCalendar(input: {
         description,
         location,
       });
-
-      const status = mapGoogleStatus(event.status);
-
-      if (status === "cancelled") {
-        cancelledEvents += 1;
-      }
 
       const { error: reservationError } = await supabase
         .from("booking_reservations")
