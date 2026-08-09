@@ -1,20 +1,59 @@
 /** Default cooling-off window after uninterested language (matches legacy /api/inbound). */
 export const COOLING_OFF_DAYS = 14;
 
-export const UNINTERESTED_PHRASES = [
+/**
+ * Clear decline phrases — safe to match as substrings inside longer messages
+ * (e.g. "Thanks but not interested right now").
+ */
+export const CLEAR_UNINTERESTED_PHRASES = [
   "not interested",
+  "not right now",
+  "i’ll let you know",
+  "i'll let you know",
+] as const;
+
+/**
+ * Short / ambiguous phrases that commonly appear inside affirmative booking
+ * language ("I'm good with Saturday", "just looking for lesson times").
+ * These must match as the whole message (after light padding), not as substrings.
+ */
+export const STANDALONE_UNINTERESTED_PHRASES = [
   "maybe later",
   "i'm good",
   "im good",
-  "i’ll let you know",
-  "i'll let you know",
-  "not right now",
   "just looking",
 ] as const;
 
+export const UNINTERESTED_PHRASES = [
+  ...CLEAR_UNINTERESTED_PHRASES,
+  ...STANDALONE_UNINTERESTED_PHRASES,
+] as const;
+
+/** Strip leading thanks/ok/no filler and trailing punctuation for standalone matching. */
+function normalizeUninterestedCore(normalized: string): string {
+  let core = normalized.replace(/[!.?,…]+$/g, "").trim();
+  // Allow a couple of polite/filler prefixes: "Thanks, I'm good", "No thanks I'm good".
+  for (let i = 0; i < 2; i += 1) {
+    const stripped = core.replace(
+      /^(thanks|thank you|thx|ok|okay|nah|nope|no)[,!.\s]+/i,
+      ""
+    );
+    if (stripped === core) break;
+    core = stripped.trim();
+  }
+  return core;
+}
+
 export function isUninterestedMessage(text: string): boolean {
   const normalized = text.trim().toLowerCase();
-  return UNINTERESTED_PHRASES.some((phrase) => normalized.includes(phrase));
+  if (!normalized) return false;
+
+  if (CLEAR_UNINTERESTED_PHRASES.some((phrase) => normalized.includes(phrase))) {
+    return true;
+  }
+
+  const core = normalizeUninterestedCore(normalized);
+  return STANDALONE_UNINTERESTED_PHRASES.some((phrase) => core === phrase);
 }
 
 export function computeCoolingOffUntil(
