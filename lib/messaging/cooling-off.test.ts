@@ -13,6 +13,21 @@ describe("cooling-off helpers", () => {
   test("not interested matches uninterested phrases", () => {
     assert.equal(isUninterestedMessage("Thanks but not interested right now"), true);
     assert.equal(isUninterestedMessage("maybe later"), true);
+    assert.equal(isUninterestedMessage("I'm good."), true);
+    assert.equal(isUninterestedMessage("Thanks, I'm good"), true);
+    assert.equal(isUninterestedMessage("No thanks I'm good"), true);
+    assert.equal(isUninterestedMessage("just looking"), true);
+    assert.equal(isUninterestedMessage("not right now"), true);
+  });
+
+  test("booking affirmatives are not treated as uninterested cooling-off", () => {
+    // Substring false positives that previously set cooling_off_until for 14 days
+    // and silently suppressed AI/booking replies on the inbound loop.
+    assert.equal(isUninterestedMessage("I'm good with Saturday"), false);
+    assert.equal(isUninterestedMessage("im good for 4 players"), false);
+    assert.equal(isUninterestedMessage("just looking for lesson times"), false);
+    assert.equal(isUninterestedMessage("maybe later this week works"), false);
+    assert.equal(isUninterestedMessage("I'm good anytime after 3"), false);
   });
 
   test("stop is not treated as uninterested cooling-off language", () => {
