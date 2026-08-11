@@ -12,6 +12,7 @@ import {
 } from "../../../lib/lesson-whoosh-identity";
 import { BUSINESS_ID } from "../../../config";
 import { findCustomerProfileIdByContact } from "../../../lib/google-calendar-customer-match";
+import { syncWithFullSyncTokenRecovery } from "../../../../../lib/google-calendar/full-sync-required";
 
 const PREFERRED_GOOGLE_CALENDAR_EMAIL =
   process.env.CLOSEOS_GOOGLE_CALENDAR_ACCOUNT_EMAIL?.trim().toLowerCase() ??
@@ -579,11 +580,29 @@ export async function POST() {
 
     for (const calendar of (calendars ?? []) as BookingCalendarRow[]) {
       try {
-        const result = await syncCalendar({
-          supabase,
+        const result = await syncWithFullSyncTokenRecovery({
           calendar,
-          calendarClient,
-          whooshNameIndex,
+          sync: (cal) =>
+            syncCalendar({
+              supabase,
+              calendar: cal,
+              calendarClient,
+              whooshNameIndex,
+            }),
+          clearSyncToken: async () => {
+            const now = new Date().toISOString();
+            const { error: clearError } = await supabase
+              .from("booking_calendars")
+              .update({
+                sync_token: null,
+                updated_at: now,
+              })
+              .eq("id", calendar.id);
+
+            if (clearError) {
+              throw new Error(clearError.message);
+            }
+          },
         });
 
         results.push(result);
