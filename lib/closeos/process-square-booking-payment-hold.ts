@@ -14,6 +14,7 @@ import {
 import {
   smsAfterPaidWhooshConfirmed,
   smsAfterPaidWhooshFailed,
+  smsAfterPaidWhooshPending,
 } from "@/lib/closeos/sms-hold-copy";
 import { isCloseOsAutonomousBookingConfirmOnPayment } from "@/lib/closeos/booking-hold-config";
 import type { NormalizedWhooshAvailabilitySlot } from "@/lib/whoosh/availability";
@@ -460,16 +461,20 @@ export async function processSquarePaymentCompletedForBookingHold(opts: {
     };
   }
 
+  const whooshPending = result.outcome === "pending";
+
   await finalizeCloseOsBookingAfterWhooshConfirm(opts.supabase, closeosBookingId, {
     status: "paid_confirmed" satisfies CloseOsBookingStatus,
     payment_status: "paid",
-    confirmed_at: nextUpdated,
-    whoosh_sync_needed: false,
+    ...(whooshPending ? {} : { confirmed_at: nextUpdated }),
+    /** Pending Whoosh acceptance still needs ops/provider reconciliation. */
+    whoosh_sync_needed: whooshPending,
     raw_payload: mergeRawPayload(row, {
       square_order_id: opts.orderId ?? null,
       external_square_payment_id: opts.squarePaymentId,
       provider_booking_id: result.bookingId,
       provider_request_id: result.requestId,
+      whoosh_outcome: result.outcome,
       confirmation_hint:
         typeof result.confirmationNumber === "string" ? result.confirmationNumber :
         typeof result.bookingId === "string" ?
@@ -482,18 +487,27 @@ export async function processSquarePaymentCompletedForBookingHold(opts: {
   await sendOutboundSmsPreferringContact(
     opts.supabase,
     contactId,
-    smsAfterPaidWhooshConfirmed({
-      slotStartIso: slot.startTime,
-      partySize: bookingCreateParams.partySize,
-      confirmationCode:
-        result.confirmationNumber ?? result.bookingId ?? result.requestId,
-      bookingId: result.bookingId,
-    }),
+    whooshPending ?
+      smsAfterPaidWhooshPending({
+        slotStartIso: slot.startTime,
+        partySize: bookingCreateParams.partySize,
+        requestId: result.requestId ?? result.confirmationNumber ?? result.bookingId,
+      })
+    : smsAfterPaidWhooshConfirmed({
+        slotStartIso: slot.startTime,
+        partySize: bookingCreateParams.partySize,
+        confirmationCode:
+          result.confirmationNumber ?? result.bookingId ?? result.requestId,
+        bookingId: result.bookingId,
+      }),
     sendSms
   );
 
   return {
     handled: true,
-    outcomeSummary: `confirmed_after_square_${result.outcome}`,
+    outcomeSummary:
+      whooshPending ?
+        "paid_confirmed_whoosh_pending_sync_needed"
+      : `confirmed_after_square_${result.outcome}`,
   };
 }

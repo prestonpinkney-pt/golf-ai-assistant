@@ -66,6 +66,26 @@ export function smsAfterPaidWhooshConfirmed(opts: {
   return `Confirmed for ${dt} for ${opts.partySize} players.${refPhrase} Thanks for playing Primetime Golf!`;
 }
 
+/**
+ * Whoosh accepted the request as pending (not yet confirmed). Payment is recorded;
+ * avoid "Confirmed for" until the provider confirms the bay.
+ */
+export function smsAfterPaidWhooshPending(opts: {
+  slotStartIso: string;
+  partySize: number;
+  requestId: string | null;
+}): string {
+  const startShow = DateTime.fromISO(opts.slotStartIso, { zone: "utc" }).setZone("America/Los_Angeles");
+  const dt = startShow.isValid ?
+    `${startShow.toFormat("cccc, LLL d")} ${startShow.toFormat("h:mm a")}`
+  : "your selected time";
+  const ref = opts.requestId?.trim() ? ` Reference: ${opts.requestId.trim()}.` : "";
+  return (
+    `Payment received — your booking request is in for ${dt} for ${opts.partySize} players.` +
+    `${ref} We'll confirm the bay shortly. Thanks for playing Primetime Golf!`
+  );
+}
+
 export function smsAfterPaidWhooshFailed(): string {
   return WHOOSH_BOOKING_TROUBLE_HANDOFF_REPLY;
 }

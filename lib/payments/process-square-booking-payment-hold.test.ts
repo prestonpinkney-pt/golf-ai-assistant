@@ -299,6 +299,52 @@ describe("processSquarePaymentCompletedForBookingHold", () => {
     assert.equal(meta.received_cents, 1234);
   });
 
+  test("Whoosh pending after payment → paid_confirmed + whoosh_sync_needed + pending SMS (not Confirmed for)", async () => {
+    process.env.WHOOSH_BOOKING_GUEST_MEMBER_NUMBER = "guest-unit";
+
+    const sendCalls: Parameters<typeof sendMessage>[0][] = [];
+    const id = randomUUID();
+    const contactId = randomUUID();
+    const { supabase, getBookingSnapshot } = createBookingHoldFakeSb({
+      booking: makeHoldRow({ id, contact_id: contactId }),
+    });
+
+    const res = await processSquarePaymentCompletedForBookingHold({
+      supabase,
+      accessTokenSquare: "tok",
+      closeosBookingId: id,
+      squarePaymentId: "paid_pending_whoosh_outcome",
+      amountCents: 8400,
+      deps: {
+        now: FIXED_WEBHOOK_AT,
+        sendMessage: async (inp) => {
+          sendCalls.push(inp);
+          return { success: true, provider: "test", external_id: "x", status: "queued" };
+        },
+        createWhooshBooking: async (): Promise<WhooshBookingResult> => ({
+          ok: true,
+          outcome: "pending",
+          bookingId: null,
+          requestId: "req-pending-42",
+          confirmationNumber: "req-pending-42",
+          startTime: "2026-05-09T03:40:00.000Z",
+          endTime: "2026-05-09T04:40:00.000Z",
+          raw: {},
+        }),
+      },
+    });
+
+    assert.equal(res.outcomeSummary, "paid_confirmed_whoosh_pending_sync_needed");
+    const snap = getBookingSnapshot();
+    assert.equal(snap.status, "paid_confirmed");
+    assert.equal(snap.payment_status, "paid");
+    assert.equal(snap.whoosh_sync_needed, true);
+    assert.equal(snap.confirmed_at, undefined);
+    assert.equal(sendCalls.length, 1);
+    assert.ok(sendCalls[0]!.message.includes("booking request is in"));
+    assert.ok(!sendCalls[0]!.message.includes("Confirmed for"));
+  });
+
   test("already confirmed is idempotent; does not add another confirmation SMS pass", async () => {
     const sendCalls: Parameters<typeof sendMessage>[0][] = [];
     let whooshAttempts = 0;
