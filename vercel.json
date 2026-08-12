@@ -10,7 +10,11 @@
     },
     {
       "path": "/api/cron/process-webhook-jobs",
-      "schedule": "0 8 * * *"
+      "schedule": "*/5 * * * *"
+    },
+    {
+      "path": "/api/cron/flush-deferred-outbound",
+      "schedule": "*/15 * * * *"
     }
   ]
 }

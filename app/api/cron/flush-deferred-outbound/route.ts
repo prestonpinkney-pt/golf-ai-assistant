@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { gateCron } from "../../lib/require-auth";
-import { claimAndProcessSentDmWebhookJobs } from "@/lib/sentdm/process-webhook-job";
+import { flushDeferredQuietHoursOutbound } from "@/lib/sentdm/flush-deferred-outbound";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -19,23 +19,18 @@ function getSupabase() {
 }
 
 /**
- * Vercel cron drain for Sent.dm webhook_jobs (every 5 min — see vercel.json).
- * Auth: Authorization Bearer CRON_SECRET (injected by Vercel Cron).
+ * Flushes AI outbound drafts deferred during quiet hours once the window opens.
+ * Schedule: every 15 minutes (see vercel.json). Auth: Bearer CRON_SECRET.
  */
-async function drain(limit: number) {
-  const supabase = getSupabase();
-  return claimAndProcessSentDmWebhookJobs(supabase, limit);
-}
-
 export async function GET(request: NextRequest) {
   const denied = gateCron(request);
   if (denied) return denied;
 
   try {
-    const processed = await drain(50);
-    return NextResponse.json({ ok: true, processed }, { status: 200 });
+    const result = await flushDeferredQuietHoursOutbound(getSupabase(), 40);
+    return NextResponse.json({ ok: true, ...result }, { status: 200 });
   } catch (e) {
-    console.error("[cron/process-webhook-jobs]", e);
+    console.error("[cron/flush-deferred-outbound]", e);
     return NextResponse.json(
       { ok: false, error: e instanceof Error ? e.message : String(e) },
       { status: 500 }
