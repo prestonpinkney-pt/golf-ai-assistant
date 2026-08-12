@@ -134,358 +134,32 @@ export async function POST(
       continue;
     }
 
-    const messageText = (cm.message_text as string)?.trim() ?? "";
-    if (!messageText || messageText.length > MAX_MESSAGE_LENGTH) {
-      const err = !messageText ? "Empty message" : "Message too long";
-      await supabase
-        .from("campaign_messages")
-        .update({
-          status: "failed",
-          failed_at: new Date().toISOString(),
-          error_message: err,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", messageId);
-      results.push({ id: messageId, outcome: "failed", error: err });
-      continue;
-    }
-
-    const rawPhone = typeof cm.phone === "string" ? cm.phone.trim() : "";
-    const toPhone = normalizePhone(rawPhone || null);
-    if (!toPhone || !isLikelyE164Phone(toPhone)) {
-      const err = "Invalid or missing E.164 phone";
-      await supabase
-        .from("campaign_messages")
-        .update({
-          status: "failed",
-          failed_at: new Date().toISOString(),
-          error_message: err,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", messageId);
-      await logMessagingAudit(supabase, {
-        event_type: "campaign_send_blocked_invalid_phone",
-        entity_type: "campaign_message",
-        entity_id: messageId,
-        metadata: {
-          business_id: businessId,
-          user_id: userId,
-          campaign_id: campaignId,
-          phone: rawPhone || null,
-        },
-      });
-      results.push({ id: messageId, outcome: "failed", error: err });
-      continue;
-    }
-
-    const allowTest = evaluateCampaignTestAllowlist(toPhone);
-    if (!allowTest.allowed) {
-      const now = new Date().toISOString();
-      await supabase
-        .from("campaign_messages")
-        .update({
-          status: "failed",
-          failed_at: now,
-          error_message: allowTest.detail,
-          updated_at: now,
-        })
-        .eq("id", messageId);
-      await logMessagingAudit(supabase, {
-        event_type: "campaign_send_blocked_test_allowlist",
-        entity_type: "campaign_message",
-        entity_id: messageId,
-        metadata: {
-          business_id: businessId,
-          user_id: userId,
-          campaign_id: campaignId,
-          phone: toPhone,
-        },
-      });
-      results.push({ id: messageId, outcome: "failed", error: allowTest.detail });
-      continue;
-    }
-
-    const { data: contact } = await supabase
-      .from("contacts")
-      .select("id, name, phone, sms_opt_out, cooling_off_until")
-      .eq("phone", toPhone)
-      .maybeSingle();
-
-    if (contact?.sms_opt_out) {
-      const now = new Date().toISOString();
-      await supabase
-        .from("campaign_messages")
-        .update({
-          status: "failed",
-          failed_at: now,
-          error_message: "Contact opted out of SMS",
-          contact_id: contact.id as string,
-          updated_at: now,
-        })
-        .eq("id", messageId);
-      await logMessagingAudit(supabase, {
-        event_type: "campaign_send_blocked_opt_out",
-        entity_type: "campaign_message",
-        entity_id: messageId,
-        metadata: {
-          business_id: businessId,
-          user_id: userId,
-          campaign_id: campaignId,
-          contact_id: contact.id,
-        },
-      });
-      results.push({
-        id: messageId,
-        outcome: "failed",
-        error: "Contact has opted out of SMS",
-      });
-      continue;
-    }
-
-    if (
-      contact &&
-      contact.cooling_off_until &&
-      new Date(contact.cooling_off_until as string) > new Date()
-    ) {
-      const now = new Date().toISOString();
-      await supabase
-        .from("campaign_messages")
-        .update({
-          status: "failed",
-          failed_at: now,
-          error_message: "Contact is in a cooling-off period",
-          contact_id: contact.id as string,
-          updated_at: now,
-        })
-        .eq("id", messageId);
-      await logMessagingAudit(supabase, {
-        event_type: "campaign_send_blocked_cooling_off",
-        entity_type: "campaign_message",
-        entity_id: messageId,
-        metadata: {
-          business_id: businessId,
-          user_id: userId,
-          campaign_id: campaignId,
-          contact_id: contact.id,
-        },
-      });
-      results.push({
-        id: messageId,
-        outcome: "failed",
-        error: "Cooling-off period active",
-      });
-      continue;
-    }
-
-    const policy = await evaluateCampaignRecipientPolicy(supabase, {
-      contactId: (contact?.id as string | undefined) ?? null,
-      phone: toPhone,
-      smsOptOut: false,
-    });
-    if (!policy.allowed) {
-      const now = new Date().toISOString();
-      await supabase
-        .from("campaign_messages")
-        .update({
-          status: "failed",
-          failed_at: now,
-          error_message: policy.detail,
-          contact_id: contact?.id ?? null,
-          updated_at: now,
-        })
-        .eq("id", messageId);
-      await logMessagingAudit(supabase, {
-        event_type: "campaign_send_blocked_policy",
-        entity_type: "campaign_message",
-        entity_id: messageId,
-        metadata: {
-          business_id: businessId,
-          user_id: userId,
-          campaign_id: campaignId,
-          reason: policy.reason,
-          policy_reason_codes: policy.policyReasonCodes,
-        },
-      });
-      results.push({ id: messageId, outcome: "failed", error: policy.detail });
-      continue;
-    }
-
-    const contactId = (contact?.id as string | undefined) ?? null;
-    let conversationId: string | null = null;
-    let leadId: string | null = null;
-
-    if (contactId) {
-      const { data: conv } = await supabase
-        .from("conversations")
-        .select("id, lead_id")
-        .eq("contact_id", contactId)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
-      if (conv) {
-        conversationId = conv.id as string;
-        leadId = (conv.lead_id as string | null) ?? null;
-      }
-    }
-
-    let outboundMessageId: string | null = null;
-
-    const insertPayload = {
-      conversation_id: conversationId,
-      contact_id: contactId,
-      lead_id: leadId,
-      direction: "outbound" as const,
-      channel: "sms",
-      contact_phone: toPhone,
-      message_text: messageText,
-      status: "pending_send" as const,
-      delivery_status: "not_sent" as const,
-      ai_generated: false,
-      metadata: {
-        campaign_id: campaignId,
-        campaign_message_id: messageId,
-        business_id: businessId,
-        operator_user_id: userId,
-        campaign_send: true,
-      },
-    };
-
-    const { data: outboundMessage, error: insertError } = await supabase
-      .from("messages")
-      .insert(insertPayload)
-      .select()
-      .single();
-
-    if (insertError) {
-      console.error(
-        "campaign send messages insert skipped:",
-        insertError.message
-      );
-    } else if (outboundMessage) {
-      outboundMessageId = outboundMessage.id as string;
-    }
-
-    const displayName =
-      (typeof cm.contact_name === "string" && cm.contact_name.trim()) ||
-      (typeof contact?.name === "string" ? contact.name : null);
-
     try {
-      const result = await sendMessage({
-        channel: "sms",
-        to: toPhone,
-        message: messageText,
-        name: displayName,
+      await sendOneClaimedCampaignMessage({
+        supabase,
+        cm: cm as Record<string, unknown>,
+        messageId,
+        campaignId,
+        businessId,
+        userId,
+        results,
       });
-
-      const sendStatus = result.status || "queued";
-      const sentAt = new Date().toISOString();
-
-      if (outboundMessageId) {
-        await supabase
-          .from("messages")
-          .update({
-            status: sendStatus,
-            provider: result.provider,
-            external_id: result.external_id,
-            provider_message_id: result.external_id,
-            delivery_status: sendStatus,
-            sent_at: sentAt,
-          })
-          .eq("id", outboundMessageId);
-
-        if (conversationId) {
-          await supabase
-            .from("conversations")
-            .update({
-              last_message_at: sentAt,
-              last_outbound_at: sentAt,
-            })
-            .eq("id", conversationId);
-        }
-      }
-
-      await supabase
-        .from("campaign_messages")
-        .update({
-          status: "sent",
-          sent_at: sentAt,
-          delivery_status: sendStatus,
-          external_id: result.external_id,
-          contact_id: contactId,
-          conversation_id: conversationId,
-          error_message: null,
-          failed_at: null,
-          updated_at: sentAt,
-        })
-        .eq("id", messageId);
-
-      await logMessagingAudit(supabase, {
-        event_type: "campaign_message_sent",
-        entity_type: "campaign_message",
-        entity_id: messageId,
-        metadata: {
-          business_id: businessId,
-          user_id: userId,
-          campaign_id: campaignId,
-          messages_row_id: outboundMessageId,
-          provider: result.provider,
-          external_id: result.external_id,
-          status: sendStatus,
-        },
-      });
-
-      results.push({ id: messageId, outcome: "sent" });
-    } catch (sendErr: unknown) {
-      const sendErrorMessage = errorMessage(sendErr, "Provider send failed");
+    } catch (unexpected: unknown) {
+      const err = errorMessage(unexpected, "Unexpected campaign send error");
       const failedAt = new Date().toISOString();
-
-      if (outboundMessageId) {
-        await supabase
-          .from("messages")
-          .update({
-            status: "failed",
-            delivery_status: "failed",
-            metadata: {
-              send_error: sendErrorMessage,
-              campaign_id: campaignId,
-              campaign_message_id: messageId,
-            },
-          })
-          .eq("id", outboundMessageId);
-      }
-
       await supabase
         .from("campaign_messages")
         .update({
           status: "failed",
           failed_at: failedAt,
-          error_message: sendErrorMessage,
-          contact_id: contactId,
-          conversation_id: conversationId,
+          error_message: err,
           updated_at: failedAt,
         })
-        .eq("id", messageId);
-
-      await logMessagingAudit(supabase, {
-        event_type: "campaign_message_send_failed",
-        entity_type: "campaign_message",
-        entity_id: messageId,
-        metadata: {
-          business_id: businessId,
-          user_id: userId,
-          campaign_id: campaignId,
-          messages_row_id: outboundMessageId,
-          error: sendErrorMessage,
-        },
-      });
-
-      results.push({
-        id: messageId,
-        outcome: "failed",
-        error: sendErrorMessage,
-      });
+        .eq("id", messageId)
+        .eq("status", "sending");
+      results.push({ id: messageId, outcome: "failed", error: err });
+      console.error("campaign send unexpected:", err);
     }
-
   }
 
   await logMessagingAudit(supabase, {
@@ -511,4 +185,380 @@ export async function POST(
     sent: results.filter((r) => r.outcome === "sent").length,
     failed: results.filter((r) => r.outcome === "failed").length,
   });
+}
+
+async function sendOneClaimedCampaignMessage(input: {
+  supabase: ReturnType<typeof createSupabaseServiceRoleClient>;
+  cm: Record<string, unknown>;
+  messageId: string;
+  campaignId: string;
+  businessId: string;
+  userId: string;
+  results: {
+    id: string;
+    outcome: "sent" | "failed";
+    error?: string;
+  }[];
+}) {
+  const {
+    supabase,
+    cm,
+    messageId,
+    campaignId,
+    businessId,
+    userId,
+    results,
+  } = input;
+
+  const messageText = (cm.message_text as string)?.trim() ?? "";
+  if (!messageText || messageText.length > MAX_MESSAGE_LENGTH) {
+    const err = !messageText ? "Empty message" : "Message too long";
+    await supabase
+      .from("campaign_messages")
+      .update({
+        status: "failed",
+        failed_at: new Date().toISOString(),
+        error_message: err,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", messageId);
+    results.push({ id: messageId, outcome: "failed", error: err });
+    return;
+  }
+
+  const rawPhone = typeof cm.phone === "string" ? cm.phone.trim() : "";
+  const toPhone = normalizePhone(rawPhone || null);
+  if (!toPhone || !isLikelyE164Phone(toPhone)) {
+    const err = "Invalid or missing E.164 phone";
+    await supabase
+      .from("campaign_messages")
+      .update({
+        status: "failed",
+        failed_at: new Date().toISOString(),
+        error_message: err,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", messageId);
+    await logMessagingAudit(supabase, {
+      event_type: "campaign_send_blocked_invalid_phone",
+      entity_type: "campaign_message",
+      entity_id: messageId,
+      metadata: {
+        business_id: businessId,
+        user_id: userId,
+        campaign_id: campaignId,
+        phone: rawPhone || null,
+      },
+    });
+    results.push({ id: messageId, outcome: "failed", error: err });
+    return;
+  }
+
+  const allowTest = evaluateCampaignTestAllowlist(toPhone);
+  if (!allowTest.allowed) {
+    const now = new Date().toISOString();
+    await supabase
+      .from("campaign_messages")
+      .update({
+        status: "failed",
+        failed_at: now,
+        error_message: allowTest.detail,
+        updated_at: now,
+      })
+      .eq("id", messageId);
+    await logMessagingAudit(supabase, {
+      event_type: "campaign_send_blocked_test_allowlist",
+      entity_type: "campaign_message",
+      entity_id: messageId,
+      metadata: {
+        business_id: businessId,
+        user_id: userId,
+        campaign_id: campaignId,
+        phone: toPhone,
+      },
+    });
+    results.push({ id: messageId, outcome: "failed", error: allowTest.detail });
+    return;
+  }
+
+  const { data: contact } = await supabase
+    .from("contacts")
+    .select("id, name, phone, sms_opt_out, cooling_off_until")
+    .eq("phone", toPhone)
+    .maybeSingle();
+
+  if (contact?.sms_opt_out) {
+    const now = new Date().toISOString();
+    await supabase
+      .from("campaign_messages")
+      .update({
+        status: "failed",
+        failed_at: now,
+        error_message: "Contact opted out of SMS",
+        contact_id: contact.id as string,
+        updated_at: now,
+      })
+      .eq("id", messageId);
+    await logMessagingAudit(supabase, {
+      event_type: "campaign_send_blocked_opt_out",
+      entity_type: "campaign_message",
+      entity_id: messageId,
+      metadata: {
+        business_id: businessId,
+        user_id: userId,
+        campaign_id: campaignId,
+        contact_id: contact.id,
+      },
+    });
+    results.push({
+      id: messageId,
+      outcome: "failed",
+      error: "Contact has opted out of SMS",
+    });
+    return;
+  }
+
+  if (
+    contact &&
+    contact.cooling_off_until &&
+    new Date(contact.cooling_off_until as string) > new Date()
+  ) {
+    const now = new Date().toISOString();
+    await supabase
+      .from("campaign_messages")
+      .update({
+        status: "failed",
+        failed_at: now,
+        error_message: "Contact is in a cooling-off period",
+        contact_id: contact.id as string,
+        updated_at: now,
+      })
+      .eq("id", messageId);
+    await logMessagingAudit(supabase, {
+      event_type: "campaign_send_blocked_cooling_off",
+      entity_type: "campaign_message",
+      entity_id: messageId,
+      metadata: {
+        business_id: businessId,
+        user_id: userId,
+        campaign_id: campaignId,
+        contact_id: contact.id,
+      },
+    });
+    results.push({
+      id: messageId,
+      outcome: "failed",
+      error: "Cooling-off period active",
+    });
+    return;
+  }
+
+  const policy = await evaluateCampaignRecipientPolicy(supabase, {
+    contactId: (contact?.id as string | undefined) ?? null,
+    phone: toPhone,
+    smsOptOut: false,
+  });
+  if (!policy.allowed) {
+    const now = new Date().toISOString();
+    await supabase
+      .from("campaign_messages")
+      .update({
+        status: "failed",
+        failed_at: now,
+        error_message: policy.detail,
+        contact_id: contact?.id ?? null,
+        updated_at: now,
+      })
+      .eq("id", messageId);
+    await logMessagingAudit(supabase, {
+      event_type: "campaign_send_blocked_policy",
+      entity_type: "campaign_message",
+      entity_id: messageId,
+      metadata: {
+        business_id: businessId,
+        user_id: userId,
+        campaign_id: campaignId,
+        reason: policy.reason,
+        policy_reason_codes: policy.policyReasonCodes,
+      },
+    });
+    results.push({ id: messageId, outcome: "failed", error: policy.detail });
+    return;
+  }
+
+  const contactId = (contact?.id as string | undefined) ?? null;
+  let conversationId: string | null = null;
+  let leadId: string | null = null;
+
+  if (contactId) {
+    const { data: conv } = await supabase
+      .from("conversations")
+      .select("id, lead_id")
+      .eq("contact_id", contactId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (conv) {
+      conversationId = conv.id as string;
+      leadId = (conv.lead_id as string | null) ?? null;
+    }
+  }
+
+  let outboundMessageId: string | null = null;
+
+  const insertPayload = {
+    conversation_id: conversationId,
+    contact_id: contactId,
+    lead_id: leadId,
+    direction: "outbound" as const,
+    channel: "sms",
+    contact_phone: toPhone,
+    message_text: messageText,
+    status: "pending_send" as const,
+    delivery_status: "not_sent" as const,
+    ai_generated: false,
+    metadata: {
+      campaign_id: campaignId,
+      campaign_message_id: messageId,
+      business_id: businessId,
+      operator_user_id: userId,
+      campaign_send: true,
+    },
+  };
+
+  const { data: outboundMessage, error: insertError } = await supabase
+    .from("messages")
+    .insert(insertPayload)
+    .select()
+    .single();
+
+  if (insertError) {
+    console.error(
+      "campaign send messages insert skipped:",
+      insertError.message
+    );
+  } else if (outboundMessage) {
+    outboundMessageId = outboundMessage.id as string;
+  }
+
+  const displayName =
+    (typeof cm.contact_name === "string" && cm.contact_name.trim()) ||
+    (typeof contact?.name === "string" ? contact.name : null);
+
+  try {
+    const result = await sendMessage({
+      channel: "sms",
+      to: toPhone,
+      message: messageText,
+      name: displayName,
+    });
+
+    const sendStatus = result.status || "queued";
+    const sentAt = new Date().toISOString();
+
+    if (outboundMessageId) {
+      await supabase
+        .from("messages")
+        .update({
+          status: sendStatus,
+          provider: result.provider,
+          external_id: result.external_id,
+          provider_message_id: result.external_id,
+          delivery_status: sendStatus,
+          sent_at: sentAt,
+        })
+        .eq("id", outboundMessageId);
+
+      if (conversationId) {
+        await supabase
+          .from("conversations")
+          .update({
+            last_message_at: sentAt,
+            last_outbound_at: sentAt,
+          })
+          .eq("id", conversationId);
+      }
+    }
+
+    await supabase
+      .from("campaign_messages")
+      .update({
+        status: "sent",
+        sent_at: sentAt,
+        delivery_status: sendStatus,
+        external_id: result.external_id,
+        contact_id: contactId,
+        conversation_id: conversationId,
+        error_message: null,
+        failed_at: null,
+        updated_at: sentAt,
+      })
+      .eq("id", messageId);
+
+    await logMessagingAudit(supabase, {
+      event_type: "campaign_message_sent",
+      entity_type: "campaign_message",
+      entity_id: messageId,
+      metadata: {
+        business_id: businessId,
+        user_id: userId,
+        campaign_id: campaignId,
+        messages_row_id: outboundMessageId,
+        provider: result.provider,
+        external_id: result.external_id,
+        status: sendStatus,
+      },
+    });
+
+    results.push({ id: messageId, outcome: "sent" });
+  } catch (sendErr: unknown) {
+    const sendErrorMessage = errorMessage(sendErr, "Provider send failed");
+    const failedAt = new Date().toISOString();
+
+    if (outboundMessageId) {
+      await supabase
+        .from("messages")
+        .update({
+          status: "failed",
+          delivery_status: "failed",
+          metadata: {
+            send_error: sendErrorMessage,
+            campaign_id: campaignId,
+            campaign_message_id: messageId,
+          },
+        })
+        .eq("id", outboundMessageId);
+    }
+
+    await supabase
+      .from("campaign_messages")
+      .update({
+        status: "failed",
+        failed_at: failedAt,
+        error_message: sendErrorMessage,
+        contact_id: contactId,
+        conversation_id: conversationId,
+        updated_at: failedAt,
+      })
+      .eq("id", messageId);
+
+    await logMessagingAudit(supabase, {
+      event_type: "campaign_message_send_failed",
+      entity_type: "campaign_message",
+      entity_id: messageId,
+      metadata: {
+        business_id: businessId,
+        user_id: userId,
+        campaign_id: campaignId,
+        messages_row_id: outboundMessageId,
+        error: sendErrorMessage,
+      },
+    });
+
+    results.push({
+      id: messageId,
+      outcome: "failed",
+      error: sendErrorMessage,
+    });
+  }
 }
