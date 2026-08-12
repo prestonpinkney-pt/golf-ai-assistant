@@ -7,7 +7,8 @@ import { DateTime } from "luxon";
  * When quiet hours are active, outbound SMS can optionally be deferred while still allowing AI drafting:
  * set CLOSEOS_QUIET_HOURS_DEFER_OUTBOUND_SEND=false to keep the legacy "no AI during quiet hours" behavior;
  * leave unset or true to defer only immediate sends (see lib/agent/business-rules-gate.ts).
- * Deferred `pending_send` drafts are flushed by `/api/cron/flush-deferred-outbound` once the window ends.
+ * Deferred `pending_send` drafts are flushed by `/api/cron/flush-deferred-outbound`
+ * (Hobby-safe daily cron after the default quiet window ends).
  */
 export function isInboundQuietHoursActive(): boolean {
   const enabled = (process.env.CLOSEOS_QUIET_HOURS_ENABLED || "")

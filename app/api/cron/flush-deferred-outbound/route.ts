@@ -20,7 +20,9 @@ function getSupabase() {
 
 /**
  * Flushes AI outbound drafts deferred during quiet hours once the window opens.
- * Schedule: every 15 minutes (see vercel.json). Auth: Bearer CRON_SECRET.
+ * Hobby-compatible daily cron (see vercel.json `0 16 * * *` ≈ after default
+ * 08:00 America/Los_Angeles quiet-hours end). Handler no-ops while quiet hours
+ * are still active. Auth: Bearer CRON_SECRET.
  */
 export async function GET(request: NextRequest) {
   const denied = gateCron(request);

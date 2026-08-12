@@ -19,12 +19,20 @@ function getSupabase() {
 }
 
 /**
- * Vercel cron drain for Sent.dm webhook_jobs (every 5 min — see vercel.json).
+ * Vercel cron drain for Sent.dm webhook_jobs.
+ * Hobby plans only allow once-daily cron expressions — keep `0 8 * * *` in
+ * vercel.json and loop batches here so a large backlog can still clear in one run.
  * Auth: Authorization Bearer CRON_SECRET (injected by Vercel Cron).
  */
-async function drain(limit: number) {
+async function drain(limitPerBatch: number, maxBatches = 20) {
   const supabase = getSupabase();
-  return claimAndProcessSentDmWebhookJobs(supabase, limit);
+  let processed = 0;
+  for (let i = 0; i < maxBatches; i++) {
+    const n = await claimAndProcessSentDmWebhookJobs(supabase, limitPerBatch);
+    processed += n;
+    if (n < limitPerBatch) break;
+  }
+  return processed;
 }
 
 export async function GET(request: NextRequest) {
