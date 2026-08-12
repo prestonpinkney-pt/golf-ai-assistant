@@ -38,6 +38,12 @@ import {
   runInboundSmsBookingAugmentationPhase,
 } from "@/lib/sentdm/inbound-sms-booking-phase";
 import { finalizeLiveSmsOutboundText } from "@/lib/sentdm/live-sms-outbound-finalize";
+import {
+  findOutboundLinkedToInbound,
+  linkedOutboundAlreadySent,
+  linkedOutboundNeedsProviderResend,
+  readOutboundSmsBody,
+} from "@/lib/sentdm/inbound-outbound-link";
 import { isInboundQuietHoursActive } from "@/lib/messaging/quiet-hours";
 import { logMessagingAudit } from "@/lib/messaging/audit";
 import { postgrestMissingBusinessIdColumn } from "@/lib/supabase-postgrest-errors";
@@ -651,8 +657,117 @@ export async function runSentDmInboundConversationLoop(params: {
         .select("id")
         .eq("conversation_id", conversation!.id as string)
         .eq("external_id", externalId)
+        .eq("direction", "inbound")
         .maybeSingle();
       if (dupeMsg) {
+        const inboundId = String(dupeMsg.id);
+        const { data: recentOutbound } = await supabase
+          .from("messages")
+          .select(
+            "id, status, delivery_status, message_text, body, channel, contact_phone, metadata"
+          )
+          .eq("conversation_id", conversation!.id as string)
+          .eq("direction", "outbound")
+          .order("created_at", { ascending: false })
+          .limit(25);
+
+        const linked = findOutboundLinkedToInbound(
+          (recentOutbound ?? []) as Array<{
+            id: unknown;
+            status?: unknown;
+            delivery_status?: unknown;
+            message_text?: unknown;
+            body?: unknown;
+            channel?: unknown;
+            contact_phone?: unknown;
+            metadata?: unknown;
+          }>,
+          inboundId
+        );
+
+        // Provider send failed after outbound row was saved (e.g. Whoosh booked
+        // then Sent.dm threw). Retry send instead of treating as a completed duplicate.
+        if (linked && linkedOutboundNeedsProviderResend(linked)) {
+          const resendBody = readOutboundSmsBody(linked);
+          const toPhone =
+            (typeof linked.contact_phone === "string" &&
+            linked.contact_phone.trim()
+              ? linked.contact_phone.trim()
+              : phone) || phone;
+          if (resendBody && isLikelyE164Phone(toPhone)) {
+            try {
+              const channel =
+                linked.channel === "rcs" ? "rcs"
+                : inboundChannel === "rcs" ? "rcs"
+                : "sms";
+              const sendRes = await sendSentDmMessage({
+                to: toPhone.trim(),
+                message: resendBody,
+                channel,
+                name:
+                  typeof contact?.name === "string" ? contact.name : null,
+                businessName: businessConfig.name,
+                idempotencyKey: String(linked.id),
+              });
+              const sentAt = new Date().toISOString();
+              await supabase
+                .from("messages")
+                .update({
+                  status: sendRes.status ?? "queued",
+                  delivery_status: sendRes.status ?? "queued",
+                  provider: sendRes.provider,
+                  external_id: sendRes.external_id,
+                  provider_message_id: sendRes.external_id,
+                  sent_at: sentAt,
+                })
+                .eq("id", linked.id);
+              await supabase
+                .from("conversations")
+                .update({
+                  last_outbound_at: sentAt,
+                  last_ai_message_at: sentAt,
+                })
+                .eq("id", conversation!.id as string);
+              await supabase
+                .from("inbound_events")
+                .update({ status: "processed", error_message: null })
+                .eq("id", inboundEventId);
+              await audit(supabase, {
+                event_type: "sentdm_loop_failed_outbound_resent",
+                entity_type: "message",
+                entity_id: String(linked.id),
+                metadata: {
+                  external_id: externalId,
+                  inbound_message_id: inboundId,
+                  provider_message_id: sendRes.external_id,
+                },
+              });
+              return {
+                ok: true,
+                statusCode: 200,
+                body: {
+                  resent_failed_outbound: true,
+                  outbound_message_id: linked.id,
+                  inbound_message_id: inboundId,
+                  dedup_external_id: externalId,
+                },
+              };
+            } catch (e: unknown) {
+              const msg = safeErrorMessage(e, "failed_outbound_resend");
+              await failInbound(msg, "failed_outbound_resend");
+              return {
+                ok: false,
+                statusCode: 503,
+                body: {
+                  step: "failed_outbound_resend",
+                  error: msg,
+                  outbound_message_id: linked.id,
+                },
+              };
+            }
+          }
+        }
+
         await supabase
           .from("inbound_events")
           .update({ status: "processed", error_message: null })
@@ -660,8 +775,14 @@ export async function runSentDmInboundConversationLoop(params: {
         await audit(supabase, {
           event_type: "sentdm_loop_inbound_duplicate",
           entity_type: "message",
-          entity_id: String(dupeMsg.id),
-          metadata: { external_id: externalId },
+          entity_id: inboundId,
+          metadata: {
+            external_id: externalId,
+            linked_outbound_id: linked?.id ?? null,
+            linked_already_sent: linked
+              ? linkedOutboundAlreadySent(linked)
+              : false,
+          },
         });
         return {
           ok: true,
@@ -1323,7 +1444,13 @@ export async function runSentDmInboundConversationLoop(params: {
     );
     let conversationHistoryAscending: ConversationHistoryMessage[] = [];
 
-    if (inboundChannel === "sms") {
+    // Quiet-hours defer (and other blockImmediateOutbound gates that still
+    // continue to AI) must not run Whoosh/Square booking side effects when the
+    // confirmation SMS cannot be sent this turn — otherwise the customer is
+    // booked with no confirmation and no flush path.
+    const skipBookingSideEffects = deferOutboundSms === true;
+
+    if (inboundChannel === "sms" && !skipBookingSideEffects) {
       const phase = await runInboundSmsBookingAugmentationPhase({
         supabase,
         conversationId: conversation!.id as string,
@@ -1336,6 +1463,23 @@ export async function runSentDmInboundConversationLoop(params: {
       });
       smsBookingFlow = phase.smsBookingFlow;
       conversationHistoryAscending = phase.conversationHistory;
+    } else if (inboundChannel === "sms" && skipBookingSideEffects) {
+      conversationHistoryAscending = await loadSmsConversationHistoryAscending(
+        supabase,
+        conversation!.id as string
+      );
+      smsBookingFlow = createSmsBookingNoneAugmentation(
+        "quiet_hours_or_defer_skip_booking_side_effects"
+      );
+      await audit(supabase, {
+        event_type: "sentdm_loop_booking_skipped_defer_outbound",
+        entity_type: "conversation",
+        entity_id: String(conversation!.id),
+        metadata: {
+          gate_reason: gate.reason,
+          defer_outbound_sms: true,
+        },
+      });
     }
 
     const smsBookingMetadata = buildSmsBookingFlowMetadataRecord(smsBookingFlow);
@@ -1720,8 +1864,24 @@ export async function runSentDmInboundConversationLoop(params: {
           metadata: {
             error: msg,
             provider_send_blocker: "sentdm_api_error",
+            booking_confirmed_by_whoosh: bookingConfirmedFlag,
           },
         });
+        // Whoosh/Square may already have mutated state; do not mark the inbound
+        // processed — leave failed so retries can resend the linked outbound.
+        if (bookingConfirmedFlag) {
+          await failInbound(msg, "provider_send_after_booking");
+          return {
+            ok: false,
+            statusCode: 503,
+            body: {
+              step: "provider_send_after_booking",
+              error: msg,
+              outbound_message_id: outboundMessage.id,
+              booking_confirmed_by_whoosh: true,
+            },
+          };
+        }
       }
     } else {
       await supabase
@@ -1738,6 +1898,7 @@ export async function runSentDmInboundConversationLoop(params: {
             allowlist_passed: sendDecision.allowlistPassed,
             quiet_hours_active: sendDecision.quietHoursActive,
             live_agent_test_mode: sendDecision.liveAgentTestMode,
+            deferred_outbound: deferOutboundSms === true,
           },
         })
         .eq("id", outboundMessage.id);

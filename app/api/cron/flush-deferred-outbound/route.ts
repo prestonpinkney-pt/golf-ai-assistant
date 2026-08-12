@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { gateCron } from "../../lib/require-auth";
-import { claimAndProcessSentDmWebhookJobs } from "@/lib/sentdm/process-webhook-job";
+import { flushDeferredQuietHoursOutbound } from "@/lib/sentdm/flush-deferred-outbound";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -19,31 +19,20 @@ function getSupabase() {
 }
 
 /**
- * Vercel cron drain for Sent.dm webhook_jobs.
- * Hobby plans only allow once-daily cron expressions — keep `0 8 * * *` in
- * vercel.json and loop batches here so a large backlog can still clear in one run.
- * Auth: Authorization Bearer CRON_SECRET (injected by Vercel Cron).
+ * Flushes AI outbound drafts deferred during quiet hours once the window opens.
+ * Hobby-compatible daily cron (see vercel.json `0 16 * * *` ≈ after default
+ * 08:00 America/Los_Angeles quiet-hours end). Handler no-ops while quiet hours
+ * are still active. Auth: Bearer CRON_SECRET.
  */
-async function drain(limitPerBatch: number, maxBatches = 20) {
-  const supabase = getSupabase();
-  let processed = 0;
-  for (let i = 0; i < maxBatches; i++) {
-    const n = await claimAndProcessSentDmWebhookJobs(supabase, limitPerBatch);
-    processed += n;
-    if (n < limitPerBatch) break;
-  }
-  return processed;
-}
-
 export async function GET(request: NextRequest) {
   const denied = gateCron(request);
   if (denied) return denied;
 
   try {
-    const processed = await drain(50);
-    return NextResponse.json({ ok: true, processed }, { status: 200 });
+    const result = await flushDeferredQuietHoursOutbound(getSupabase(), 40);
+    return NextResponse.json({ ok: true, ...result }, { status: 200 });
   } catch (e) {
-    console.error("[cron/process-webhook-jobs]", e);
+    console.error("[cron/flush-deferred-outbound]", e);
     return NextResponse.json(
       { ok: false, error: e instanceof Error ? e.message : String(e) },
       { status: 500 }

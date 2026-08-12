@@ -43,7 +43,16 @@ export async function hasActiveSimulatorHoldConflict(
     .select("id, start_time, end_time, status, expires_at")
     .eq("business_id", input.businessId)
     .eq("bay_id", input.bayResourceId)
-    .in("status", ["held_pending_payment", "paid_pending_whoosh", "paid_confirmed"]);
+    .in("status", [
+      "held_pending_payment",
+      "paid_pending_whoosh",
+      "paid_confirmed",
+      /**
+       * Paid customer awaiting ops review (expired hold, amount mismatch, bad
+       * snapshot) still owns the bay — do not let a second guest oversell.
+       */
+      "payment_needs_review",
+    ]);
 
   if (error) throw new Error(error.message);
 
@@ -78,6 +87,9 @@ export async function hasActiveSimulatorHoldConflict(
      * do not mint another hold overlapping it.
      */
     if (st === "paid_confirmed") return true;
+
+    /** Paid + needs review — keep exclusive claim until ops resolve. */
+    if (st === "payment_needs_review") return true;
   }
 
   return false;

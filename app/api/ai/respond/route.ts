@@ -85,6 +85,22 @@ export async function POST(req: Request) {
       );
     }
 
+    if (conversation.human_takeover === true) {
+      return NextResponse.json({
+        success: false,
+        blocked: true,
+        reason: "Conversation is in human takeover; automation replies are disabled.",
+      });
+    }
+
+    if (conversation.automation_enabled === false) {
+      return NextResponse.json({
+        success: false,
+        blocked: true,
+        reason: "Automation is disabled on this conversation.",
+      });
+    }
+
     const { data: latestMessage, error: messageError } = await supabase
       .from("messages")
       .select("*")
