@@ -28,6 +28,7 @@ import { estimateSimulatorBookingUsdCents } from "@/lib/primetime/simulator-quot
 import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
+  extractLessonDuration,
   extractSimulatorDurationMinutes,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
@@ -391,6 +392,109 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+  });
+
+  test("lesson duration ignores calendar dates, clocks, and 30-first agent prompts", () => {
+    assert.strictEqual(extractLessonDuration("Can I book an adult lesson on 5/30 in the afternoon?"), null);
+    assert.strictEqual(extractLessonDuration("adult lesson May 30 afternoon"), null);
+    assert.strictEqual(extractLessonDuration("adult lesson on the 30th"), null);
+    assert.strictEqual(extractLessonDuration("adult lesson Friday at 3:30"), null);
+    assert.strictEqual(
+      extractLessonDuration("I'd like a 60 minute adult lesson on 5/30 in the afternoon"),
+      60
+    );
+    assert.strictEqual(extractLessonDuration("Prefer 30 or 60 minutes today?"), 60);
+    assert.strictEqual(
+      extractLessonDuration("Prefer 30 or 60 minutes today?\n60"),
+      60
+    );
+    assert.strictEqual(
+      extractLessonDuration("Prefer 30 or 60 minutes today?\n30"),
+      30
+    );
+    assert.strictEqual(extractLessonDuration("60"), 60);
+    assert.strictEqual(extractLessonDuration("30 please"), 30);
+    assert.strictEqual(extractLessonDuration("half hour"), 30);
+    assert.strictEqual(extractLessonDuration("an hour"), 60);
+    assert.strictEqual(extractLessonDuration("I'll take 60"), 60);
+  });
+
+  test("date 9/30 does not skip the 30-vs-60 lesson question", async () => {
+    const { flow } = await runAugment({
+      inboundText: "Can I book an adult lesson on 9/30 in the afternoon?",
+      playbook: "lesson",
+    });
+    assert.strictEqual(flow.kind, "appendix");
+    if (flow.kind !== "appendix") return;
+    assert.ok(
+      flow.debug.requiredDetailsMissing.includes("session_length_minutes"),
+      `expected duration still missing, got ${JSON.stringify(flow.debug.requiredDetailsMissing)}`
+    );
+    assert.strictEqual(flow.debug.reason, "missing_whoosh_precheck_facts");
+  });
+
+  test("explicit 60-minute lesson on 9/30 looks up 60 minutes, not 30", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    await runAugment({
+      inboundText: "Can I book a 60 minute adult lesson on 9/30 in the afternoon?",
+      playbook: "lesson",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0]?.durationMinutes, 60);
+  });
+
+  test("reply 60 after Prefer 30 or 60 minutes looks up 60-minute lessons", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const history: ConversationHistoryMessage[] = [
+      {
+        direction: "inbound",
+        channel: "sms",
+        message_text: "Can I book an adult lesson Friday afternoon?",
+        status: null,
+        created_at: new Date().toISOString(),
+      },
+      {
+        direction: "outbound",
+        channel: "sms",
+        message_text: "Prefer 30 or 60 minutes today?",
+        status: "sent",
+        created_at: new Date().toISOString(),
+      },
+    ];
+
+    await runAugment({
+      inboundText: "60",
+      playbook: "general",
+      conversationHistory: history,
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0]?.durationMinutes, 60);
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {

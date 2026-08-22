@@ -289,14 +289,51 @@ export function extractLessonTrack(fullText: string): BookingFacts["lessonTrack"
   return null;
 }
 
+/**
+ * Lesson length from customer text. Last duration mention wins.
+ *
+ * Bare `\b30\b` / `\b60\b` must not count: they collide with calendar dates
+ * (`5/30`, `May 30`, `the 30th`) and with our own "Prefer 30 or 60 minutes?"
+ * prompt, which previously booked 30-minute lessons after an explicit 60-minute
+ * request. Clock times (`3:30`) are also ignored.
+ */
 export function extractLessonDuration(fullText: string): 30 | 60 | null {
-  const t = fullText.toLowerCase();
+  const matches: Array<{ index: number; minutes: 30 | 60 }> = [];
+  const push = (index: number, minutes: 30 | 60) => {
+    matches.push({ index, minutes });
+  };
 
-  if (/\b30\b|\bhalf\s*-?\s*hour\b|\bhalf\b(?!\w)/i.test(t)) return 30;
-  if (/\b60\b|\b1\s*-?\s*hour\b|\bfull\s*-?\s*hour\b|\bhour\b/i.test(t) || /\ban hour\b/i.test(t))
-    return 60;
+  for (const m of fullText.matchAll(/\b(30|60)\s*(?:minutes?|mins?|min)\b/gi)) {
+    push(m.index ?? 0, Number(m[1]) as 30 | 60);
+  }
+  for (const m of fullText.matchAll(/\bhalf\s*-?\s*hour\b/gi)) {
+    push(m.index ?? 0, 30);
+  }
+  for (const m of fullText.matchAll(/\b(?:1|one)\s*-?\s*hours?\b/gi)) {
+    push(m.index ?? 0, 60);
+  }
+  for (const m of fullText.matchAll(/\bfull\s*-?\s*hour\b/gi)) {
+    push(m.index ?? 0, 60);
+  }
+  for (const m of fullText.matchAll(/\ban\s+hour\b/gi)) {
+    push(m.index ?? 0, 60);
+  }
 
-  return null;
+  const standalone =
+    /^(?:(?:i(?:'|’)(?:ll|d)|lets|let['’]s)\s+(?:take|do|go with)\s+|go with\s+)?(30|60)(?:\s*(?:minutes?|mins?|min))?(?:\s+(?:please|thanks|thx))?[.!?]?$/i;
+  let lineStart = 0;
+  for (const rawLine of fullText.split("\n")) {
+    const m = standalone.exec(rawLine.trim());
+    if (m?.[1]) {
+      const token = m[1];
+      const tokenAt = rawLine.toLowerCase().indexOf(token);
+      push(lineStart + Math.max(tokenAt, 0), Number(token) as 30 | 60);
+    }
+    lineStart += rawLine.length + 1;
+  }
+
+  matches.sort((a, b) => a.index - b.index);
+  return matches.at(-1)?.minutes ?? null;
 }
 
 /** Prefer explicit clock (last mention wins) over coarse morning/afternoon/evening. */
@@ -498,7 +535,8 @@ function collectBookingFactsWithDateResolution(
           extractSimulatorDurationMinutes(latestInboundText) ??
           extractSimulatorDurationMinutes(transcript),
       lessonTrack: extractLessonTrack(transcript),
-      lessonDurationMinutes: extractLessonDuration(transcript),
+      lessonDurationMinutes:
+        extractLessonDuration(latestInboundText) ?? extractLessonDuration(transcript),
     },
     dateResolution,
   };
