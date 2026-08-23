@@ -28,6 +28,7 @@ import { estimateSimulatorBookingUsdCents } from "@/lib/primetime/simulator-quot
 import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
+  extractPreferredTimePhrase,
   extractSimulatorDurationMinutes,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
@@ -385,6 +386,32 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(resolved.source, "explicit_weekday");
   });
 
+  test("last date mention wins so later Friday beats earlier today", () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    assert.strictEqual(
+      resolveRequestedDateFromText("today then Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("Friday then today", anchor).isoDate,
+      "2026-05-17"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("Book simulator 2035-06-17 Sunday morning", anchor).isoDate,
+      "2035-06-17"
+    );
+  });
+
+  test("last time window wins so evening beats earlier morning", () => {
+    assert.strictEqual(
+      extractPreferredTimePhrase("Morning, afternoon, or evening work better that day?\nevening"),
+      "evening"
+    );
+    assert.strictEqual(extractPreferredTimePhrase("evening then morning"), "morning");
+  });
+
   test("simulator duration phrases resolve deterministically", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 people for 2 hours"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for two hours"), 120);
@@ -483,6 +510,68 @@ describe("sms-booking-flow", () => {
     });
 
     assert.deepStrictEqual(seenDates, ["2026-05-21"]);
+  });
+
+  test("lesson qualification outbound today/morning copy does not overwrite Friday evening", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const t0 = Date.now();
+    const { flow } = await runAugment({
+      inboundText: "evening",
+      playbook: "lesson",
+      conversationHistory: [
+        {
+          direction: "inbound",
+          channel: "sms",
+          message_text: "Can I book an adult lesson Friday",
+          status: null,
+          created_at: new Date(t0).toISOString(),
+        },
+        {
+          direction: "outbound",
+          channel: "sms",
+          message_text: "Prefer 30 or 60 minutes today?",
+          status: "sent",
+          created_at: new Date(t0 + 1).toISOString(),
+        },
+        {
+          direction: "inbound",
+          channel: "sms",
+          message_text: "60",
+          status: null,
+          created_at: new Date(t0 + 2).toISOString(),
+        },
+        {
+          direction: "outbound",
+          channel: "sms",
+          message_text: "Morning, afternoon, or evening work better that day?",
+          status: "sent",
+          created_at: new Date(t0 + 3).toISOString(),
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(seen.map((p) => p.date), ["2026-05-22"]);
+    assert.deepStrictEqual(seen.map((p) => p.preferredTimeRange), ["evening"]);
+    assert.strictEqual(flow.kind, "direct_outbound");
+    assert.strictEqual(expectDirectOutbound(flow).debug.resolved_requested_date, "2026-05-22");
+    assert.notStrictEqual(expectDirectOutbound(flow).debug.resolved_requested_date, "2026-05-17");
   });
 
   test("Saturday evening interest without player count never calls Whoosh for exact times", async () => {

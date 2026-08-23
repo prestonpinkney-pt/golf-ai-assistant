@@ -221,6 +221,18 @@ function mergeTranscript(history: ConversationHistoryMessage[], inbound: string)
   return [...history.map((m) => m.message_text ?? ""), inbound].join("\n").trim().slice(-8000);
 }
 
+/** Customer-authored SMS only — outbound qualification copy must not supply booking facts. */
+function mergeInboundCustomerText(
+  history: ConversationHistoryMessage[],
+  inbound: string
+): string {
+  const prior = history
+    .filter((m) => m.direction !== "outbound")
+    .map((m) => m.message_text ?? "")
+    .join("\n");
+  return `${prior}\n${inbound}`.trim().slice(-8000);
+}
+
 export function inferServiceType(playbook: string): WhooshServiceType {
   if (playbook === "lesson") return "lesson";
   if (playbook === "event") return "event";
@@ -314,12 +326,23 @@ export function extractPreferredTimePhrase(fullText: string): string | null {
   const explicit = extractLastExplicitClockPhrase(fullText);
   if (explicit) return explicit;
 
-  const t = fullText.toLowerCase();
-  if (/\bmorning\b/.test(t)) return "morning";
-  if (/\bafternoon\b/.test(t)) return "afternoon";
-  if (/\bevening\b|\bafter\s*work\b|\blater\b|\btonight\b/.test(t)) return "evening";
+  const hits: Array<{ index: number; phrase: string }> = [];
+  const pushAll = (re: RegExp, phrase: string) => {
+    for (const m of fullText.matchAll(re)) {
+      hits.push({ index: m.index ?? 0, phrase });
+    }
+  };
+  pushAll(/\bmorning\b/gi, "morning");
+  pushAll(/\bafternoon\b/gi, "afternoon");
+  pushAll(/\bevening\b/gi, "evening");
+  pushAll(/\bafter\s*work\b/gi, "evening");
+  pushAll(/\btonight\b/gi, "evening");
+  pushAll(/\blater\b/gi, "evening");
 
-  const tod = /\b(\d{1,2})\s*:?\s*(\d{2})\s*(am|pm)\b/i.exec(t);
+  hits.sort((a, b) => a.index - b.index);
+  if (hits.at(-1)?.phrase) return hits.at(-1)!.phrase;
+
+  const tod = /\b(\d{1,2})\s*:?\s*(\d{2})\s*(am|pm)\b/i.exec(fullText);
   if (tod?.[0]) return tod[0].trim();
 
   return null;
@@ -408,24 +431,39 @@ export function resolveRequestedDateFromText(
   anchor: DateTime,
   timezone = BUSINESS_TIMEZONE
 ): { isoDate: string | null; source: SmsBookingDateSource } {
-  const lowered = subject.toLowerCase();
   const local = anchor.setZone(timezone).startOf("day");
+  type DateHit = { index: number; isoDate: string | null; source: SmsBookingDateSource };
+  const isoHits: DateHit[] = [];
+  const relativeHits: DateHit[] = [];
 
-  const direct = subject.match(ISO_DATE);
-  if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
-
-  if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
-  if (/\btomorrow\b/i.test(lowered)) {
-    return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
+  const isoRe = new RegExp(ISO_DATE.source, "g");
+  for (const m of subject.matchAll(isoRe)) {
+    if (m[1]) isoHits.push({ index: m.index ?? 0, isoDate: m[1], source: "explicit_date" });
   }
 
-  const mmdd = /\b(\d{1,2})\/(\d{1,2})\b/.exec(lowered);
-  if (mmdd?.[1] && mmdd[2]) {
-    const dt = local.set({
-      month: Number(mmdd[1]),
-      day: Number(mmdd[2]),
+  for (const m of subject.matchAll(/\btoday\b/gi)) {
+    relativeHits.push({ index: m.index ?? 0, isoDate: local.toISODate(), source: "explicit_date" });
+  }
+
+  for (const m of subject.matchAll(/\btomorrow\b/gi)) {
+    relativeHits.push({
+      index: m.index ?? 0,
+      isoDate: local.plus({ days: 1 }).toISODate(),
+      source: "explicit_date",
     });
-    return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
+  }
+
+  for (const m of subject.matchAll(/\b(\d{1,2})\/(\d{1,2})\b/g)) {
+    if (!m[1] || !m[2]) continue;
+    const dt = local.set({
+      month: Number(m[1]),
+      day: Number(m[2]),
+    });
+    relativeHits.push({
+      index: m.index ?? 0,
+      isoDate: dt.isValid ? dt.toISODate() : null,
+      source: "explicit_date",
+    });
   }
 
   const weekdayMap: Record<string, number> = {
@@ -449,21 +487,34 @@ export function resolveRequestedDateFromText(
   };
   const weekdayRe =
     /\b(?:(this|next)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun)\b/gi;
-  let weekdayMatch: { modifier: string | null; dow: number } | null = null;
-  let m: RegExpExecArray | null;
-  while ((m = weekdayRe.exec(subject)) !== null) {
+  for (const m of subject.matchAll(weekdayRe)) {
     const dow = weekdayMap[m[2]?.toLowerCase() ?? ""];
-    if (dow) weekdayMatch = { modifier: m[1]?.toLowerCase() ?? null, dow };
-  }
-  if (weekdayMatch) {
-    const baseDelta = (weekdayMatch.dow - local.weekday + 7) % 7;
-    const days =
-      weekdayMatch.modifier === "next" ? baseDelta + 7 : baseDelta;
-    return {
+    if (!dow) continue;
+    const modifier = m[1]?.toLowerCase() ?? null;
+    const baseDelta = (dow - local.weekday + 7) % 7;
+    const days = modifier === "next" ? baseDelta + 7 : baseDelta;
+    relativeHits.push({
+      index: m.index ?? 0,
       isoDate: local.plus({ days }).toISODate(),
       source: "explicit_weekday",
-    };
+    });
   }
+
+  const lastValid = (hits: DateHit[]): DateHit | undefined => {
+    const ordered = [...hits].sort((a, b) => a.index - b.index);
+    for (let i = ordered.length - 1; i >= 0; i--) {
+      const hit = ordered[i];
+      if (hit?.isoDate) return hit;
+    }
+    return undefined;
+  };
+
+  // Absolute YYYY-MM-DD beats a weekday/today label in the same text ("2035-06-17 Sunday").
+  const isoHit = lastValid(isoHits);
+  if (isoHit?.isoDate) return { isoDate: isoHit.isoDate, source: isoHit.source };
+
+  const relativeHit = lastValid(relativeHits);
+  if (relativeHit?.isoDate) return { isoDate: relativeHit.isoDate, source: relativeHit.source };
 
   return { isoDate: null, source: "fallback" };
 }
@@ -476,12 +527,15 @@ function collectBookingFactsWithDateResolution(
   playbook: string,
   transcript: string,
   latestInboundText: string,
-  anchorLA: DateTime
+  anchorLA: DateTime,
+  inboundCustomerText: string = transcript
 ): { facts: BookingFacts; dateResolution: { isoDate: string | null; source: SmsBookingDateSource } } {
   const serviceType = inferServiceType(playbook);
   const latestInboundDate = resolveRequestedDateFromText(latestInboundText, anchorLA);
   const contextDate =
-    latestInboundDate.isoDate ? latestInboundDate : resolveRequestedDateFromText(transcript, anchorLA);
+    latestInboundDate.isoDate
+      ? latestInboundDate
+      : resolveRequestedDateFromText(inboundCustomerText, anchorLA);
   const dateResolution =
     latestInboundDate.isoDate ? latestInboundDate :
     contextDate.isoDate ? { isoDate: contextDate.isoDate, source: "stored_context" as const }
@@ -492,7 +546,7 @@ function collectBookingFactsWithDateResolution(
       serviceType,
       isoDate: dateResolution.isoDate,
       partySize: extractPartySize(transcript),
-      preferredTimePhrase: extractPreferredTimePhrase(transcript),
+      preferredTimePhrase: extractPreferredTimePhrase(inboundCustomerText),
       simulatorDurationMinutes:
         serviceType === "lesson" ? null :
           extractSimulatorDurationMinutes(latestInboundText) ??
@@ -1482,6 +1536,10 @@ export async function runCloseOsSmsBookingAugmentation(params: {
 }): Promise<BookingFlowAugmentation> {
   const anchorLA = DateTime.now().setZone(BUSINESS_TIMEZONE);
   const transcript = mergeTranscript(params.conversationHistory, params.inboundText);
+  const inboundCustomerText = mergeInboundCustomerText(
+    params.conversationHistory,
+    params.inboundText
+  );
   const lower = transcript.toLowerCase();
   const bookingCueHit = containsBookingCue(lower);
 
@@ -1496,7 +1554,8 @@ export async function runCloseOsSmsBookingAugmentation(params: {
     effectivePlaybook,
     transcript,
     params.inboundText,
-    anchorLA
+    anchorLA,
+    inboundCustomerText
   );
   const dateDebug = {
     inbound_text: params.inboundText,
