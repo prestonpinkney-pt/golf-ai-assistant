@@ -28,6 +28,7 @@ import { estimateSimulatorBookingUsdCents } from "@/lib/primetime/simulator-quot
 import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
+  extractLessonDuration,
   extractSimulatorDurationMinutes,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
@@ -391,6 +392,35 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("Friday evening for 2 players for 1/2 hour"),
+      30
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("1/2hr bay time"), 30);
+  });
+
+  test("slash half-hour is not January 2 and is 30 minutes not 2 hours", () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "Book simulator Friday evening for 2 players for 1/2 hour",
+        anchor
+      ).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("adult lesson Friday evening 1/2 hour", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("Friday evening 9/18 holes for 2 players", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(resolveRequestedDateFromText("9/18", anchor).isoDate, "2026-09-18");
+    assert.strictEqual(extractLessonDuration("adult lesson Friday evening for 1/2 hour"), 30);
+    assert.strictEqual(extractLessonDuration("60 minute lesson"), 60);
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
@@ -483,6 +513,37 @@ describe("sms-booking-flow", () => {
     });
 
     assert.deepStrictEqual(seenDates, ["2026-05-21"]);
+  });
+
+  test("1/2 hour SMS looks up Friday at 30 minutes not January 2 at 2 hours", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    await runAugment({
+      inboundText:
+        "Book simulator Friday evening for 2 players for 1/2 hour bay reserve schedule please",
+      playbook: "simulator",
+    });
+
+    assert.deepStrictEqual(seen.map((p) => p.date), ["2026-05-22"]);
+    assert.deepStrictEqual(seen.map((p) => p.durationMinutes), [30]);
+    assert.notDeepStrictEqual(seen.map((p) => p.date), ["2026-01-02"]);
+    assert.notDeepStrictEqual(seen.map((p) => p.durationMinutes), [120]);
   });
 
   test("Saturday evening interest without player count never calls Whoosh for exact times", async () => {
