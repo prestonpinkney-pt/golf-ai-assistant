@@ -289,9 +289,16 @@ export function extractLessonTrack(fullText: string): BookingFacts["lessonTrack"
   return null;
 }
 
+/** True when `digitMatchIndex` is the `2` in `1/2 hour` (slash half-hour, not 2 hours). */
+function isTwoFromSlashHalfHour(fullText: string, digitMatchIndex: number): boolean {
+  const before = fullText.slice(Math.max(0, digitMatchIndex - 8), digitMatchIndex);
+  return /1\s*\/\s*$/.test(before);
+}
+
 export function extractLessonDuration(fullText: string): 30 | 60 | null {
   const t = fullText.toLowerCase();
 
+  if (/\b1\s*\/\s*2\s*-?\s*(?:hours?|hrs?|hr)\b/i.test(t)) return 30;
   if (/\b30\b|\bhalf\s*-?\s*hour\b|\bhalf\b(?!\w)/i.test(t)) return 30;
   if (/\b60\b|\b1\s*-?\s*hour\b|\bfull\s*-?\s*hour\b|\bhour\b/i.test(t) || /\ban hour\b/i.test(t))
     return 60;
@@ -372,9 +379,15 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     if (Number.isFinite(minutes)) matches.push({ index, minutes: Math.min(Math.max(Math.round(minutes), 15), 720) });
   };
 
+  for (const m of fullText.matchAll(/\b1\s*\/\s*2\s*-?\s*(?:hours?|hrs?|hr)\b/gi)) {
+    push(m.index ?? 0, 30);
+  }
+
   for (const m of fullText.matchAll(/\b(\d{1,2})\s*(?:hours?|hrs?|hr)\b/gi)) {
+    const idx = m.index ?? 0;
+    if (isTwoFromSlashHalfHour(fullText, idx)) continue;
     const h = Number(m[1]);
-    if (Number.isFinite(h)) push(m.index ?? 0, h * 60);
+    if (Number.isFinite(h)) push(idx, h * 60);
   }
 
   for (const m of fullText.matchAll(/\b(one|two|three|four|five|six)\s*(?:hours?|hrs?|hr)\b/gi)) {
@@ -419,8 +432,12 @@ export function resolveRequestedDateFromText(
     return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
   }
 
-  const mmdd = /\b(\d{1,2})\/(\d{1,2})\b/.exec(lowered);
-  if (mmdd?.[1] && mmdd[2]) {
+  const mmddRe = /\b(\d{1,2})\/(\d{1,2})\b/g;
+  for (const mmdd of subject.matchAll(mmddRe)) {
+    if (!mmdd[1] || !mmdd[2]) continue;
+    const after = subject.slice((mmdd.index ?? 0) + mmdd[0].length);
+    /** `1/2 hour` / `9/18 holes` are duration or round length, not calendar dates. */
+    if (/^\s*-?\s*(hours?|hrs?|hr|holes?)\b/i.test(after)) continue;
     const dt = local.set({
       month: Number(mmdd[1]),
       day: Number(mmdd[2]),
