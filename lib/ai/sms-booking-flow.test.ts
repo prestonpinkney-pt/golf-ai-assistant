@@ -391,6 +391,16 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("Friday evening for 2 players for 2.5 hours"),
+      150
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("1.5hr bay time"), 90);
+    assert.strictEqual(extractSimulatorDurationMinutes("2 hours 30 minutes"), 150);
+    assert.strictEqual(extractSimulatorDurationMinutes("2 hrs and 30 min"), 150);
+    assert.strictEqual(extractSimulatorDurationMinutes("an hour and a half"), 90);
+    assert.strictEqual(extractSimulatorDurationMinutes("two and a half hours"), 150);
+    assert.strictEqual(extractSimulatorDurationMinutes("I want 2 hours. Actually 30 minutes"), 30);
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
@@ -449,6 +459,35 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(out.debug.timezone, "America/Los_Angeles");
     assert.strictEqual(out.debug.usingStoredOfferSlots, false);
     assert.strictEqual(out.debug.storedOfferRejectedReason, "superseded_by_new_booking_request");
+  });
+
+  test("2.5 hours SMS looks up Friday at 150 minutes not 5 hours", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    await runAugment({
+      inboundText:
+        "Book simulator Friday evening for 2 players for 2.5 hours bay reserve schedule please",
+      playbook: "simulator",
+    });
+
+    assert.deepStrictEqual(seen.map((p) => p.date), ["2026-05-22"]);
+    assert.deepStrictEqual(seen.map((p) => p.durationMinutes), [150]);
   });
 
   test("Wednesday and Thursday resolve distinctly and latest inbound wins over history", async () => {

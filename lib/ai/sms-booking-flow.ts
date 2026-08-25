@@ -365,6 +365,25 @@ function readSimulatorBayDefaultDurationMinutesFromEnv(): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 60;
 }
 
+/** True when `digitMatchIndex` is the `5` in `2.5 hours` (not a standalone 5-hour request). */
+function isDigitFromDecimalHour(fullText: string, digitMatchIndex: number): boolean {
+  return digitMatchIndex > 0 && fullText.charAt(digitMatchIndex - 1) === ".";
+}
+
+/** True when an hour match is the head of `2 hours 30 minutes` / `two hrs and 15 min`. */
+function durationMatchFollowedByMinutes(fullText: string, match: RegExpMatchArray): boolean {
+  const after = fullText.slice((match.index ?? 0) + match[0].length);
+  return /^\s*,?\s*(?:and\s+)?\d{1,2}\s*(?:minutes?|mins?|min)\b/i.test(after);
+}
+
+/** True when a minute match is the trailing part of `N hours M minutes`. */
+function isMinutesTrailingHourCompound(fullText: string, minuteMatchIndex: number): boolean {
+  const before = fullText.slice(Math.max(0, minuteMatchIndex - 40), minuteMatchIndex);
+  return /(?:\d{1,2}|\bone|\btwo|\bthree|\bfour|\bfive|\bsix)\s*-?\s*(?:hours?|hrs?|hr)\s*,?\s*(?:and\s+)?$/i.test(
+    before
+  );
+}
+
 export function extractSimulatorDurationMinutes(fullText: string): number | null {
   const matches: Array<{ index: number; minutes: number }> = [];
 
@@ -372,19 +391,60 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     if (Number.isFinite(minutes)) matches.push({ index, minutes: Math.min(Math.max(Math.round(minutes), 15), 720) });
   };
 
-  for (const m of fullText.matchAll(/\b(\d{1,2})\s*(?:hours?|hrs?|hr)\b/gi)) {
+  for (const m of fullText.matchAll(/\b(\d{1,2}\.\d+)\s*-?\s*(?:hours?|hrs?|hr)\b/gi)) {
     const h = Number(m[1]);
-    if (Number.isFinite(h)) push(m.index ?? 0, h * 60);
+    if (Number.isFinite(h) && h > 0) push(m.index ?? 0, h * 60);
+  }
+
+  for (const m of fullText.matchAll(
+    /\b(\d{1,2})\s*-?\s*(?:hours?|hrs?|hr)\s*,?\s*(?:and\s+)?(\d{1,2})\s*(?:minutes?|mins?|min)\b/gi
+  )) {
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    if (Number.isFinite(h) && Number.isFinite(min)) push(m.index ?? 0, h * 60 + min);
+  }
+
+  for (const m of fullText.matchAll(
+    /\b(one|two|three|four|five|six)\s*-?\s*(?:hours?|hrs?|hr)\s*,?\s*(?:and\s+)?(\d{1,2})\s*(?:minutes?|mins?|min)\b/gi
+  )) {
+    const h = DURATION_WORD_TO_HOURS[m[1]?.toLowerCase() ?? ""];
+    const min = Number(m[2]);
+    if (h && Number.isFinite(min)) push(m.index ?? 0, h * 60 + min);
+  }
+
+  for (const m of fullText.matchAll(/\b(\d{1,2})\s*-?\s*(?:hours?|hrs?|hr)\s+and\s+a\s+half\b/gi)) {
+    const h = Number(m[1]);
+    if (Number.isFinite(h)) push(m.index ?? 0, h * 60 + 30);
+  }
+
+  for (const m of fullText.matchAll(/\b(one|two|three|four|five|six)\s+and\s+a\s+half\s*(?:hours?|hrs?|hr)\b/gi)) {
+    const h = DURATION_WORD_TO_HOURS[m[1]?.toLowerCase() ?? ""];
+    if (h) push(m.index ?? 0, h * 60 + 30);
+  }
+
+  for (const m of fullText.matchAll(/\b(?:an?\s+)?hours?\s+and\s+a\s+half\b/gi)) {
+    push(m.index ?? 0, 90);
+  }
+
+  for (const m of fullText.matchAll(/\b(\d{1,2})\s*(?:hours?|hrs?|hr)\b/gi)) {
+    const idx = m.index ?? 0;
+    if (isDigitFromDecimalHour(fullText, idx)) continue;
+    if (durationMatchFollowedByMinutes(fullText, m)) continue;
+    const h = Number(m[1]);
+    if (Number.isFinite(h)) push(idx, h * 60);
   }
 
   for (const m of fullText.matchAll(/\b(one|two|three|four|five|six)\s*(?:hours?|hrs?|hr)\b/gi)) {
+    if (durationMatchFollowedByMinutes(fullText, m)) continue;
     const h = DURATION_WORD_TO_HOURS[m[1]?.toLowerCase() ?? ""];
     if (h) push(m.index ?? 0, h * 60);
   }
 
   for (const m of fullText.matchAll(/\b(\d{2,3})\s*(?:minutes?|mins?|min)\b/gi)) {
+    const idx = m.index ?? 0;
+    if (isMinutesTrailingHourCompound(fullText, idx)) continue;
     const n = Number(m[1]);
-    if (Number.isFinite(n)) push(m.index ?? 0, n);
+    if (Number.isFinite(n)) push(idx, n);
   }
 
   for (const m of fullText.matchAll(/\bone\s+(?:and\s+a\s+)?half\s*(?:hours?|hrs?|hr)\b/gi)) {
@@ -396,7 +456,10 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   }
 
   for (const m of fullText.matchAll(/\b(?:a|an)\s+(?:full\s+)?hour\b|\bhourly\b/gi)) {
-    push(m.index ?? 0, 60);
+    const idx = m.index ?? 0;
+    const after = fullText.slice(idx + m[0].length);
+    if (/^\s+and\s+a\s+half\b/i.test(after)) continue;
+    push(idx, 60);
   }
 
   matches.sort((a, b) => a.index - b.index);
