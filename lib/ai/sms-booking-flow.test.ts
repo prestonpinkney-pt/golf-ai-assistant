@@ -391,6 +391,15 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for an hour"), 60);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for a half hour"), 30);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for half an hour"), 30);
+    assert.strictEqual(extractSimulatorDurationMinutes("Friday evening for 2 players for half an hour"), 30);
+    assert.strictEqual(extractSimulatorDurationMinutes("half an hr bay time"), 30);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("half an hour. Actually I want an hour"),
+      60
+    );
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
@@ -508,6 +517,33 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(flow.kind, "appendix");
     assert.match(flow.text, /player_count/);
     assert.ok(!/\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i.test(flow.text));
+  });
+
+  test("half an hour looks up 30 minutes instead of matching an hour as 60", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-03",
+        slotRowsLoaded: 4,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText:
+        "Book simulator 2035-06-03 evening for 2 players for half an hour bay reserve schedule please",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].durationMinutes, 30);
+    assert.strictEqual(seen[0].partySize, 2);
+    const outbound = expectDirectOutbound(flow);
+    assert.strictEqual(outbound.debug.durationDefaulted, false);
   });
 
   test("Whoosh returns evening slots before quoting exact clock times", async () => {
