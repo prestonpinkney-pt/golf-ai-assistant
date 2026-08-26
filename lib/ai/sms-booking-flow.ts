@@ -365,6 +365,11 @@ function readSimulatorBayDefaultDurationMinutesFromEnv(): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 60;
 }
 
+/** True when `a/an hour` is the tail of `half an hour` (last-index would otherwise win as 60). */
+function isHourPhraseAfterHalf(fullText: string, matchIndex: number): boolean {
+  return /half\s+$/i.test(fullText.slice(0, matchIndex));
+}
+
 export function extractSimulatorDurationMinutes(fullText: string): number | null {
   const matches: Array<{ index: number; minutes: number }> = [];
 
@@ -391,12 +396,14 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     push(m.index ?? 0, 90);
   }
 
-  for (const m of fullText.matchAll(/\bhalf\s*-?\s*hour\b/gi)) {
+  for (const m of fullText.matchAll(/\bhalf(?:\s+an?)?\s*-?\s*(?:hours?|hrs?|hr)\b/gi)) {
     push(m.index ?? 0, 30);
   }
 
   for (const m of fullText.matchAll(/\b(?:a|an)\s+(?:full\s+)?hour\b|\bhourly\b/gi)) {
-    push(m.index ?? 0, 60);
+    const idx = m.index ?? 0;
+    if (isHourPhraseAfterHalf(fullText, idx)) continue;
+    push(idx, 60);
   }
 
   matches.sort((a, b) => a.index - b.index);
