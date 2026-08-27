@@ -28,6 +28,7 @@ import { estimateSimulatorBookingUsdCents } from "@/lib/primetime/simulator-quot
 import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
+  extractPreferredTimePhrase,
   extractSimulatorDurationMinutes,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
@@ -391,6 +392,19 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+  });
+
+  test("explicit evening clock is preferredTimePhrase (not coarse evening)", () => {
+    assert.match(
+      extractPreferredTimePhrase(
+        "Book simulator Friday at 7pm for 2 players for 2 hours"
+      ) ?? "",
+      /^7\s*pm$/i
+    );
+    assert.match(
+      extractPreferredTimePhrase("I'm thinking 7:30pm") ?? "",
+      /7:30\s*pm/i
+    );
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
@@ -757,6 +771,31 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(expectDirectOutbound(flow).debug.durationDefaulted, true);
     assert.strictEqual(expectDirectOutbound(flow).debug.whooshAvailabilityAttempted, true);
     assert.strictEqual(expectDirectOutbound(flow).debug.requiredDetailsMissing.length, 0);
+  });
+
+  test("explicit 7pm is passed to Whoosh preferredTimeRange so availability can filter evening", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-06",
+        slotRowsLoaded: 12,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText:
+        "Book simulator 2035-06-06 at 7pm for 2 players for 2 hours bay reserve schedule please",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.match(String(seen[0].preferredTimeRange ?? ""), /^7\s*pm$/i);
+    assert.strictEqual(expectDirectOutbound(flow).debug.whooshAvailabilityAttempted, true);
   });
 
   test("explicit clock in follow-up prefers 11am for Whoosh preferredTimeRange while defaulting bay duration", async () => {

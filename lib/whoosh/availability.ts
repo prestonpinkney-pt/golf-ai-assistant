@@ -128,14 +128,35 @@ async function fetchAgendaJsonList(
   }
 }
 
-type WindowFilter = {
+export type PreferredTimeWindowFilter = {
   hourStartInclusive: number;
   hourEndExclusive: number;
-} | null;
+};
 
-function parsePreferredTimeRange(raw: string | null | undefined): WindowFilter {
+type WindowFilter = PreferredTimeWindowFilter | null;
+
+/**
+ * Coarse dayparts plus explicit clocks from SMS (`7pm`, `11:30 am`).
+ * Clock strings used to return null, so Whoosh offered the first public slots (~11am)
+ * when the customer asked for evening.
+ */
+export function parsePreferredTimeRange(raw: string | null | undefined): WindowFilter {
   if (!raw || !raw.trim()) return null;
   const text = raw.trim().toLowerCase();
+
+  const clock = /^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i.exec(text);
+  if (clock?.[1] && clock[3]) {
+    let hour = Number(clock[1]);
+    const minute = clock[2] != null && clock[2] !== "" ? Number(clock[2]) : 0;
+    const mer = clock[3].toLowerCase();
+    if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+    if (hour < 1 || hour > 12 || minute < 0 || minute > 59) return null;
+    if (mer === "pm" && hour < 12) hour += 12;
+    if (mer === "am" && hour === 12) hour = 0;
+    const start = hour + minute / 60;
+    return { hourStartInclusive: start, hourEndExclusive: start + 1 };
+  }
+
   if (text.includes("morning"))
     return { hourStartInclusive: 11, hourEndExclusive: 14 };
   if (text.includes("afternoon"))
