@@ -330,6 +330,56 @@ describe("inbound-sms-booking-phase", () => {
     assert.strictEqual(phase.smsBookingFlow.debug.intent, "pricing");
   });
 
+  test("duration-only bay rental via Sent.dm decidePlaybook looks up simulator, not lesson", async () => {
+    const seen: Array<{ serviceType: string; durationMinutes: number; partySize: number }> = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push({
+        serviceType: p.serviceType,
+        durationMinutes: p.durationMinutes,
+        partySize: p.partySize,
+      });
+      return {
+        ok: true,
+        slots: [
+          {
+            startTime: "2035-06-03T18:00:00.000Z",
+            endTime: "2035-06-03T19:00:00.000Z",
+            bayOrResourceId: "whoosh-slot-1100",
+            resourceName: "Bay 1",
+            serviceType: "simulator",
+            priceEstimate: null,
+            raw: { agenda_date: "2035-06-03" },
+          },
+        ],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const audits: Record<string, unknown>[] = [];
+    const supabase = messagingSupabaseMock({ descRows: [], audits }) as never;
+
+    const phase = await runInboundSmsBookingAugmentationPhase({
+      supabase,
+      conversationId: CID,
+      businessId: BID,
+      contactId: PID,
+      contactName: "Pat",
+      contactPhone: "+15551234567",
+      inboundText: "Book 2035-06-03 evening for 2 players for 1 hour",
+      ingestSource: "unit_test_phase",
+    });
+
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]?.serviceType, "simulator");
+    assert.equal(seen[0]?.durationMinutes, 60);
+    assert.equal(seen[0]?.partySize, 2);
+    assert.equal(phase.playbook === "lesson", false);
+    assert.equal(phase.smsBookingFlow.debug.whooshAvailabilityAttempted, true);
+  });
+
   test("Sent.dm inbound phase persists full integration_request_summary on booking POST (parity with POST wire)", async () => {
     const savedEnabled = process.env.WHOOSH_BOOKING_API_ENABLED;
     const savedPath = process.env.WHOOSH_BOOKING_POST_PATH;

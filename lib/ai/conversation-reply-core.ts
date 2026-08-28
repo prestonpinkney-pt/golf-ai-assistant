@@ -57,22 +57,17 @@ export function decidePlaybook(message: string): string {
     return "simulator";
   }
 
-  if (
-    text.includes("lesson") ||
-    text.includes("swing") ||
-    text.includes("junior") ||
-    text.includes("30 min") ||
-    text.includes("1 hour")
-  ) {
+  // Duration ("1 hour" / "30 min"), "swing", and "junior" are common bay-rental
+  // phrases. Only treat explicit lesson/coach language as the lesson playbook so
+  // "Book Friday for 2 players for 1 hour" does not Whoosh-book a lesson.
+  if (/\b(?:lessons?|coach|instruction|instructors?)\b/.test(text)) {
     return "lesson";
   }
 
   if (
-    text.includes("event") ||
-    text.includes("party") ||
-    text.includes("birthday") ||
-    text.includes("corporate") ||
-    text.includes("group")
+    /\b(?:event|corporate|birthday|outing)\b/.test(text) ||
+    (/\bparty\b/.test(text) && !/\bparty of\b/.test(text)) ||
+    (text.includes("group") && !/\bgroup of\s*\d{1,2}\b/.test(text))
   ) {
     return "event";
   }
