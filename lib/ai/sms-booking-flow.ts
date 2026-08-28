@@ -227,6 +227,44 @@ export function inferServiceType(playbook: string): WhooshServiceType {
   return "simulator";
 }
 
+const LESSON_BOOKING_INTENT_RE = /\b(?:lessons?|coach|instruction|instructors?)\b/i;
+const EVENT_BOOKING_INTENT_RE = /\b(?:event|corporate|birthday|outing)\b/i;
+const PARTY_OF_HEADCOUNT_RE = /\bparty of\b/i;
+
+function transcriptLooksLikeLessonBooking(text: string): boolean {
+  return LESSON_BOOKING_INTENT_RE.test(text);
+}
+
+function transcriptLooksLikeEventBooking(text: string): boolean {
+  if (EVENT_BOOKING_INTENT_RE.test(text)) return true;
+  // "party of 4" is a player-count idiom for bay rentals, not a private event.
+  return /\bparty\b/i.test(text) && !PARTY_OF_HEADCOUNT_RE.test(text);
+}
+
+/**
+ * Map inbound `decidePlaybook` onto Whoosh service type.
+ * Duration/swing/junior classifiers can mark a bay rental as `lesson`; `party of N`
+ * / `group of N` can mark it as `event`. Prefer transcript intent when booking.
+ */
+export function resolveSmsBookingPlaybook(
+  inboundPlaybook: string,
+  transcript: string,
+  bookingCueHit: boolean
+): string {
+  if (!bookingCueHit) return inboundPlaybook;
+  if (transcriptLooksLikeLessonBooking(transcript)) return "lesson";
+  if (transcriptLooksLikeEventBooking(transcript)) return "event";
+  if (
+    inboundPlaybook === "general" ||
+    inboundPlaybook === "lesson" ||
+    inboundPlaybook === "membership" ||
+    inboundPlaybook === "event"
+  ) {
+    return "simulator";
+  }
+  return inboundPlaybook;
+}
+
 const PARTY_WORD_TO_N: Record<string, number> = {
   one: 1,
   two: 2,
@@ -1485,12 +1523,11 @@ export async function runCloseOsSmsBookingAugmentation(params: {
   const lower = transcript.toLowerCase();
   const bookingCueHit = containsBookingCue(lower);
 
-  let effectivePlaybook = params.playbook;
-  if (effectivePlaybook === "general" && bookingCueHit) {
-    if (/\b(lesson|lessons|coach|instruction)\b/i.test(lower)) effectivePlaybook = "lesson";
-    else if (/\b(event|party|corporate|birthday|outing)\b/i.test(lower)) effectivePlaybook = "event";
-    else effectivePlaybook = "simulator";
-  }
+  const effectivePlaybook = resolveSmsBookingPlaybook(
+    params.playbook,
+    transcript,
+    bookingCueHit
+  );
 
   const { facts, dateResolution } = collectBookingFactsWithDateResolution(
     effectivePlaybook,

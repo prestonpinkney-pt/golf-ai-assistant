@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 
 import { DateTime, Settings } from "luxon";
 
-import type { ConversationHistoryMessage } from "@/lib/ai/conversation-reply-core";
+import { decidePlaybook, type ConversationHistoryMessage } from "@/lib/ai/conversation-reply-core";
 import type {
   NormalizedWhooshAvailabilitySlot,
   WhooshAvailabilityParams,
@@ -30,6 +30,7 @@ import {
   customerAffirmsWithoutSlotDigitChoice,
   extractSimulatorDurationMinutes,
   resolveRequestedDateFromText,
+  resolveSmsBookingPlaybook,
   runCloseOsSmsBookingAugmentation,
   squarePaymentHoldCheckoutClient,
   whooshAvailabilityClient,
@@ -391,6 +392,87 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+  });
+
+  test("decidePlaybook does not treat bay-rental duration as a lesson", () => {
+    assert.notEqual(
+      decidePlaybook("Book Friday evening for 2 players for 1 hour"),
+      "lesson"
+    );
+    assert.notEqual(
+      decidePlaybook("Book Friday evening for 2 players for 30 min"),
+      "lesson"
+    );
+    assert.notEqual(
+      decidePlaybook("Book Friday evening party of 4 for 2 hours"),
+      "event"
+    );
+    assert.notEqual(
+      decidePlaybook("Book Friday evening for a group of 4 for 2 hours"),
+      "event"
+    );
+    assert.equal(decidePlaybook("I want a lesson Friday evening"), "lesson");
+    assert.equal(decidePlaybook("Book a birthday party Saturday"), "event");
+  });
+
+  test("resolveSmsBookingPlaybook recovers duration-only false lesson playbooks", () => {
+    const bay = "Book Friday evening for 2 players for 1 hour";
+    assert.equal(resolveSmsBookingPlaybook("lesson", bay, true), "simulator");
+    assert.equal(resolveSmsBookingPlaybook("event", "Book Friday evening party of 4 for 2 hours", true), "simulator");
+    assert.equal(resolveSmsBookingPlaybook("general", "Book a lesson Friday evening", true), "lesson");
+  });
+
+  test("duration-only bay rental looks up simulator inventory, not a lesson", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: sampleBaySlots1100Thru1130Jun17(),
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 3,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const inbound = "Book 2035-06-03 evening for 2 players for 1 hour";
+    const { flow } = await runAugment({
+      inboundText: inbound,
+      // Production Sent.dm path used to pass decidePlaybook() === "lesson" here.
+      playbook: "lesson",
+    });
+
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]?.serviceType, "simulator");
+    assert.equal(seen[0]?.durationMinutes, 60);
+    assert.equal(seen[0]?.partySize, 2);
+    const outbound = expectDirectOutbound(flow);
+    assert.match(outbound.replyText, /Reply 1, 2, or 3/i);
+  });
+
+  test("explicit lesson requests still look up lesson inventory", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    await runAugment({
+      inboundText: "Book a lesson 2035-06-03 evening adult 1 hour",
+      playbook: "lesson",
+    });
+
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0]?.serviceType, "lesson");
+    assert.equal(seen[0]?.durationMinutes, 60);
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
