@@ -28,6 +28,7 @@ import { estimateSimulatorBookingUsdCents } from "@/lib/primetime/simulator-quot
 import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
+  extractPartySize,
   extractSimulatorDurationMinutes,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
@@ -391,6 +392,46 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+  });
+
+  test("myself and N friends is a group, not a solo party of 1", () => {
+    assert.strictEqual(
+      extractPartySize("Book simulator Friday evening for myself and 3 friends for 2 hours"),
+      4
+    );
+    assert.strictEqual(extractPartySize("myself and two friends"), 3);
+    assert.strictEqual(extractPartySize("just me and 2 others"), 3);
+    assert.strictEqual(extractPartySize("book a bay for myself and a friend"), 2);
+    assert.strictEqual(extractPartySize("just me"), 1);
+    assert.strictEqual(extractPartySize("solo practice session"), 1);
+  });
+
+  test("myself and companions uses group party size for Whoosh lookup", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-03",
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText:
+        "Book simulator 2035-06-03 evening for myself and 3 friends for 2 hours reservation",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].partySize, 4);
+    assert.strictEqual(seen[0].durationMinutes, 120);
+    assert.strictEqual(flow.kind, "direct_outbound");
+    assert.strictEqual(expectDirectOutbound(flow).debug.whooshAvailabilityAttempted, true);
+    assert.strictEqual(expectDirectOutbound(flow).debug.requiredDetailsMissing.length, 0);
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
