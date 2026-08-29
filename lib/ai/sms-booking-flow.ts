@@ -251,10 +251,43 @@ const DURATION_WORD_TO_HOURS: Record<string, number> = {
   six: 6,
 };
 
+function companionCountFromMatch(numRaw: string | undefined, wordRaw: string | undefined): number | null {
+  if (numRaw) {
+    const n = Number(numRaw);
+    return Number.isFinite(n) ? n : null;
+  }
+  if (wordRaw) {
+    const n = PARTY_WORD_TO_N[wordRaw.toLowerCase()];
+    return n ?? null;
+  }
+  return null;
+}
+
 export function extractPartySize(fullText: string): number | null {
   const lower = fullText.toLowerCase();
-  if (/\bjust me\b|\bsolo\b|\bmyself\b|\bone player\b|\b1 player\b/.test(lower)) return 1;
-  if (/\bsolo\b\s*(practice)?\s*session\b/.test(lower)) return 1;
+
+  /**
+   * "myself and 3 friends" is a group, not a solo. The bare `myself`/`just me` short-circuit
+   * below would otherwise lock party size at 1 and undercharge Square / under-count Whoosh.
+   */
+  if (/\b(?:myself|just\s+me)\s+and\s+(?:a|my)\s+friend\b/i.test(lower)) {
+    return 2;
+  }
+
+  const selfAndCompanions =
+    /\b(?:myself|just\s+me)\s+and\s+(?:(\d{1,2})|(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve))\s+(?:friends?|others?|other\s+(?:people|players?|guests?)|people|guys|ppl)\b/i.exec(
+      lower
+    );
+  if (selfAndCompanions) {
+    const extra = companionCountFromMatch(selfAndCompanions[1], selfAndCompanions[2]);
+    if (extra) return Math.min(Math.max(1 + extra, 2), 32);
+  }
+
+  const selfPlusUnparsedCompanions = /\b(?:myself|just\s+me)\s+and\b/i.test(lower);
+  if (!selfPlusUnparsedCompanions) {
+    if (/\bjust me\b|\bsolo\b|\bmyself\b|\bone player\b|\b1 player\b/.test(lower)) return 1;
+    if (/\bsolo\b\s*(practice)?\s*session\b/.test(lower)) return 1;
+  }
 
   const wordParty =
     /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:players?|people|person|ppl)\b/i.exec(
