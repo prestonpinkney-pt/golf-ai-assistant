@@ -395,7 +395,9 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     push(m.index ?? 0, 30);
   }
 
-  for (const m of fullText.matchAll(/\b(?:a|an)\s+(?:full\s+)?hour\b|\bhourly\b/gi)) {
+  // "hourly" is a product type (vs 9/18 holes), not a 60-minute duration.
+  // Matching it last-won over "2 hours of hourly bay time" and under-booked the bay.
+  for (const m of fullText.matchAll(/\b(?:a|an)\s+(?:full\s+)?hour\b/gi)) {
     push(m.index ?? 0, 60);
   }
 
