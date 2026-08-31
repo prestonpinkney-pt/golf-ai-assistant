@@ -382,6 +382,11 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     if (h) push(m.index ?? 0, h * 60);
   }
 
+  // "a couple of hours" is ~2 hours, not the 60-minute bay default.
+  for (const m of fullText.matchAll(/\b(?:a\s+)?couple(?:\s+of)?\s*(?:hours?|hrs?|hr)\b/gi)) {
+    push(m.index ?? 0, 120);
+  }
+
   for (const m of fullText.matchAll(/\b(\d{2,3})\s*(?:minutes?|mins?|min)\b/gi)) {
     const n = Number(m[1]);
     if (Number.isFinite(n)) push(m.index ?? 0, n);
