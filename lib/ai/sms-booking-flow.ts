@@ -372,17 +372,18 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     if (Number.isFinite(minutes)) matches.push({ index, minutes: Math.min(Math.max(Math.round(minutes), 15), 720) });
   };
 
-  for (const m of fullText.matchAll(/\b(\d{1,2})\s*(?:hours?|hrs?|hr)\b/gi)) {
+  // Optional hyphen so "2-hour" / "two-hour" / "90-minute" parse like "2 hour".
+  for (const m of fullText.matchAll(/\b(\d{1,2})\s*-?\s*(?:hours?|hrs?|hr)\b/gi)) {
     const h = Number(m[1]);
     if (Number.isFinite(h)) push(m.index ?? 0, h * 60);
   }
 
-  for (const m of fullText.matchAll(/\b(one|two|three|four|five|six)\s*(?:hours?|hrs?|hr)\b/gi)) {
+  for (const m of fullText.matchAll(/\b(one|two|three|four|five|six)\s*-?\s*(?:hours?|hrs?|hr)\b/gi)) {
     const h = DURATION_WORD_TO_HOURS[m[1]?.toLowerCase() ?? ""];
     if (h) push(m.index ?? 0, h * 60);
   }
 
-  for (const m of fullText.matchAll(/\b(\d{2,3})\s*(?:minutes?|mins?|min)\b/gi)) {
+  for (const m of fullText.matchAll(/\b(\d{2,3})\s*-?\s*(?:minutes?|mins?|min)\b/gi)) {
     const n = Number(m[1]);
     if (Number.isFinite(n)) push(m.index ?? 0, n);
   }
