@@ -391,6 +391,11 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2h"), 120);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 h"), 120);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 3h"), 180);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2.5h"), 150);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 holes"), null);
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
@@ -728,6 +733,34 @@ describe("sms-booking-flow", () => {
     });
     assert.strictEqual(expectDirectOutbound(flow).debug.intent, "pricing");
     assert.strictEqual(expectDirectOutbound(flow).debug.durationDefaulted, false);
+  });
+
+  test("compact 2h duration looks up 120 minutes instead of defaulting to 60", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-17",
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText:
+        "Book simulator 2035-06-17 Sunday evening for 2 players for 2h reservation",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].durationMinutes, 120);
+    assert.strictEqual(seen[0].partySize, 2);
+    const out = expectDirectOutbound(flow);
+    assert.strictEqual(out.debug.durationDefaulted, false);
+    assert.strictEqual(out.debug.whooshAvailabilityAttempted, true);
   });
 
   test("Sunday morning bay for two triggers Whoosh with 60m default duration (no transcript duration)", async () => {

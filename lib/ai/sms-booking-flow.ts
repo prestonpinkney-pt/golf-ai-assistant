@@ -377,6 +377,20 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     if (Number.isFinite(h)) push(m.index ?? 0, h * 60);
   }
 
+  // Compact SMS "2h" / "2.5h". Do not use a trailing `h` alternative on hour/hr —
+  // `\b` after `h` would miss those, but the `5` in `2.5h` is a word-boundary digit.
+  for (const m of fullText.matchAll(/\b(\d{1,2})\.(\d)\s*h\b/gi)) {
+    const whole = Number(m[1]);
+    const frac = Number(m[2]);
+    if (Number.isFinite(whole) && Number.isFinite(frac) && whole > 0) {
+      push(m.index ?? 0, (whole + frac / 10) * 60);
+    }
+  }
+  for (const m of fullText.matchAll(/(?<![\d.])\b(\d{1,2})\s*h\b/gi)) {
+    const h = Number(m[1]);
+    if (Number.isFinite(h) && h > 0) push(m.index ?? 0, h * 60);
+  }
+
   for (const m of fullText.matchAll(/\b(one|two|three|four|five|six)\s*(?:hours?|hrs?|hr)\b/gi)) {
     const h = DURATION_WORD_TO_HOURS[m[1]?.toLowerCase() ?? ""];
     if (h) push(m.index ?? 0, h * 60);
@@ -909,7 +923,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (!t) return false;
 
   const mentionsCalendarPartyOrBookingScope =
-    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
+    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?|h)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?|h))\b/i.test(
       inbound
     ) || /\b(?:bay|simulator|sim\b|lesson|event)\b/i.test(t);
 
@@ -934,11 +948,11 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
     )
   )
     return true;
-  if (/\bfor\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)\b/i.test(t)) return true;
+  if (/\bfor\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?|h)\b/i.test(t)) return true;
   if (/\bfor\s+\d+\s+players?\b/i.test(t)) return true;
   if (/\b\d+\s+players?\b/i.test(t)) return true;
   if (
-    /\b(?:half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(t)
+    /\b(?:half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?|h))\b/i.test(t)
   )
     return true;
   return false;
