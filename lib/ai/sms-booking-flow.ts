@@ -399,6 +399,20 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     push(m.index ?? 0, 60);
   }
 
+  // Indoor sim rounds: 9 holes ≈ 1 hour, 18 holes ≈ 2 hours. Do not treat
+  // arbitrary "N holes" (e.g. "2 holes") as duration.
+  for (const m of fullText.matchAll(/\b(9|18)\s*-?\s*holes?\b/gi)) {
+    const holes = Number(m[1]);
+    if (holes === 9) push(m.index ?? 0, 60);
+    else if (holes === 18) push(m.index ?? 0, 120);
+  }
+  for (const m of fullText.matchAll(/\bnine\s*-?\s*holes?\b/gi)) {
+    push(m.index ?? 0, 60);
+  }
+  for (const m of fullText.matchAll(/\beighteen\s*-?\s*holes?\b/gi)) {
+    push(m.index ?? 0, 120);
+  }
+
   matches.sort((a, b) => a.index - b.index);
   return matches.at(-1)?.minutes ?? null;
 }
@@ -909,7 +923,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (!t) return false;
 
   const mentionsCalendarPartyOrBookingScope =
-    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
+    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?)|(?:9|18|nine|eighteen)\s*-?\s*holes?)\b/i.test(
       inbound
     ) || /\b(?:bay|simulator|sim\b|lesson|event)\b/i.test(t);
 
@@ -938,7 +952,9 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (/\bfor\s+\d+\s+players?\b/i.test(t)) return true;
   if (/\b\d+\s+players?\b/i.test(t)) return true;
   if (
-    /\b(?:half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(t)
+    /\b(?:half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?)|(?:9|18|nine|eighteen)\s*-?\s*holes?)\b/i.test(
+      t
+    )
   )
     return true;
   return false;
