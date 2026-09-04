@@ -399,6 +399,17 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     push(m.index ?? 0, 60);
   }
 
+  // Indoor sim "round" means a full 18 ≈ 2 hours (agent prompt: practice or round).
+  // Do not treat 9-hole rounds as 18, and do not match "around" / "round up".
+  const hasNineHoleLanguage = /\b(?:9|nine)\s*-?\s*holes?\b/i.test(fullText);
+  if (!hasNineHoleLanguage) {
+    for (const m of fullText.matchAll(
+      /\b(?:(?:a|the|full)\s+rounds?\b|rounds?\s+of\s+golf\b|play(?:ing)?\s+(?:a\s+)?rounds?\b)/gi
+    )) {
+      push(m.index ?? 0, 120);
+    }
+  }
+
   matches.sort((a, b) => a.index - b.index);
   return matches.at(-1)?.minutes ?? null;
 }
@@ -909,7 +920,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (!t) return false;
 
   const mentionsCalendarPartyOrBookingScope =
-    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
+    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?)|(?:a|the|full)\s+rounds?|rounds?\s+of\s+golf|play(?:ing)?\s+(?:a\s+)?rounds?)\b/i.test(
       inbound
     ) || /\b(?:bay|simulator|sim\b|lesson|event)\b/i.test(t);
 
@@ -938,7 +949,9 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (/\bfor\s+\d+\s+players?\b/i.test(t)) return true;
   if (/\b\d+\s+players?\b/i.test(t)) return true;
   if (
-    /\b(?:half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(t)
+    /\b(?:half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?)|(?:a|the|full)\s+rounds?|rounds?\s+of\s+golf|play(?:ing)?\s+(?:a\s+)?rounds?)\b/i.test(
+      t
+    )
   )
     return true;
   return false;

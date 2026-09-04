@@ -393,6 +393,24 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
   });
 
+  test("full-round language maps to 2 hours, not the 60m default", () => {
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("Friday evening for 2 players for a round"),
+      120
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("Sunday for a full round"), 120);
+    assert.strictEqual(extractSimulatorDurationMinutes("play a round Friday evening"), 120);
+    assert.strictEqual(extractSimulatorDurationMinutes("round of golf this afternoon"), 120);
+    assert.strictEqual(extractSimulatorDurationMinutes("the round Friday evening"), 120);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("a round but actually 1 hour"),
+      60
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("around Friday evening"), null);
+    assert.strictEqual(extractSimulatorDurationMinutes("round up the guys Friday"), null);
+    assert.strictEqual(extractSimulatorDurationMinutes("a 9-hole round of golf"), null);
+  });
+
   test("latest inbound explicit weekday overrides stored offer date", async () => {
     const fixedNowMs = 1_779_047_200_000;
     Settings.now = () => fixedNowMs;
@@ -757,6 +775,33 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(expectDirectOutbound(flow).debug.durationDefaulted, true);
     assert.strictEqual(expectDirectOutbound(flow).debug.whooshAvailabilityAttempted, true);
     assert.strictEqual(expectDirectOutbound(flow).debug.requiredDetailsMissing.length, 0);
+  });
+
+  test("a round looks up 120 minutes instead of defaulting to 60", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText:
+        "Book simulator 2035-06-17 Sunday evening for 2 players for a round reservation",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].durationMinutes, 120);
+    assert.strictEqual(seen[0].partySize, 2);
+    assert.strictEqual(expectDirectOutbound(flow).debug.durationDefaulted, false);
+    assert.strictEqual(expectDirectOutbound(flow).debug.whooshAvailabilityAttempted, true);
   });
 
   test("explicit clock in follow-up prefers 11am for Whoosh preferredTimeRange while defaulting bay duration", async () => {
