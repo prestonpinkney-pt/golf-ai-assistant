@@ -393,6 +393,26 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
   });
 
+  test("clock ranges map to bay duration instead of the 60m default", () => {
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("Friday evening from 2pm to 5pm for 2 players"),
+      180
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("Saturday 2pm-5pm for two people"), 180);
+    assert.strictEqual(extractSimulatorDurationMinutes("Sunday 2-5pm bay for 2 players"), 180);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("from 4:00pm until 6:00pm Friday"),
+      120
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("11-1pm Saturday for 2 players"), 120);
+    assert.strictEqual(extractSimulatorDurationMinutes("10pm to 1am Friday"), 180);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("2pm to 5pm but actually 1 hour"),
+      60
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("I'm thinking 7pm"), null);
+  });
+
   test("latest inbound explicit weekday overrides stored offer date", async () => {
     const fixedNowMs = 1_779_047_200_000;
     Settings.now = () => fixedNowMs;
@@ -728,6 +748,34 @@ describe("sms-booking-flow", () => {
     });
     assert.strictEqual(expectDirectOutbound(flow).debug.intent, "pricing");
     assert.strictEqual(expectDirectOutbound(flow).debug.durationDefaulted, false);
+  });
+
+  test("2pm to 5pm looks up 180 minutes instead of defaulting to 60", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-17",
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText:
+        "Book simulator 2035-06-17 Sunday from 2pm to 5pm for 2 players reservation",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].durationMinutes, 180);
+    assert.strictEqual(seen[0].partySize, 2);
+    assert.strictEqual(flow.kind, "direct_outbound");
+    assert.strictEqual(expectDirectOutbound(flow).debug.durationDefaulted, false);
+    assert.strictEqual(expectDirectOutbound(flow).debug.whooshAvailabilityAttempted, true);
   });
 
   test("Sunday morning bay for two triggers Whoosh with 60m default duration (no transcript duration)", async () => {

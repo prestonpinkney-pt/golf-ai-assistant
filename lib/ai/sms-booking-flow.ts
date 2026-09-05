@@ -365,6 +365,66 @@ function readSimulatorBayDefaultDurationMinutesFromEnv(): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 60;
 }
 
+function clockPartsToMinutes(
+  hourRaw: string,
+  minuteRaw: string | undefined,
+  ampm: string
+): number | null {
+  const hour = Number(hourRaw);
+  const minute = minuteRaw ? Number(minuteRaw) : 0;
+  if (!Number.isFinite(hour) || !Number.isFinite(minute)) return null;
+  if (hour < 1 || hour > 12 || minute < 0 || minute > 59) return null;
+  let h = hour % 12;
+  if (ampm.toLowerCase() === "pm") h += 12;
+  return h * 60 + minute;
+}
+
+/**
+ * SMS clock span such as `2pm to 5pm` / `2-5pm` / `from 2:00pm until 5:00pm`.
+ * Requires am/pm on the end clock so `2-hour` is not treated as a range.
+ */
+function extractSimulatorClockRangeDurationMinutes(
+  fullText: string
+): Array<{ index: number; minutes: number }> {
+  const out: Array<{ index: number; minutes: number }> = [];
+  const rangeRe =
+    /\b(?:from\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s*(?:-|–|—|to|until|thru|through)\s*(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/gi;
+
+  for (const m of fullText.matchAll(rangeRe)) {
+    const endAp = (m[6] ?? "").toLowerCase();
+    if (endAp !== "am" && endAp !== "pm") continue;
+    const startApExplicit = m[3]?.toLowerCase();
+    const startAp =
+      startApExplicit === "am" || startApExplicit === "pm" ? startApExplicit : endAp;
+    const start = clockPartsToMinutes(m[1] ?? "", m[2], startAp);
+    const end = clockPartsToMinutes(m[4] ?? "", m[5], endAp);
+    if (start == null || end == null) continue;
+
+    let duration = end - start;
+    if (duration <= 0 && !startApExplicit) {
+      const flipped = startAp === "am" ? "pm" : "am";
+      const flippedStart = clockPartsToMinutes(m[1] ?? "", m[2], flipped);
+      if (flippedStart != null) {
+        const flippedDur = end - flippedStart;
+        if (flippedDur > 0) duration = flippedDur;
+        else {
+          const wrap = end + 24 * 60 - flippedStart;
+          if (wrap > 0 && wrap <= 8 * 60) duration = wrap;
+        }
+      }
+    }
+    if (duration <= 0) {
+      const wrap = end + 24 * 60 - start;
+      if (wrap > 0 && wrap <= 8 * 60) duration = wrap;
+      else continue;
+    }
+    if (duration < 15 || duration > 12 * 60) continue;
+    out.push({ index: m.index ?? 0, minutes: duration });
+  }
+
+  return out;
+}
+
 export function extractSimulatorDurationMinutes(fullText: string): number | null {
   const matches: Array<{ index: number; minutes: number }> = [];
 
@@ -397,6 +457,10 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
 
   for (const m of fullText.matchAll(/\b(?:a|an)\s+(?:full\s+)?hour\b|\bhourly\b/gi)) {
     push(m.index ?? 0, 60);
+  }
+
+  for (const range of extractSimulatorClockRangeDurationMinutes(fullText)) {
+    push(range.index, range.minutes);
   }
 
   matches.sort((a, b) => a.index - b.index);
@@ -909,7 +973,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (!t) return false;
 
   const mentionsCalendarPartyOrBookingScope =
-    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
+    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?)|(?:from\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*(?:-|to|until)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/i.test(
       inbound
     ) || /\b(?:bay|simulator|sim\b|lesson|event)\b/i.test(t);
 
@@ -938,7 +1002,9 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (/\bfor\s+\d+\s+players?\b/i.test(t)) return true;
   if (/\b\d+\s+players?\b/i.test(t)) return true;
   if (
-    /\b(?:half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(t)
+    /\b(?:half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?)|(?:from\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*(?:-|to|until)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm))\b/i.test(
+      t
+    )
   )
     return true;
   return false;
