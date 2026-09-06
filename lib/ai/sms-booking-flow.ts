@@ -453,7 +453,15 @@ export function resolveRequestedDateFromText(
   let m: RegExpExecArray | null;
   while ((m = weekdayRe.exec(subject)) !== null) {
     const dow = weekdayMap[m[2]?.toLowerCase() ?? ""];
-    if (dow) weekdayMatch = { modifier: m[1]?.toLowerCase() ?? null, dow };
+    if (!dow) continue;
+    let modifier = m[1]?.toLowerCase() ?? null;
+    // "Friday next week" / "Friday of next week" — not "next weekend"
+    const after = subject.slice((m.index ?? 0) + m[0].length);
+    if (/^\s+(?:of\s+)?next\s+week\b(?!end)/i.test(after)) modifier = "next";
+    // "next week Friday" / "next week on Friday" / "next week's Friday"
+    const before = subject.slice(0, m.index ?? 0);
+    if (/\bnext\s+week(?:'s)?(?:\s+on)?\s+$/i.test(before)) modifier = "next";
+    weekdayMatch = { modifier, dow };
   }
   if (weekdayMatch) {
     const baseDelta = (weekdayMatch.dow - local.weekday + 7) % 7;
