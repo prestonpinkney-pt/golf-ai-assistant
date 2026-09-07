@@ -403,6 +403,116 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+const MONTH_NAME_TO_NUM: Record<string, number> = {
+  january: 1,
+  jan: 1,
+  february: 2,
+  feb: 2,
+  march: 3,
+  mar: 3,
+  april: 4,
+  apr: 4,
+  may: 5,
+  june: 6,
+  jun: 6,
+  july: 7,
+  jul: 7,
+  august: 8,
+  aug: 8,
+  september: 9,
+  sept: 9,
+  sep: 9,
+  october: 10,
+  oct: 10,
+  november: 11,
+  nov: 11,
+  december: 12,
+  dec: 12,
+};
+
+const MONTH_NAME_TOKEN =
+  "january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec";
+
+const WEEKDAY_TOKEN =
+  "monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun";
+
+function parseWeekCountToken(token: string | undefined): number {
+  const t = (token ?? "").toLowerCase();
+  if (t === "a" || t === "one") return 1;
+  if (t === "two") return 2;
+  const n = Number(t);
+  return Number.isFinite(n) && n >= 1 && n <= 12 ? Math.round(n) : 0;
+}
+
+function calendarDateInZone(
+  year: number,
+  month: number,
+  day: number,
+  zone: string
+): DateTime {
+  const dt = DateTime.fromObject({ year, month, day }, { zone });
+  if (!dt.isValid || dt.year !== year || dt.month !== month || dt.day !== day) {
+    return DateTime.invalid("unrepresentable calendar date");
+  }
+  return dt;
+}
+
+/** Last "September 18" / "Sept. 18th" / "Sep 18, 2026" wins. Past dates without a year roll to next year. */
+function resolveNamedMonthDayFromText(
+  subject: string,
+  local: DateTime,
+  timezone: string
+): { isoDate: string; source: SmsBookingDateSource } | null {
+  const monthRe = new RegExp(
+    `\\b(${MONTH_NAME_TOKEN})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?(?:,?\\s*(20\\d{2}))?\\b`,
+    "gi"
+  );
+  let last: { month: number; day: number; year: number | null } | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = monthRe.exec(subject)) !== null) {
+    const month = MONTH_NAME_TO_NUM[m[1]?.toLowerCase() ?? ""];
+    const day = Number(m[2]);
+    const year = m[3] ? Number(m[3]) : null;
+    if (!month || !Number.isFinite(day) || day < 1 || day > 31) continue;
+    last = { month, day, year };
+  }
+  if (!last) return null;
+
+  let dt = calendarDateInZone(last.year ?? local.year, last.month, last.day, timezone);
+  if (!dt.isValid) return null;
+  if (last.year == null && dt < local) {
+    dt = calendarDateInZone(local.year + 1, last.month, last.day, timezone);
+    if (!dt.isValid) return null;
+  }
+  const iso = dt.toISODate();
+  return iso ? { isoDate: iso, source: "explicit_date" } : null;
+}
+
+/** "Friday the 18th" is that calendar day, not this coming Friday. */
+function resolveWeekdayTheNthFromText(
+  subject: string,
+  local: DateTime,
+  timezone: string
+): { isoDate: string; source: SmsBookingDateSource } | null {
+  const nthRe = new RegExp(`\\b(?:${WEEKDAY_TOKEN})\\s+the\\s+(\\d{1,2})(?:st|nd|rd|th)\\b`, "gi");
+  let lastDay: number | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = nthRe.exec(subject)) !== null) {
+    const day = Number(m[1]);
+    if (Number.isFinite(day) && day >= 1 && day <= 31) lastDay = day;
+  }
+  if (lastDay == null) return null;
+
+  let dt = calendarDateInZone(local.year, local.month, lastDay, timezone);
+  if (!dt.isValid || dt < local) {
+    const nextMonth = local.plus({ months: 1 });
+    dt = calendarDateInZone(nextMonth.year, nextMonth.month, lastDay, timezone);
+  }
+  if (!dt.isValid) return null;
+  const iso = dt.toISODate();
+  return iso ? { isoDate: iso, source: "explicit_date" } : null;
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -428,6 +538,12 @@ export function resolveRequestedDateFromText(
     return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
   }
 
+  const namedMonth = resolveNamedMonthDayFromText(subject, local, timezone);
+  if (namedMonth) return namedMonth;
+
+  const weekdayNth = resolveWeekdayTheNthFromText(subject, local, timezone);
+  if (weekdayNth) return weekdayNth;
+
   const weekdayMap: Record<string, number> = {
     monday: 1,
     mon: 1,
@@ -447,18 +563,24 @@ export function resolveRequestedDateFromText(
     sunday: 7,
     sun: 7,
   };
-  const weekdayRe =
-    /\b(?:(this|next)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun)\b/gi;
-  let weekdayMatch: { modifier: string | null; dow: number } | null = null;
+  const weekdayRe = new RegExp(`\\b(?:(this|next)\\s+)?(${WEEKDAY_TOKEN})\\b`, "gi");
+  let weekdayMatch: { modifier: string | null; dow: number; extraWeeks: number } | null = null;
   let m: RegExpExecArray | null;
   while ((m = weekdayRe.exec(subject)) !== null) {
     const dow = weekdayMap[m[2]?.toLowerCase() ?? ""];
-    if (dow) weekdayMatch = { modifier: m[1]?.toLowerCase() ?? null, dow };
+    if (!dow) continue;
+    const modifier = m[1]?.toLowerCase() ?? null;
+    const before = subject.slice(0, m.index ?? 0);
+    const after = subject.slice((m.index ?? 0) + m[0].length);
+    const weeksFromBefore = /(?:^|\s)(a|one|two|\d{1,2})\s+weeks?\s+from\s+$/i.exec(before);
+    const weeksFromAfter = /^\s+(?:in\s+)?(a|one|two|\d{1,2})\s+weeks?\b/i.exec(after);
+    const extraWeeks = parseWeekCountToken(weeksFromBefore?.[1] ?? weeksFromAfter?.[1]);
+    weekdayMatch = { modifier, dow, extraWeeks };
   }
   if (weekdayMatch) {
     const baseDelta = (weekdayMatch.dow - local.weekday + 7) % 7;
     const days =
-      weekdayMatch.modifier === "next" ? baseDelta + 7 : baseDelta;
+      (weekdayMatch.modifier === "next" ? baseDelta + 7 : baseDelta) + weekdayMatch.extraWeeks * 7;
     return {
       isoDate: local.plus({ days }).toISODate(),
       source: "explicit_weekday",
@@ -909,7 +1031,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (!t) return false;
 
   const mentionsCalendarPartyOrBookingScope =
-    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
+    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?)|(?:january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\.?\s+\d{1,2})\b/i.test(
       inbound
     ) || /\b(?:bay|simulator|sim\b|lesson|event)\b/i.test(t);
 
@@ -930,6 +1052,12 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
     return true;
   if (
     /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?)\b/i.test(
+      inbound
+    )
+  )
+    return true;
+  if (
+    /\b(?:january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b/i.test(
       inbound
     )
   )

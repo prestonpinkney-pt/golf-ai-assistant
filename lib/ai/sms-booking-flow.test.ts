@@ -385,6 +385,53 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(resolved.source, "explicit_weekday");
   });
 
+  test("named month and Friday the 18th beat this coming Friday", () => {
+    // Monday 2026-09-07: this Friday is 2026-09-11; September 18 is the following Friday.
+    const monday = DateTime.fromISO("2026-09-07T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    assert.strictEqual(resolveRequestedDateFromText("Friday", monday).isoDate, "2026-09-11");
+    assert.strictEqual(
+      resolveRequestedDateFromText("Friday, September 18 evening", monday).isoDate,
+      "2026-09-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("Friday Sept. 18th for 2 hours", monday).isoDate,
+      "2026-09-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("Book simulator September 18 evening", monday).isoDate,
+      "2026-09-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("Friday the 18th evening", monday).isoDate,
+      "2026-09-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a week from Friday", monday).isoDate,
+      "2026-09-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("Friday in two weeks", monday).isoDate,
+      "2026-09-25"
+    );
+    // Named calendar day wins over a conflicting weekday label in the same SMS.
+    assert.strictEqual(
+      resolveRequestedDateFromText("Friday, October 1", monday).isoDate,
+      "2026-10-01"
+    );
+    // Past month without a year rolls forward so spring dates in September are next year.
+    assert.strictEqual(
+      resolveRequestedDateFromText("March 15 evening", monday).isoDate,
+      "2027-03-15"
+    );
+    // "I may book Friday" must not treat "may" as May.
+    assert.strictEqual(
+      resolveRequestedDateFromText("I may book Friday evening", monday).isoDate,
+      "2026-09-11"
+    );
+  });
+
   test("simulator duration phrases resolve deterministically", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 people for 2 hours"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for two hours"), 120);
@@ -483,6 +530,33 @@ describe("sms-booking-flow", () => {
     });
 
     assert.deepStrictEqual(seenDates, ["2026-05-21"]);
+  });
+
+  test("Friday September 18 looks up Whoosh on Sept 18, not this coming Friday", async () => {
+    const monday = DateTime.fromISO("2026-09-07T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => monday.toMillis();
+
+    const seenDates: string[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seenDates.push(p.date);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    await runAugment({
+      inboundText: "Book simulator Friday, September 18 evening for 2 players for 2 hours",
+      playbook: "simulator",
+    });
+
+    assert.deepStrictEqual(seenDates, ["2026-09-18"]);
   });
 
   test("Saturday evening interest without player count never calls Whoosh for exact times", async () => {
