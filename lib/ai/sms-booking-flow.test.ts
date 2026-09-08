@@ -385,6 +385,39 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(resolved.source, "explicit_weekday");
   });
 
+  test("a week from today and day after tomorrow beat bare today/tomorrow", () => {
+    // Tuesday 2026-09-08: tomorrow is the 9th; a week from today is the 15th.
+    const tuesday = DateTime.fromISO("2026-09-08T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    assert.strictEqual(resolveRequestedDateFromText("today", tuesday).isoDate, "2026-09-08");
+    assert.strictEqual(resolveRequestedDateFromText("tomorrow", tuesday).isoDate, "2026-09-09");
+    assert.strictEqual(
+      resolveRequestedDateFromText("a week from today", tuesday).isoDate,
+      "2026-09-15"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("one week from today evening", tuesday).isoDate,
+      "2026-09-15"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("two weeks from today", tuesday).isoDate,
+      "2026-09-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a week from tomorrow", tuesday).isoDate,
+      "2026-09-16"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the day after tomorrow", tuesday).isoDate,
+      "2026-09-10"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("day after tomorrow evening", tuesday).isoDate,
+      "2026-09-10"
+    );
+  });
+
   test("simulator duration phrases resolve deterministically", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 people for 2 hours"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for two hours"), 120);
@@ -483,6 +516,33 @@ describe("sms-booking-flow", () => {
     });
 
     assert.deepStrictEqual(seenDates, ["2026-05-21"]);
+  });
+
+  test("a week from today looks up Whoosh 7 days out, not today", async () => {
+    const tuesday = DateTime.fromISO("2026-09-08T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => tuesday.toMillis();
+
+    const seenDates: string[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seenDates.push(p.date);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    await runAugment({
+      inboundText: "Book simulator a week from today evening for 2 players for 2 hours",
+      playbook: "simulator",
+    });
+
+    assert.deepStrictEqual(seenDates, ["2026-09-15"]);
   });
 
   test("Saturday evening interest without player count never calls Whoosh for exact times", async () => {

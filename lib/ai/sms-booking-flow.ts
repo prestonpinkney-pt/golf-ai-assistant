@@ -403,6 +403,28 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+/**
+ * Last "a week from today" / "two weeks from tomorrow" wins.
+ * Must run before bare `\btoday\b` / `\btomorrow\b` or those phrases book 7 days early.
+ */
+function parseWeeksFromTodayOrTomorrow(lowered: string): { days: number } | null {
+  const re =
+    /(?:^|\s)(a|one|two|\d{1,2})\s+weeks?\s+from\s+(today|tomorrow)\b/gi;
+  let last: { days: number } | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(lowered)) !== null) {
+    const token = (m[1] ?? "").toLowerCase();
+    const weeks =
+      token === "a" || token === "one" ? 1
+      : token === "two" ? 2
+      : Number(token);
+    if (!Number.isFinite(weeks) || weeks < 1 || weeks > 12) continue;
+    const extraDays = m[2]?.toLowerCase() === "tomorrow" ? 1 : 0;
+    last = { days: Math.round(weeks) * 7 + extraDays };
+  }
+  return last;
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -413,6 +435,19 @@ export function resolveRequestedDateFromText(
 
   const direct = subject.match(ISO_DATE);
   if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
+
+  // "the day after tomorrow" contains "tomorrow" — resolve +2 before the bare match.
+  if (/\b(?:the\s+)?day\s+after\s+tomorrow\b/i.test(lowered)) {
+    return { isoDate: local.plus({ days: 2 }).toISODate(), source: "explicit_date" };
+  }
+
+  const weeksFromAnchor = parseWeeksFromTodayOrTomorrow(lowered);
+  if (weeksFromAnchor) {
+    return {
+      isoDate: local.plus({ days: weeksFromAnchor.days }).toISODate(),
+      source: "explicit_date",
+    };
+  }
 
   if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
   if (/\btomorrow\b/i.test(lowered)) {
