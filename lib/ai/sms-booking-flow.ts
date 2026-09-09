@@ -403,6 +403,37 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+/**
+ * True when a date token is rejected in conversational SMS:
+ * "not today", "can't do Friday", "today doesn't work", "Friday not Saturday".
+ */
+function dateTokenIsNegated(text: string, matchIndex: number, matchLength: number): boolean {
+  const before = text.slice(Math.max(0, matchIndex - 64), matchIndex);
+  if (
+    /\b(?:not|except)\s+(?:this\s+|next\s+|coming\s+)?$/i.test(before) ||
+    /\bcan(?:not|'?t)\s+(?:do\s+|make\s+|come\s+(?:in\s+|on\s+)?)?$/i.test(before) ||
+    /\b(?:instead\s+of|rather\s+than|other\s+than)\s+$/i.test(before) ||
+    /\bdon(?:'?t)\s+(?:want\s+|need\s+|do\s+)?$/i.test(before)
+  ) {
+    return true;
+  }
+  const after = text.slice(matchIndex + matchLength);
+  return (
+    /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after) ||
+    /^\s+is\s+(?:no\s+good|out)\b/i.test(after)
+  );
+}
+
+/** Last mention wins; negated mentions ("not today") are ignored so a later weekday can win. */
+function lastNonNegatedBareDay(subject: string, word: "today" | "tomorrow"): boolean {
+  const re = word === "today" ? /\btoday\b/gi : /\btomorrow\b/gi;
+  let keep = false;
+  for (const m of subject.matchAll(re)) {
+    keep = !dateTokenIsNegated(subject, m.index ?? 0, m[0].length);
+  }
+  return keep;
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -414,8 +445,10 @@ export function resolveRequestedDateFromText(
   const direct = subject.match(ISO_DATE);
   if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
 
-  if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
-  if (/\btomorrow\b/i.test(lowered)) {
+  if (lastNonNegatedBareDay(subject, "today")) {
+    return { isoDate: local.toISODate(), source: "explicit_date" };
+  }
+  if (lastNonNegatedBareDay(subject, "tomorrow")) {
     return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
   }
 
@@ -453,7 +486,9 @@ export function resolveRequestedDateFromText(
   let m: RegExpExecArray | null;
   while ((m = weekdayRe.exec(subject)) !== null) {
     const dow = weekdayMap[m[2]?.toLowerCase() ?? ""];
-    if (dow) weekdayMatch = { modifier: m[1]?.toLowerCase() ?? null, dow };
+    if (!dow) continue;
+    if (dateTokenIsNegated(subject, m.index, m[0].length)) continue;
+    weekdayMatch = { modifier: m[1]?.toLowerCase() ?? null, dow };
   }
   if (weekdayMatch) {
     const baseDelta = (weekdayMatch.dow - local.weekday + 7) % 7;
