@@ -403,6 +403,94 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+/**
+ * Last match wins. Negated tokens ("not next weekend", "can't do next weekend",
+ * "next weekend doesn't work") are skipped so a following weekday can still win.
+ */
+function lastNonNegatedPhraseMatch(subject: string, re: RegExp): boolean {
+  const pattern = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+  let keep = false;
+  let found = false;
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(subject)) !== null) {
+    found = true;
+    const before = subject.slice(Math.max(0, m.index - 64), m.index);
+    const after = subject.slice(m.index + m[0].length);
+    const negated =
+      /\b(?:not|except)\s+(?:this\s+|the\s+|coming\s+)?$/i.test(before) ||
+      /\bcan(?:not|'?t)\s+(?:do\s+|make\s+)?$/i.test(before) ||
+      /\b(?:instead\s+of|rather\s+than)\s+$/i.test(before) ||
+      /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after);
+    keep = !negated;
+  }
+  return found && keep;
+}
+
+const WEEKDAY_WORD_RE =
+  /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun)\b/i;
+
+const MULTI_WEEK_WORD_TO_N: Record<string, number> = {
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+};
+
+/** "next weekend" — Saturday of the following week, not this coming Saturday. */
+function nextWeekendPhrase(subject: string): boolean {
+  return lastNonNegatedPhraseMatch(subject, /\b(?:the\s+)?next\s+weekend\b/gi);
+}
+
+function resolveNextWeekendIso(local: DateTime): string | null {
+  if (local.weekday === 6) return local.plus({ days: 7 }).toISODate();
+  if (local.weekday === 7) return local.plus({ days: 6 }).toISODate();
+  return local.plus({ days: 6 - local.weekday + 7 }).toISODate();
+}
+
+/**
+ * Bare "in 2 weeks" / "two weeks from now" / "in a couple of weeks" → +N*7.
+ * Leave phrases that also name a weekday ("Friday in two weeks") to weekday
+ * matching so a later weekday+offset parser can own that case.
+ */
+function parseStandaloneInMultipleWeeksOffset(subject: string): number | null {
+  if (WEEKDAY_WORD_RE.test(subject)) return null;
+
+  const coupleRe = /\bin\s+a\s+couple\s+(?:of\s+)?weeks?\b|\ba\s+couple\s+(?:of\s+)?weeks?\s+from\s+now\b/gi;
+  if (lastNonNegatedPhraseMatch(subject, coupleRe)) return 14;
+
+  const fromNowRe = /\b(two|three|four|five|six|[2-9])\s+weeks?\s+from\s+now\b/gi;
+  let fromNowDays: number | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = fromNowRe.exec(subject)) !== null) {
+    const before = subject.slice(Math.max(0, m.index - 64), m.index);
+    const after = subject.slice(m.index + m[0].length);
+    const negated =
+      /\b(?:not|except)\s+$/i.test(before) ||
+      /\bcan(?:not|'?t)\s+(?:do\s+|make\s+)?$/i.test(before) ||
+      /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after);
+    if (negated) continue;
+    const n = MULTI_WEEK_WORD_TO_N[m[1]?.toLowerCase() ?? ""] ?? Number(m[1]);
+    if (Number.isFinite(n) && n >= 2) fromNowDays = n * 7;
+  }
+  if (fromNowDays != null) return fromNowDays;
+
+  const inWeeksRe = /\bin\s+(two|three|four|five|six|[2-9])\s+weeks?\b/gi;
+  let inWeeksDays: number | null = null;
+  while ((m = inWeeksRe.exec(subject)) !== null) {
+    const before = subject.slice(Math.max(0, m.index - 64), m.index);
+    const after = subject.slice(m.index + m[0].length);
+    const negated =
+      /\b(?:not|except)\s+$/i.test(before) ||
+      /\bcan(?:not|'?t)\s+(?:do\s+|make\s+)?$/i.test(before) ||
+      /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after);
+    if (negated) continue;
+    const n = MULTI_WEEK_WORD_TO_N[m[1]?.toLowerCase() ?? ""] ?? Number(m[1]);
+    if (Number.isFinite(n) && n >= 2) inWeeksDays = n * 7;
+  }
+  return inWeeksDays;
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -413,6 +501,15 @@ export function resolveRequestedDateFromText(
 
   const direct = subject.match(ISO_DATE);
   if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
+
+  const inMultipleWeeks = parseStandaloneInMultipleWeeksOffset(subject);
+  if (inMultipleWeeks != null) {
+    return { isoDate: local.plus({ days: inMultipleWeeks }).toISODate(), source: "explicit_date" };
+  }
+
+  if (nextWeekendPhrase(subject)) {
+    return { isoDate: resolveNextWeekendIso(local), source: "explicit_date" };
+  }
 
   if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
   if (/\btomorrow\b/i.test(lowered)) {
@@ -909,7 +1006,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (!t) return false;
 
   const mentionsCalendarPartyOrBookingScope =
-    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
+    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|(?:the\s+)?next\s+weekend|in\s+(?:a\s+couple\s+(?:of\s+)?|[2-9]\s+|two|three|four|five|six\s+)weeks?|(?:two|three|four|five|six|[2-9])\s+weeks?\s+from\s+now|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
       inbound
     ) || /\b(?:bay|simulator|sim\b|lesson|event)\b/i.test(t);
 
@@ -931,6 +1028,13 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (
     /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?)\b/i.test(
       inbound
+    )
+  )
+    return true;
+  if (/\b(?:the\s+)?next\s+weekend\b/i.test(t)) return true;
+  if (
+    /\bin\s+(?:a\s+couple\s+(?:of\s+)?|[2-9]\s+|two|three|four|five|six\s+)weeks?\b|\b(?:two|three|four|five|six|[2-9])\s+weeks?\s+from\s+now\b|\ba\s+couple\s+(?:of\s+)?weeks?\s+from\s+now\b/i.test(
+      t
     )
   )
     return true;
