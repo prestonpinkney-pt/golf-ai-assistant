@@ -403,6 +403,78 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+const WEEKDAY_PREFIX_RE =
+  /\b(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun)\s+$/i;
+const MONTH_NAME_PREFIX_RE =
+  /\b(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\.?\s+$/i;
+const MONTH_NAME_OF_SUFFIX_RE =
+  /^\s+of\s+(?:january|february|march|april|may|june|july|august|september|october|november|december|jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)\b/i;
+
+function calendarDateInZone(
+  year: number,
+  month: number,
+  day: number,
+  zone: string
+): DateTime {
+  const dt = DateTime.fromObject({ year, month, day }, { zone });
+  if (!dt.isValid || dt.year !== year || dt.month !== month || dt.day !== day) {
+    return DateTime.invalid("unrepresentable calendar date");
+  }
+  return dt;
+}
+
+function bareTheNthIsNegated(subject: string, matchIndex: number, matchLength: number): boolean {
+  const before = subject.slice(Math.max(0, matchIndex - 64), matchIndex);
+  const after = subject.slice(matchIndex + matchLength);
+  return (
+    /\b(?:not|except)\s+(?:on\s+|do\s+)?$/i.test(before) ||
+    /\bcan(?:not|'?t)\s+(?:do\s+|make\s+)?$/i.test(before) ||
+    /\b(?:instead\s+of|rather\s+than)\s+$/i.test(before) ||
+    /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after)
+  );
+}
+
+/**
+ * Last non-negated "the 15th" / "on the 21st".
+ * Days 1–3 stay unresolved so "the 1st/2nd/3rd" remain slot-pick ordinals.
+ * Weekday-prefixed ("Friday the 18th") and month-adjacent phrases are left to
+ * the named-month / weekday-the-Nth parsers.
+ */
+function lastNonNegatedBareTheNthDay(subject: string): number | null {
+  const re = /\b(?:on\s+)?the\s+(\d{1,2})(?:st|nd|rd|th)\b/gi;
+  let last: number | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(subject)) !== null) {
+    const day = Number(m[1]);
+    if (!Number.isFinite(day) || day < 4 || day > 31) continue;
+    const before = subject.slice(Math.max(0, m.index - 16), m.index);
+    if (WEEKDAY_PREFIX_RE.test(before) || MONTH_NAME_PREFIX_RE.test(before)) continue;
+    const after = subject.slice(m.index + m[0].length);
+    if (MONTH_NAME_OF_SUFFIX_RE.test(after)) continue;
+    if (bareTheNthIsNegated(subject, m.index, m[0].length)) continue;
+    last = day;
+  }
+  return last;
+}
+
+/** "the 15th" is that day this month, or next month when already past / invalid. */
+function resolveBareTheNthFromText(
+  subject: string,
+  local: DateTime,
+  timezone: string
+): { isoDate: string; source: SmsBookingDateSource } | null {
+  const day = lastNonNegatedBareTheNthDay(subject);
+  if (day == null) return null;
+  let dt = calendarDateInZone(local.year, local.month, day, timezone);
+  if (!dt.isValid || dt < local) {
+    const nextMonth = local.plus({ months: 1 });
+    dt = calendarDateInZone(nextMonth.year, nextMonth.month, day, timezone);
+  }
+  if (!dt.isValid) return null;
+  const iso = dt.toISODate();
+  return iso ? { isoDate: iso, source: "explicit_date" } : null;
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -427,6 +499,9 @@ export function resolveRequestedDateFromText(
     });
     return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
   }
+
+  const bareNth = resolveBareTheNthFromText(subject, local, timezone);
+  if (bareNth) return bareNth;
 
   const weekdayMap: Record<string, number> = {
     monday: 1,
@@ -909,7 +984,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (!t) return false;
 
   const mentionsCalendarPartyOrBookingScope =
-    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
+    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|(?:on\s+)?the\s+(?:[4-9]|[12]\d|3[01])(?:st|nd|rd|th)|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
       inbound
     ) || /\b(?:bay|simulator|sim\b|lesson|event)\b/i.test(t);
 
@@ -934,6 +1009,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
     )
   )
     return true;
+  if (/\b(?:on\s+)?the\s+(?:[4-9]|[12]\d|3[01])(?:st|nd|rd|th)\b/i.test(t)) return true;
   if (/\bfor\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)\b/i.test(t)) return true;
   if (/\bfor\s+\d+\s+players?\b/i.test(t)) return true;
   if (/\b\d+\s+players?\b/i.test(t)) return true;
