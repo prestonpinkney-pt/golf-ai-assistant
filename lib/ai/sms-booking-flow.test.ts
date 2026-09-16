@@ -385,6 +385,41 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(resolved.source, "explicit_weekday");
   });
 
+  test("the weekend is Saturday, not a leftover Friday", () => {
+    const thursday = DateTime.fromISO("2026-09-10T16:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    const saturday = DateTime.fromISO("2026-09-12T16:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    const sunday = DateTime.fromISO("2026-09-13T16:00:00", {
+      zone: "America/Los_Angeles",
+    });
+
+    assert.strictEqual(resolveRequestedDateFromText("the weekend", thursday).isoDate, "2026-09-12");
+    assert.strictEqual(
+      resolveRequestedDateFromText("Book the weekend for 2 players", thursday).isoDate,
+      "2026-09-12"
+    );
+    assert.strictEqual(resolveRequestedDateFromText("on the weekend", thursday).isoDate, "2026-09-12");
+    assert.strictEqual(resolveRequestedDateFromText("for the weekend", thursday).isoDate, "2026-09-12");
+    assert.strictEqual(resolveRequestedDateFromText("during the weekend", thursday).isoDate, "2026-09-12");
+    assert.strictEqual(resolveRequestedDateFromText("the weekend", saturday).isoDate, "2026-09-12");
+    assert.strictEqual(resolveRequestedDateFromText("the weekend", sunday).isoDate, "2026-09-13");
+    assert.strictEqual(
+      resolveRequestedDateFromText("not the weekend, Friday", thursday).isoDate,
+      "2026-09-11"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("can't do the weekend, Saturday", thursday).isoDate,
+      "2026-09-12"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the weekend doesn't work, Friday", thursday).isoDate,
+      "2026-09-11"
+    );
+  });
+
   test("simulator duration phrases resolve deterministically", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 people for 2 hours"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for two hours"), 120);
@@ -483,6 +518,40 @@ describe("sms-booking-flow", () => {
     });
 
     assert.deepStrictEqual(seenDates, ["2026-05-21"]);
+  });
+
+  test("the weekend looks up Whoosh for Saturday, not a leftover Friday", async () => {
+    const thursday = DateTime.fromISO("2026-09-10T16:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => thursday.toMillis();
+
+    const seenDates: string[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seenDates.push(p.date);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText: "Book simulator the weekend evening for 2 players for 2 hours",
+      playbook: "simulator",
+      conversationHistory: inboundOnlyHistory([
+        "Book simulator Friday evening for 2 players for 2 hours",
+      ]),
+    });
+
+    assert.deepStrictEqual(seenDates, ["2026-09-12"]);
+    const out = expectDirectOutbound(flow);
+    assert.strictEqual(out.debug.resolved_requested_date, "2026-09-12");
+    assert.strictEqual(out.debug.date_source, "explicit_date");
+    assert.strictEqual(out.debug.latestInboundIsNewBookingRequest, true);
   });
 
   test("Saturday evening interest without player count never calls Whoosh for exact times", async () => {

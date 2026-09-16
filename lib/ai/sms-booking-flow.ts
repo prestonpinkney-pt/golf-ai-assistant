@@ -403,6 +403,46 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+/**
+ * Last match wins. Negated tokens ("not the weekend", "can't do the weekend",
+ * "the weekend doesn't work") are skipped so a following weekday can still win.
+ */
+function lastNonNegatedPhraseMatch(subject: string, re: RegExp): boolean {
+  const pattern = new RegExp(re.source, re.flags.includes("g") ? re.flags : `${re.flags}g`);
+  let keep = false;
+  let found = false;
+  let m: RegExpExecArray | null;
+  while ((m = pattern.exec(subject)) !== null) {
+    const before = subject.slice(Math.max(0, m.index - 64), m.index);
+    const after = subject.slice(m.index + m[0].length);
+    // Leave "over the weekend" / "this weekend" to the dedicated weekend parsers.
+    if (/\bover\s+$/i.test(before)) continue;
+    // "the weekend after next" is not this coming Saturday.
+    if (/^\s+after\s+next\b/i.test(after)) continue;
+    found = true;
+    const negated =
+      /\b(?:not|except)\s+(?:this\s+|the\s+|coming\s+)?$/i.test(before) ||
+      /\bcan(?:not|'?t)\s+(?:do\s+|make\s+)?$/i.test(before) ||
+      /\b(?:instead\s+of|rather\s+than)\s+$/i.test(before) ||
+      /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after);
+    keep = !negated;
+  }
+  return found && keep;
+}
+
+const THE_WEEKEND_RE =
+  /\b(?:on\s+|for\s+|during\s+)?the\s+weekend\b/gi;
+
+/** "the weekend" / "on the weekend" — Saturday unless today is already Sat/Sun. */
+function theWeekendPhrase(subject: string): boolean {
+  return lastNonNegatedPhraseMatch(subject, THE_WEEKEND_RE);
+}
+
+function resolveThisWeekendIso(local: DateTime): string | null {
+  if (local.weekday === 6 || local.weekday === 7) return local.toISODate();
+  return local.plus({ days: 6 - local.weekday }).toISODate();
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -413,6 +453,10 @@ export function resolveRequestedDateFromText(
 
   const direct = subject.match(ISO_DATE);
   if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
+
+  if (theWeekendPhrase(subject)) {
+    return { isoDate: resolveThisWeekendIso(local), source: "explicit_date" };
+  }
 
   if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
   if (/\btomorrow\b/i.test(lowered)) {
@@ -909,7 +953,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (!t) return false;
 
   const mentionsCalendarPartyOrBookingScope =
-    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
+    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|(?:on\s+|for\s+|during\s+)?the\s+weekend|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
       inbound
     ) || /\b(?:bay|simulator|sim\b|lesson|event)\b/i.test(t);
 
@@ -934,6 +978,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
     )
   )
     return true;
+  if (/\b(?:on\s+|for\s+|during\s+)?the\s+weekend\b/i.test(t)) return true;
   if (/\bfor\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)\b/i.test(t)) return true;
   if (/\bfor\s+\d+\s+players?\b/i.test(t)) return true;
   if (/\b\d+\s+players?\b/i.test(t)) return true;
