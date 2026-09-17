@@ -299,15 +299,54 @@ export function extractLessonDuration(fullText: string): 30 | 60 | null {
   return null;
 }
 
-/** Prefer explicit clock (last mention wins) over coarse morning/afternoon/evening. */
+/**
+ * Last match wins. Negated tokens ("not noon", "can't do noon", "noon doesn't work")
+ * are skipped so a following daypart or clock can still win.
+ */
+function isNegatedTimeTokenAt(subject: string, index: number, matchLen: number): boolean {
+  const before = subject.slice(Math.max(0, index - 64), index);
+  const after = subject.slice(index + matchLen);
+  return (
+    /\b(?:not|except)\s+(?:this\s+|at\s+)?$/i.test(before) ||
+    /\bcan(?:not|'?t)\s+(?:do\s+|make\s+)?$/i.test(before) ||
+    /\b(?:instead\s+of|rather\s+than)\s+(?:at\s+)?$/i.test(before) ||
+    /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after)
+  );
+}
+
+const NOON_OR_MIDDAY_RE = /\bnoon\b|\bmid[\s-]?day\b/gi;
+
+/** Non-negated "noon" / "midday" — last mention wins. */
+function hasNonNegatedNoonOrMidday(subject: string): boolean {
+  const noonRe = new RegExp(NOON_OR_MIDDAY_RE.source, "gi");
+  let keep = false;
+  let found = false;
+  let m: RegExpExecArray | null;
+  while ((m = noonRe.exec(subject)) !== null) {
+    found = true;
+    keep = !isNegatedTimeTokenAt(subject, m.index, m[0].length);
+  }
+  return found && keep;
+}
+
+/** Prefer explicit clock / noon (last mention wins) over coarse morning/afternoon/evening. */
 export function extractLastExplicitClockPhrase(fullText: string): string | null {
+  const hits: Array<{ index: number; phrase: string }> = [];
+
   const clockRe = /\b(\d{1,2})(?::(\d{2}))?\s*(?:am|pm)\b/gi;
-  let last: string | null = null;
   let m;
   while ((m = clockRe.exec(fullText)) !== null) {
-    last = m[0].trim();
+    hits.push({ index: m.index, phrase: m[0].trim() });
   }
-  return last;
+
+  const noonRe = new RegExp(NOON_OR_MIDDAY_RE.source, "gi");
+  while ((m = noonRe.exec(fullText)) !== null) {
+    if (isNegatedTimeTokenAt(fullText, m.index, m[0].length)) continue;
+    hits.push({ index: m.index, phrase: "noon" });
+  }
+
+  hits.sort((a, b) => a.index - b.index);
+  return hits.at(-1)?.phrase ?? null;
 }
 
 export function extractPreferredTimePhrase(fullText: string): string | null {
@@ -909,7 +948,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (!t) return false;
 
   const mentionsCalendarPartyOrBookingScope =
-    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
+    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|noon|mid[\s-]?day|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
       inbound
     ) || /\b(?:bay|simulator|sim\b|lesson|event)\b/i.test(t);
 
@@ -934,6 +973,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
     )
   )
     return true;
+  if (hasNonNegatedNoonOrMidday(inbound)) return true;
   if (/\bfor\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)\b/i.test(t)) return true;
   if (/\bfor\s+\d+\s+players?\b/i.test(t)) return true;
   if (/\b\d+\s+players?\b/i.test(t)) return true;
