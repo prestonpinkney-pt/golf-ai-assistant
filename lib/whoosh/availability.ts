@@ -128,14 +128,22 @@ async function fetchAgendaJsonList(
   }
 }
 
-type WindowFilter = {
+export type PreferredTimeWindowFilter = {
   hourStartInclusive: number;
   hourEndExclusive: number;
-} | null;
+};
 
-function parsePreferredTimeRange(raw: string | null | undefined): WindowFilter {
+type WindowFilter = PreferredTimeWindowFilter | null;
+
+/**
+ * Coarse dayparts plus SMS "noon" / "midday" (12:00–1:00 PM).
+ * Word-boundary noon so "afternoon" does not collapse to the noon hour.
+ */
+export function parsePreferredTimeRange(raw: string | null | undefined): WindowFilter {
   if (!raw || !raw.trim()) return null;
   const text = raw.trim().toLowerCase();
+  if (/\bnoon\b|\bmid[\s-]?day\b/.test(text))
+    return { hourStartInclusive: 12, hourEndExclusive: 13 };
   if (text.includes("morning"))
     return { hourStartInclusive: 11, hourEndExclusive: 14 };
   if (text.includes("afternoon"))
