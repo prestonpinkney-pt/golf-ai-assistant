@@ -144,7 +144,8 @@ function parsePreferredTimeRange(raw: string | null | undefined): WindowFilter {
     text.includes("evening") ||
     text.includes("after work") ||
     text.includes("tonight") ||
-    text.includes("later")
+    text.includes("later") ||
+    /\bnight\b/.test(text)
   )
     return { hourStartInclusive: 17, hourEndExclusive: 21 };
   return null;

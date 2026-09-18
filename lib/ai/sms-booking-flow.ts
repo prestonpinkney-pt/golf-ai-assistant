@@ -299,6 +299,42 @@ export function extractLessonDuration(fullText: string): 30 | 60 | null {
   return null;
 }
 
+/**
+ * Last match wins. Negated tokens ("not night", "can't do night", "night doesn't work")
+ * are skipped so a following daypart or clock can still win.
+ */
+function isNegatedTimeTokenAt(subject: string, index: number, matchLen: number): boolean {
+  const before = subject.slice(Math.max(0, index - 64), index);
+  const after = subject.slice(index + matchLen);
+  return (
+    /\b(?:not|except)\s+(?:this\s+|at\s+|the\s+)?$/i.test(before) ||
+    /\bcan(?:not|'?t)\s+(?:do\s+|make\s+)?$/i.test(before) ||
+    /\b(?:instead\s+of|rather\s+than)\s+(?:at\s+|the\s+)?$/i.test(before) ||
+    /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after)
+  );
+}
+
+const NIGHT_RE = /\bnight\b/gi;
+
+function isIgnoredNightContextAt(subject: string, index: number): boolean {
+  const before = subject.slice(Math.max(0, index - 24), index);
+  return /\b(?:last|good|other|over)\s+$/i.test(before);
+}
+
+/** Non-negated "night" / "Friday night" / "at night" — last mention wins. */
+function hasNonNegatedNight(subject: string): boolean {
+  const nightRe = new RegExp(NIGHT_RE.source, "gi");
+  let keep = false;
+  let found = false;
+  let m: RegExpExecArray | null;
+  while ((m = nightRe.exec(subject)) !== null) {
+    if (isIgnoredNightContextAt(subject, m.index)) continue;
+    found = true;
+    keep = !isNegatedTimeTokenAt(subject, m.index, m[0].length);
+  }
+  return found && keep;
+}
+
 /** Prefer explicit clock (last mention wins) over coarse morning/afternoon/evening. */
 export function extractLastExplicitClockPhrase(fullText: string): string | null {
   const clockRe = /\b(\d{1,2})(?::(\d{2}))?\s*(?:am|pm)\b/gi;
@@ -315,6 +351,10 @@ export function extractPreferredTimePhrase(fullText: string): string | null {
   if (explicit) return explicit;
 
   const t = fullText.toLowerCase();
+  // Night is evening (17–21). Check before morning/afternoon so leftover
+  // "Thursday morning … Friday night" does not keep the 11 AM–2 PM window.
+  // `\bnight\b` does not match "tonight" (already mapped below).
+  if (hasNonNegatedNight(fullText)) return "evening";
   if (/\bmorning\b/.test(t)) return "morning";
   if (/\bafternoon\b/.test(t)) return "afternoon";
   if (/\bevening\b|\bafter\s*work\b|\blater\b|\btonight\b/.test(t)) return "evening";
@@ -909,7 +949,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (!t) return false;
 
   const mentionsCalendarPartyOrBookingScope =
-    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
+    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|night|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
       inbound
     ) || /\b(?:bay|simulator|sim\b|lesson|event)\b/i.test(t);
 
@@ -934,6 +974,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
     )
   )
     return true;
+  if (hasNonNegatedNight(inbound)) return true;
   if (/\bfor\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)\b/i.test(t)) return true;
   if (/\bfor\s+\d+\s+players?\b/i.test(t)) return true;
   if (/\b\d+\s+players?\b/i.test(t)) return true;
