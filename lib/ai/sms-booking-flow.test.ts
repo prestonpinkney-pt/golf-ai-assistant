@@ -12,6 +12,7 @@ import type {
   NormalizedWhooshAvailabilitySlot,
   WhooshAvailabilityParams,
 } from "@/lib/whoosh/availability";
+import { parsePreferredTimeRange } from "@/lib/whoosh/availability";
 import {
   buildWhooshIntegrationBookingWire,
   emptyWhooshRawAgendaKeyPresence,
@@ -28,6 +29,7 @@ import { estimateSimulatorBookingUsdCents } from "@/lib/primetime/simulator-quot
 import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
+  extractPreferredTimePhrase,
   extractSimulatorDurationMinutes,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
@@ -393,6 +395,41 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
   });
 
+  test("lunch and lunchtime beat leftover evening and are not evening", () => {
+    assert.strictEqual(
+      extractPreferredTimePhrase("Book simulator Friday at lunch for 2 players for 2 hours"),
+      "lunch"
+    );
+    assert.strictEqual(extractPreferredTimePhrase("at lunchtime"), "lunch");
+    assert.strictEqual(extractPreferredTimePhrase("lunchtime bay time"), "lunch");
+    assert.strictEqual(
+      extractPreferredTimePhrase(
+        "Book simulator Friday evening for 2 players for 2 hours\nBook simulator Friday at lunch for 2 players for 2 hours"
+      ),
+      "lunch"
+    );
+    assert.strictEqual(extractPreferredTimePhrase("not lunch, evening"), "evening");
+    assert.strictEqual(extractPreferredTimePhrase("after lunch"), "afternoon");
+    assert.strictEqual(extractPreferredTimePhrase("before lunch"), "morning");
+    assert.strictEqual(extractPreferredTimePhrase("afternoon"), "afternoon");
+    assert.deepEqual(parsePreferredTimeRange("lunch"), {
+      hourStartInclusive: 11,
+      hourEndExclusive: 14,
+    });
+    assert.deepEqual(parsePreferredTimeRange("lunchtime"), {
+      hourStartInclusive: 11,
+      hourEndExclusive: 14,
+    });
+    assert.deepEqual(parsePreferredTimeRange("evening"), {
+      hourStartInclusive: 17,
+      hourEndExclusive: 21,
+    });
+    assert.deepEqual(parsePreferredTimeRange("afternoon"), {
+      hourStartInclusive: 14,
+      hourEndExclusive: 17,
+    });
+  });
+
   test("latest inbound explicit weekday overrides stored offer date", async () => {
     const fixedNowMs = 1_779_047_200_000;
     Settings.now = () => fixedNowMs;
@@ -534,6 +571,93 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(seen[0].preferredTimeRange, "evening");
     const outbound = expectDirectOutbound(flow);
     assert.ok(/see.*available|6:30\sPM/i.test(outbound.replyText));
+  });
+
+  test("at lunch looks up Whoosh lunch window, not leftover evening or first public 11am", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-03",
+        slotRowsLoaded: 4,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText:
+        "Book simulator 2035-06-03 at lunch for 2 players for 2 hours bay reserve schedule please",
+      playbook: "simulator",
+      conversationHistory: inboundOnlyHistory([
+        "Book simulator 2035-06-03 evening for 2 players for 2 hours",
+      ]),
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].preferredTimeRange, "lunch");
+    assert.notStrictEqual(seen[0].preferredTimeRange, "evening");
+    assert.strictEqual(expectDirectOutbound(flow).debug.whooshAvailabilityAttempted, true);
+    assert.strictEqual(expectDirectOutbound(flow).debug.usingStoredOfferSlots, false);
+  });
+
+  test("follow-up at lunch does not reuse stored evening offer slots", async () => {
+    const conv = "00000000-0000-4000-a000-00000000d4e1";
+    const sb = new FakeBookingSupabase();
+    const biz = "00000000-0000-0000-0000-000000000099";
+    const cid = "00000000-0000-4000-a000-000000000002";
+
+    sb.rows.push({
+      business_id: biz,
+      conversation_id: conv,
+      contact_id: cid,
+      provider: "whoosh",
+      action_type: "availability_lookup",
+      status: "completed",
+      service_type: "simulator",
+      requested_date: "2035-06-03",
+      party_size: 2,
+      duration_minutes: 120,
+      raw_payload: {
+        agenda_date: "2035-06-03",
+        offered_slots: wireStoredOffersFromBaySlots([sampleSlot()]),
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-03",
+        slotRowsLoaded: 4,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText: "at lunch",
+      playbook: "simulator",
+      conversationId: conv,
+      contactId: cid,
+      sb,
+      conversationHistory: inboundOnlyHistory([
+        "Book simulator 2035-06-03 evening for 2 players for 2 hours",
+      ]),
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].preferredTimeRange, "lunch");
+    assert.strictEqual(expectDirectOutbound(flow).debug.usingStoredOfferSlots, false);
+    assert.strictEqual(
+      expectDirectOutbound(flow).debug.storedOfferRejectedReason,
+      "superseded_by_new_booking_request"
+    );
   });
 
   test("affirmations without slot digits never create bookings", async () => {
