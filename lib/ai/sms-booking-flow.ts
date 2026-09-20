@@ -299,6 +299,67 @@ export function extractLessonDuration(fullText: string): 30 | 60 | null {
   return null;
 }
 
+/**
+ * Last match wins. Negated tokens ("not dinner", "can't do dinner", "dinner doesn't work")
+ * are skipped so a following daypart or clock can still win.
+ */
+function isNegatedTimeTokenAt(subject: string, index: number, matchLen: number): boolean {
+  const before = subject.slice(Math.max(0, index - 64), index);
+  const after = subject.slice(index + matchLen);
+  return (
+    /\b(?:not|except)\s+(?:this\s+|at\s+|for\s+|the\s+)?$/i.test(before) ||
+    /\bcan(?:not|'?t)\s+(?:do\s+|make\s+)?$/i.test(before) ||
+    /\b(?:instead\s+of|rather\s+than)\s+(?:at\s+|for\s+|the\s+)?$/i.test(before) ||
+    /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after)
+  );
+}
+
+const BEFORE_DINNER_RE = /\bbefore\s+(?:dinner|supper)(?:time)?\b/gi;
+const AFTER_DINNER_RE = /\bafter\s+(?:dinner|supper)(?:time)?\b/gi;
+const DINNER_RE = /\b(?:dinner|supper)(?:time)?\b/gi;
+
+/** Skip dinner tokens that belong to after/before dinner or non-booking "out to dinner". */
+function isIgnoredDinnerContextAt(subject: string, index: number): boolean {
+  const before = subject.slice(Math.max(0, index - 24), index);
+  return /\b(?:after|before|out\s+to)\s+$/i.test(before);
+}
+
+/**
+ * Non-negated dinner / supper / after dinner / before dinner — last mention wins.
+ * Dinner and after dinner are evening (17–21); before dinner is afternoon (14–17).
+ */
+function extractDinnerRelatedPhrase(fullText: string): "afternoon" | "evening" | null {
+  const hits: Array<{ index: number; phrase: "afternoon" | "evening" }> = [];
+  let m: RegExpExecArray | null;
+
+  const afterDinnerRe = new RegExp(AFTER_DINNER_RE.source, "gi");
+  while ((m = afterDinnerRe.exec(fullText)) !== null) {
+    if (isNegatedTimeTokenAt(fullText, m.index, m[0].length)) continue;
+    hits.push({ index: m.index, phrase: "evening" });
+  }
+
+  const beforeDinnerRe = new RegExp(BEFORE_DINNER_RE.source, "gi");
+  while ((m = beforeDinnerRe.exec(fullText)) !== null) {
+    if (isNegatedTimeTokenAt(fullText, m.index, m[0].length)) continue;
+    hits.push({ index: m.index, phrase: "afternoon" });
+  }
+
+  const dinnerRe = new RegExp(DINNER_RE.source, "gi");
+  while ((m = dinnerRe.exec(fullText)) !== null) {
+    if (isIgnoredDinnerContextAt(fullText, m.index)) continue;
+    if (isNegatedTimeTokenAt(fullText, m.index, m[0].length)) continue;
+    hits.push({ index: m.index, phrase: "evening" });
+  }
+
+  hits.sort((a, b) => a.index - b.index);
+  return hits.at(-1)?.phrase ?? null;
+}
+
+/** True when inbound mentions a bookable dinner/supper window (not "out to dinner"). */
+function hasNonNegatedDinnerRelated(subject: string): boolean {
+  return extractDinnerRelatedPhrase(subject) != null;
+}
+
 /** Prefer explicit clock (last mention wins) over coarse morning/afternoon/evening. */
 export function extractLastExplicitClockPhrase(fullText: string): string | null {
   const clockRe = /\b(\d{1,2})(?::(\d{2}))?\s*(?:am|pm)\b/gi;
@@ -315,6 +376,11 @@ export function extractPreferredTimePhrase(fullText: string): string | null {
   if (explicit) return explicit;
 
   const t = fullText.toLowerCase();
+  // Dinner/supper is evening (17–21). Check before morning/afternoon so leftover
+  // "Thursday morning … Friday at dinner" does not keep the 11 AM–2 PM window.
+  // Before dinner is afternoon. Out to dinner is ignored.
+  const dinnerRelated = extractDinnerRelatedPhrase(fullText);
+  if (dinnerRelated) return dinnerRelated;
   if (/\bmorning\b/.test(t)) return "morning";
   if (/\bafternoon\b/.test(t)) return "afternoon";
   if (/\bevening\b|\bafter\s*work\b|\blater\b|\btonight\b/.test(t)) return "evening";
@@ -909,7 +975,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (!t) return false;
 
   const mentionsCalendarPartyOrBookingScope =
-    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
+    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|(?:dinner|supper)(?:time)?|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
       inbound
     ) || /\b(?:bay|simulator|sim\b|lesson|event)\b/i.test(t);
 
@@ -934,6 +1000,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
     )
   )
     return true;
+  if (hasNonNegatedDinnerRelated(inbound)) return true;
   if (/\bfor\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)\b/i.test(t)) return true;
   if (/\bfor\s+\d+\s+players?\b/i.test(t)) return true;
   if (/\b\d+\s+players?\b/i.test(t)) return true;
