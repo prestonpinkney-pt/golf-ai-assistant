@@ -128,14 +128,29 @@ async function fetchAgendaJsonList(
   }
 }
 
-type WindowFilter = {
+export type PreferredTimeWindowFilter = {
   hourStartInclusive: number;
   hourEndExclusive: number;
-} | null;
+};
 
-function parsePreferredTimeRange(raw: string | null | undefined): WindowFilter {
+type WindowFilter = PreferredTimeWindowFilter | null;
+
+/**
+ * Coarse dayparts plus SMS "breakfast" / "brunch" (11:00 AM–2:00 PM public bay window)
+ * and "after breakfast" / "after brunch" (2:00–5:00 PM). Word-boundary so unrelated
+ * tokens do not collapse into the morning window.
+ */
+export function parsePreferredTimeRange(
+  raw: string | null | undefined
+): PreferredTimeWindowFilter | null {
   if (!raw || !raw.trim()) return null;
   const text = raw.trim().toLowerCase();
+  if (/\bafter\s+(?:breakfast|brunch)(?:time)?\b/.test(text))
+    return { hourStartInclusive: 14, hourEndExclusive: 17 };
+  if (/\bbefore\s+(?:breakfast|brunch)(?:time)?\b/.test(text))
+    return { hourStartInclusive: 11, hourEndExclusive: 14 };
+  if (/\b(?:breakfast|brunch)(?:time)?\b/.test(text))
+    return { hourStartInclusive: 11, hourEndExclusive: 14 };
   if (text.includes("morning"))
     return { hourStartInclusive: 11, hourEndExclusive: 14 };
   if (text.includes("afternoon"))
