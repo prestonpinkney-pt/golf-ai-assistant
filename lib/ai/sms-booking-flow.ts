@@ -299,6 +299,136 @@ export function extractLessonDuration(fullText: string): 30 | 60 | null {
   return null;
 }
 
+/**
+ * Last match wins. Negated tokens ("not sunset", "can't do happy hour", "the AM doesn't work")
+ * are skipped so a following daypart or clock can still win.
+ */
+function isNegatedTimeTokenAt(subject: string, index: number, matchLen: number): boolean {
+  const before = subject.slice(Math.max(0, index - 64), index);
+  const after = subject.slice(index + matchLen);
+  return (
+    /\b(?:not|except)\s+(?:this\s+|at\s+|for\s+|the\s+)?$/i.test(before) ||
+    /\bcan(?:not|'?t)\s+(?:do\s+|make\s+)?(?:the\s+|an?\s+)?$/i.test(before) ||
+    /\b(?:instead\s+of|rather\s+than)\s+(?:at\s+|for\s+|the\s+)?$/i.test(before) ||
+    /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after)
+  );
+}
+
+function isPrecededByAfterOrBefore(subject: string, index: number): boolean {
+  const before = subject.slice(Math.max(0, index - 24), index);
+  return /\b(?:after|before)\s+$/i.test(before);
+}
+
+/** "I am" / "am I" are the copula, not the AM daypart. */
+function isCopulaAmMatch(subject: string, index: number, matchText: string): boolean {
+  if (!/^a\.?m\.?$/i.test(matchText)) return false;
+  const before = subject.slice(Math.max(0, index - 8), index);
+  const after = subject.slice(index + matchText.length, index + matchText.length + 8);
+  return /\bi\s+$/i.test(before) || /^\s+i\b/i.test(after);
+}
+
+/**
+ * Bare "11 am" / "11:00 a.m." belong to the explicit clock, not a coarse AM window.
+ * Only the meridiem token itself counts — "03 in the AM" is a date plus daypart.
+ */
+function isClockMeridiemAt(subject: string, index: number, matchText: string): boolean {
+  if (!/^a\.?m\.?$/i.test(matchText)) return false;
+  const before = subject.slice(Math.max(0, index - 10), index);
+  return /\b\d{1,2}(?::\d{2})?\s*$/i.test(before);
+}
+
+type ColloquialDaypart = "morning" | "afternoon" | "evening" | "happy hour";
+
+const AFTER_HAPPY_HOUR_RE = /\bafter\s+happy[\s-]*hour\b/gi;
+const BEFORE_HAPPY_HOUR_RE = /\bbefore\s+happy[\s-]*hour\b/gi;
+const HAPPY_HOUR_RE = /\bhappy[\s-]*hour\b/gi;
+const AFTER_SUNSET_RE = /\bafter\s+sunset\b/gi;
+const BEFORE_SUNSET_RE = /\bbefore\s+sunset\b/gi;
+const SUNSET_RE = /\bsunset\b/gi;
+const AFTER_AM_RE = /\bafter\s+(?:the\s+)?a\.?m\.?\b/gi;
+const BEFORE_AM_RE = /\bbefore\s+(?:the\s+)?a\.?m\.?\b/gi;
+const AM_RE = /\b(?:in\s+the\s+a\.?m\.?|the\s+a\.?m\.?|a\.m\.?|am)\b/gi;
+const COARSE_DAYPART_RE = /\b(morning|afternoon|evening|tonight|after\s*work|later)\b/gi;
+
+function pushDaypartHit(
+  hits: Array<{ index: number; phrase: ColloquialDaypart }>,
+  subject: string,
+  match: RegExpExecArray,
+  phrase: ColloquialDaypart
+): void {
+  if (isNegatedTimeTokenAt(subject, match.index, match[0].length)) return;
+  hits.push({ index: match.index, phrase });
+}
+
+/**
+ * Non-negated in-the-AM / sunset / happy-hour hits.
+ * Clock meridiems ("11 am") and the copula ("I am") are ignored.
+ * Inner tokens of "after sunset" / "before happy hour" are ignored so the
+ * before/after phrase owns the window.
+ */
+function collectColloquialDaypartHits(
+  fullText: string
+): Array<{ index: number; phrase: ColloquialDaypart }> {
+  const hits: Array<{ index: number; phrase: ColloquialDaypart }> = [];
+
+  const scan = (
+    re: RegExp,
+    phrase: ColloquialDaypart,
+    ignore?: (match: RegExpExecArray) => boolean
+  ) => {
+    const pattern = new RegExp(re.source, re.flags);
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(fullText)) !== null) {
+      if (ignore?.(match)) continue;
+      pushDaypartHit(hits, fullText, match, phrase);
+    }
+  };
+
+  scan(AFTER_HAPPY_HOUR_RE, "evening");
+  scan(BEFORE_HAPPY_HOUR_RE, "afternoon");
+  scan(HAPPY_HOUR_RE, "happy hour", (match) => isPrecededByAfterOrBefore(fullText, match.index));
+  scan(AFTER_SUNSET_RE, "evening");
+  scan(BEFORE_SUNSET_RE, "afternoon");
+  scan(SUNSET_RE, "evening", (match) => isPrecededByAfterOrBefore(fullText, match.index));
+  scan(AFTER_AM_RE, "afternoon");
+  scan(BEFORE_AM_RE, "morning");
+  scan(AM_RE, "morning", (match) => {
+    if (isClockMeridiemAt(fullText, match.index, match[0])) return true;
+    if (isCopulaAmMatch(fullText, match.index, match[0])) return true;
+    return isPrecededByAfterOrBefore(fullText, match.index);
+  });
+
+  return hits;
+}
+
+/**
+ * Colloquial dayparts plus any coarse morning/afternoon/evening in the same text.
+ * Last non-negated mention wins so "evening … in the AM" becomes morning and
+ * "morning … at sunset" becomes evening. Returns null when no colloquial phrase
+ * is present so bare morning/afternoon/evening keep their existing order.
+ */
+function extractColloquialDaypartPhrase(fullText: string): ColloquialDaypart | null {
+  const hits = collectColloquialDaypartHits(fullText);
+  if (hits.length === 0) return null;
+
+  const coarseRe = new RegExp(COARSE_DAYPART_RE.source, COARSE_DAYPART_RE.flags);
+  let match: RegExpExecArray | null;
+  while ((match = coarseRe.exec(fullText)) !== null) {
+    const word = match[1]?.toLowerCase() ?? "";
+    const phrase: ColloquialDaypart =
+      word === "morning" ? "morning" : word === "afternoon" ? "afternoon" : "evening";
+    pushDaypartHit(hits, fullText, match, phrase);
+  }
+
+  hits.sort((a, b) => a.index - b.index);
+  return hits.at(-1)?.phrase ?? null;
+}
+
+/** True when inbound names AM, sunset, or happy hour (not "I am" or "11 am"). */
+function hasNonNegatedColloquialDaypart(subject: string): boolean {
+  return collectColloquialDaypartHits(subject).length > 0;
+}
+
 /** Prefer explicit clock (last mention wins) over coarse morning/afternoon/evening. */
 export function extractLastExplicitClockPhrase(fullText: string): string | null {
   const clockRe = /\b(\d{1,2})(?::(\d{2}))?\s*(?:am|pm)\b/gi;
@@ -313,6 +443,12 @@ export function extractLastExplicitClockPhrase(fullText: string): string | null 
 export function extractPreferredTimePhrase(fullText: string): string | null {
   const explicit = extractLastExplicitClockPhrase(fullText);
   if (explicit) return explicit;
+
+  // In the AM is morning (11–14). Sunset is evening (17–21). Happy hour is
+  // 16–19. Check before leftover morning/evening so a follow-up does not keep
+  // the earlier window. "I am" and "11 am" are not the AM daypart.
+  const colloquial = extractColloquialDaypartPhrase(fullText);
+  if (colloquial) return colloquial;
 
   const t = fullText.toLowerCase();
   if (/\bmorning\b/.test(t)) return "morning";
@@ -909,7 +1045,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (!t) return false;
 
   const mentionsCalendarPartyOrBookingScope =
-    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
+    /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|happy[\s-]*hour|sunset|in\s+the\s+a\.?m\.?|a\.m\.|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
       inbound
     ) || /\b(?:bay|simulator|sim\b|lesson|event)\b/i.test(t);
 
@@ -941,6 +1077,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
     /\b(?:half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(t)
   )
     return true;
+  if (hasNonNegatedColloquialDaypart(inbound)) return true;
   return false;
 }
 

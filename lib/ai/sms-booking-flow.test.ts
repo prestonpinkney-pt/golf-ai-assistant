@@ -12,6 +12,7 @@ import type {
   NormalizedWhooshAvailabilitySlot,
   WhooshAvailabilityParams,
 } from "@/lib/whoosh/availability";
+import { parsePreferredTimeRange } from "@/lib/whoosh/availability";
 import {
   buildWhooshIntegrationBookingWire,
   emptyWhooshRawAgendaKeyPresence,
@@ -28,7 +29,9 @@ import { estimateSimulatorBookingUsdCents } from "@/lib/primetime/simulator-quot
 import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
+  extractPreferredTimePhrase,
   extractSimulatorDurationMinutes,
+  latestInboundLooksLikeFreshBookingRequest,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
   squarePaymentHoldCheckoutClient,
@@ -391,6 +394,200 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+  });
+
+  test("in the AM, sunset, and happy hour beat a leftover daypart", () => {
+    assert.strictEqual(
+      extractPreferredTimePhrase("Book simulator Friday in the am for 2 players for 2 hours"),
+      "morning"
+    );
+    assert.strictEqual(extractPreferredTimePhrase("Friday AM"), "morning");
+    assert.strictEqual(extractPreferredTimePhrase("a.m."), "morning");
+    assert.strictEqual(extractPreferredTimePhrase("at sunset"), "evening");
+    assert.strictEqual(extractPreferredTimePhrase("happy hour"), "happy hour");
+    assert.strictEqual(extractPreferredTimePhrase("happy-hour bay time"), "happy hour");
+    assert.strictEqual(
+      extractPreferredTimePhrase(
+        "Book simulator Friday evening for 2 players for 2 hours\nBook simulator Friday in the AM for 2 players for 2 hours"
+      ),
+      "morning"
+    );
+    assert.strictEqual(
+      extractPreferredTimePhrase(
+        "Book simulator Friday morning for 2 players for 2 hours\nBook simulator Friday at sunset for 2 players for 2 hours"
+      ),
+      "evening"
+    );
+    assert.strictEqual(
+      extractPreferredTimePhrase(
+        "Book simulator Friday morning for 2 players for 2 hours\nBook simulator Friday happy hour for 2 players for 2 hours"
+      ),
+      "happy hour"
+    );
+    assert.strictEqual(extractPreferredTimePhrase("not in the am, evening"), "evening");
+    assert.strictEqual(extractPreferredTimePhrase("not sunset, morning"), "morning");
+    assert.strictEqual(extractPreferredTimePhrase("not happy hour, morning"), "morning");
+    assert.strictEqual(extractPreferredTimePhrase("in the am, actually evening"), "evening");
+    assert.strictEqual(extractPreferredTimePhrase("at sunset, actually morning"), "morning");
+    assert.strictEqual(extractPreferredTimePhrase("before sunset"), "afternoon");
+    assert.strictEqual(extractPreferredTimePhrase("after sunset"), "evening");
+    assert.strictEqual(extractPreferredTimePhrase("before happy hour"), "afternoon");
+    assert.strictEqual(extractPreferredTimePhrase("after happy hour"), "evening");
+    assert.strictEqual(extractPreferredTimePhrase("after the am"), "afternoon");
+    assert.strictEqual(extractPreferredTimePhrase("I am free Friday evening"), "evening");
+    assert.strictEqual(extractPreferredTimePhrase("what time am I booked Friday evening"), "evening");
+    assert.strictEqual(extractPreferredTimePhrase("Book the 11:00 am slot"), "11:00 am");
+    assert.strictEqual(extractPreferredTimePhrase("7pm"), "7pm");
+    assert.strictEqual(extractPreferredTimePhrase("afternoon"), "afternoon");
+    assert.strictEqual(latestInboundLooksLikeFreshBookingRequest("in the am"), true);
+    assert.strictEqual(latestInboundLooksLikeFreshBookingRequest("at sunset"), true);
+    assert.strictEqual(latestInboundLooksLikeFreshBookingRequest("happy hour"), true);
+    assert.strictEqual(latestInboundLooksLikeFreshBookingRequest("I am"), false);
+    assert.strictEqual(latestInboundLooksLikeFreshBookingRequest("book 11:00 am"), false);
+    assert.strictEqual(latestInboundLooksLikeFreshBookingRequest("11:00 am"), false);
+    assert.deepEqual(parsePreferredTimeRange("in the am"), {
+      hourStartInclusive: 11,
+      hourEndExclusive: 14,
+    });
+    assert.deepEqual(parsePreferredTimeRange("sunset"), {
+      hourStartInclusive: 17,
+      hourEndExclusive: 21,
+    });
+    assert.deepEqual(parsePreferredTimeRange("before sunset"), {
+      hourStartInclusive: 14,
+      hourEndExclusive: 17,
+    });
+    assert.deepEqual(parsePreferredTimeRange("happy hour"), {
+      hourStartInclusive: 16,
+      hourEndExclusive: 19,
+    });
+    assert.deepEqual(parsePreferredTimeRange("after happy hour"), {
+      hourStartInclusive: 17,
+      hourEndExclusive: 21,
+    });
+    assert.deepEqual(parsePreferredTimeRange("I am"), null);
+    assert.deepEqual(parsePreferredTimeRange("11 am"), null);
+    assert.deepEqual(parsePreferredTimeRange("evening"), {
+      hourStartInclusive: 17,
+      hourEndExclusive: 21,
+    });
+  });
+
+  test("in the AM looks up Whoosh morning window, not leftover evening", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-03",
+        slotRowsLoaded: 4,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText:
+        "Book simulator 2035-06-03 in the AM for 2 players for 2 hours bay reserve schedule please",
+      playbook: "simulator",
+      conversationHistory: inboundOnlyHistory([
+        "Book simulator 2035-06-03 evening for 2 players for 2 hours",
+      ]),
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].preferredTimeRange, "morning");
+    assert.notStrictEqual(seen[0].preferredTimeRange, "evening");
+    assert.strictEqual(expectDirectOutbound(flow).debug.whooshAvailabilityAttempted, true);
+    assert.strictEqual(expectDirectOutbound(flow).debug.usingStoredOfferSlots, false);
+  });
+
+  test("at sunset looks up Whoosh evening window, not leftover morning", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-03",
+        slotRowsLoaded: 4,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText:
+        "Book simulator 2035-06-03 at sunset for 2 players for 2 hours bay reserve schedule please",
+      playbook: "simulator",
+      conversationHistory: inboundOnlyHistory([
+        "Book simulator 2035-06-03 morning for 2 players for 2 hours",
+      ]),
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].preferredTimeRange, "evening");
+    assert.notStrictEqual(seen[0].preferredTimeRange, "morning");
+    assert.strictEqual(expectDirectOutbound(flow).debug.whooshAvailabilityAttempted, true);
+    assert.strictEqual(expectDirectOutbound(flow).debug.usingStoredOfferSlots, false);
+  });
+
+  test("follow-up happy hour does not reuse stored morning offer slots", async () => {
+    const conv = "00000000-0000-4000-a000-00000000d4e2";
+    const sb = new FakeBookingSupabase();
+    const biz = "00000000-0000-0000-0000-000000000099";
+    const cid = "00000000-0000-4000-a000-000000000002";
+
+    sb.rows.push({
+      business_id: biz,
+      conversation_id: conv,
+      contact_id: cid,
+      provider: "whoosh",
+      action_type: "availability_lookup",
+      status: "completed",
+      service_type: "simulator",
+      requested_date: "2035-06-03",
+      party_size: 2,
+      duration_minutes: 120,
+      raw_payload: {
+        agenda_date: "2035-06-03",
+        offered_slots: wireStoredOffersFromBaySlots([sampleSlot()]),
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-03",
+        slotRowsLoaded: 4,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText: "happy hour",
+      playbook: "simulator",
+      conversationId: conv,
+      contactId: cid,
+      sb,
+      conversationHistory: inboundOnlyHistory([
+        "Book simulator 2035-06-03 morning for 2 players for 2 hours",
+      ]),
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].preferredTimeRange, "happy hour");
+    assert.strictEqual(expectDirectOutbound(flow).debug.usingStoredOfferSlots, false);
+    assert.strictEqual(
+      expectDirectOutbound(flow).debug.storedOfferRejectedReason,
+      "superseded_by_new_booking_request"
+    );
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
