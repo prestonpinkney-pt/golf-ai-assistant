@@ -128,14 +128,45 @@ async function fetchAgendaJsonList(
   }
 }
 
-type WindowFilter = {
+export type PreferredTimeWindowFilter = {
   hourStartInclusive: number;
   hourEndExclusive: number;
-} | null;
+};
 
-function parsePreferredTimeRange(raw: string | null | undefined): WindowFilter {
+type WindowFilter = PreferredTimeWindowFilter | null;
+
+/**
+ * Coarse dayparts plus SMS colloquial windows:
+ * - in the AM / a.m. → 11:00–14:00 (same as morning)
+ * - before sunset / before happy hour → 14:00–17:00
+ * - happy hour → 16:00–19:00 (4:00–7:00 PM; not the full afternoon or evening block)
+ * - sunset / after sunset / after happy hour → 17:00–21:00
+ * Word boundaries so "I am" and "11am" do not collapse into the morning window.
+ */
+export function parsePreferredTimeRange(
+  raw: string | null | undefined
+): PreferredTimeWindowFilter | null {
   if (!raw || !raw.trim()) return null;
   const text = raw.trim().toLowerCase();
+  if (/\bafter\s+happy[\s-]*hour\b/.test(text))
+    return { hourStartInclusive: 17, hourEndExclusive: 21 };
+  if (/\bbefore\s+happy[\s-]*hour\b/.test(text))
+    return { hourStartInclusive: 14, hourEndExclusive: 17 };
+  if (/\bhappy[\s-]*hour\b/.test(text))
+    return { hourStartInclusive: 16, hourEndExclusive: 19 };
+  if (/\bbefore\s+sunset\b/.test(text))
+    return { hourStartInclusive: 14, hourEndExclusive: 17 };
+  if (/\bsunset\b/.test(text))
+    return { hourStartInclusive: 17, hourEndExclusive: 21 };
+  if (!/\d/.test(text) && /\bafter\s+(?:the\s+)?a\.?m\.?\b/.test(text))
+    return { hourStartInclusive: 14, hourEndExclusive: 17 };
+  if (
+    !/\d/.test(text) &&
+    !/\bi\s+am\b/.test(text) &&
+    !/\bam\s+i\b/.test(text) &&
+    /\b(?:in\s+the\s+a\.?m\.?|the\s+a\.?m\.?|a\.m\.?|am)\b/.test(text)
+  )
+    return { hourStartInclusive: 11, hourEndExclusive: 14 };
   if (text.includes("morning"))
     return { hourStartInclusive: 11, hourEndExclusive: 14 };
   if (text.includes("afternoon"))
