@@ -29,6 +29,7 @@ import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
   extractSimulatorDurationMinutes,
+  resolveOfferedSlotPickIndex,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
   squarePaymentHoldCheckoutClient,
@@ -383,6 +384,132 @@ describe("sms-booking-flow", () => {
 
     assert.strictEqual(resolved.isoDate, "2026-05-21");
     assert.strictEqual(resolved.source, "explicit_weekday");
+  });
+
+  test("the 15th of September is that calendar day, not a leftover Friday", () => {
+    // Thursday 2026-09-10: this Friday is 2026-09-11; September 15 is still ahead.
+    const thursday = DateTime.fromISO("2026-09-10T16:00:00", {
+      zone: "America/Los_Angeles",
+    });
+
+    assert.strictEqual(
+      resolveRequestedDateFromText("the 15th of September", thursday).isoDate,
+      "2026-09-15"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("Book simulator the 15th of Sept. evening", thursday).isoDate,
+      "2026-09-15"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("September the 15th", thursday).isoDate,
+      "2026-09-15"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("Sept. the 18th", thursday).isoDate,
+      "2026-09-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the fifteenth of September", thursday).isoDate,
+      "2026-09-15"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("on the 18th of October", thursday).isoDate,
+      "2026-10-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the 15th of September 2027", thursday).isoDate,
+      "2027-09-15"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("September the 15th, 2027", thursday).isoDate,
+      "2027-09-15"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the 29th of February 2028", thursday).isoDate,
+      "2028-02-29"
+    );
+    // Already-past September 15 rolls to next year.
+    const later = DateTime.fromISO("2026-09-24T16:00:00", { zone: "America/Los_Angeles" });
+    assert.strictEqual(
+      resolveRequestedDateFromText("the 15th of September", later).isoDate,
+      "2027-09-15"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the 1st of September", thursday).isoDate,
+      "2027-09-01"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("September the first", thursday).isoDate,
+      "2027-09-01"
+    );
+
+    assert.strictEqual(
+      resolveRequestedDateFromText("not the 15th of September, Friday", thursday).isoDate,
+      "2026-09-11"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("can't do the 15th of September, Friday", thursday).isoDate,
+      "2026-09-11"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the 15th of September doesn't work, Friday", thursday).isoDate,
+      "2026-09-11"
+    );
+    assert.strictEqual(resolveRequestedDateFromText("I may book Friday", thursday).isoDate, "2026-09-11");
+    assert.strictEqual(resolveRequestedDateFromText("the 31st of September", thursday).isoDate, null);
+    assert.strictEqual(resolveRequestedDateFromText("the 29th of February", thursday).isoDate, null);
+    assert.strictEqual(resolveRequestedDateFromText("Friday", thursday).isoDate, "2026-09-11");
+
+    const slots = [sampleSlot(), { ...sampleSlot(), bayOrResourceId: "vendor-slot-772" }];
+    assert.equal(resolveOfferedSlotPickIndex("the 1st of September", slots), null);
+    assert.equal(resolveOfferedSlotPickIndex("September the 2nd", slots), null);
+    assert.equal(resolveOfferedSlotPickIndex("the first of September", slots), null);
+    assert.equal(resolveOfferedSlotPickIndex("I'll take the second", slots), 1);
+    assert.equal(resolveOfferedSlotPickIndex("the first", slots), 0);
+  });
+
+  test("the 15th of September looks up Whoosh for that day, not a leftover Friday", async () => {
+    const thursday = DateTime.fromISO("2026-09-10T16:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => thursday.toMillis();
+
+    const seenDates: string[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seenDates.push(p.date);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const history = inboundOnlyHistory([
+      "Book simulator Friday evening for 2 players for 2 hours",
+    ]);
+
+    const { flow } = await runAugment({
+      inboundText: "Book simulator the 15th of September evening for 2 players for 2 hours",
+      playbook: "simulator",
+      conversationHistory: history,
+    });
+
+    assert.deepStrictEqual(seenDates, ["2026-09-15"]);
+    const outbound = expectDirectOutbound(flow);
+    assert.strictEqual(outbound.debug.resolved_requested_date, "2026-09-15");
+    assert.strictEqual(outbound.debug.date_source, "explicit_date");
+    assert.notEqual(outbound.debug.reason, "numeric_slot_pick_without_valid_stored_offer");
+
+    seenDates.length = 0;
+    await runAugment({
+      inboundText: "Book simulator September the 15th evening for 2 players for 2 hours",
+      playbook: "simulator",
+      conversationHistory: history,
+    });
+    assert.deepStrictEqual(seenDates, ["2026-09-15"]);
   });
 
   test("simulator duration phrases resolve deterministically", () => {

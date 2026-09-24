@@ -403,6 +403,208 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+const MONTH_NAME_TO_NUM: Record<string, number> = {
+  january: 1,
+  jan: 1,
+  february: 2,
+  feb: 2,
+  march: 3,
+  mar: 3,
+  april: 4,
+  apr: 4,
+  may: 5,
+  june: 6,
+  jun: 6,
+  july: 7,
+  jul: 7,
+  august: 8,
+  aug: 8,
+  september: 9,
+  sept: 9,
+  sep: 9,
+  october: 10,
+  oct: 10,
+  november: 11,
+  nov: 11,
+  december: 12,
+  dec: 12,
+};
+
+/** Longer names first so "september" wins over "sept" / "sep". */
+const MONTH_NAME_TOKEN =
+  "january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec";
+
+/** Longer ordinals first so "twenty-first" wins over "first". */
+const DAY_OF_MONTH_WORD_TOKEN =
+  "thirty[- ]first|thirtieth|twenty[- ]ninth|twenty[- ]eighth|twenty[- ]seventh|twenty[- ]sixth|twenty[- ]fifth|twenty[- ]fourth|twenty[- ]third|twenty[- ]second|twenty[- ]first|twentieth|nineteenth|eighteenth|seventeenth|sixteenth|fifteenth|fourteenth|thirteenth|twelfth|eleventh|tenth|ninth|eighth|seventh|sixth|fifth|fourth|third|second|first";
+
+const DAY_OF_MONTH_WORD_TO_N: Record<string, number> = {
+  first: 1,
+  second: 2,
+  third: 3,
+  fourth: 4,
+  fifth: 5,
+  sixth: 6,
+  seventh: 7,
+  eighth: 8,
+  ninth: 9,
+  tenth: 10,
+  eleventh: 11,
+  twelfth: 12,
+  thirteenth: 13,
+  fourteenth: 14,
+  fifteenth: 15,
+  sixteenth: 16,
+  seventeenth: 17,
+  eighteenth: 18,
+  nineteenth: 19,
+  twentieth: 20,
+  "twenty-first": 21,
+  "twenty-second": 22,
+  "twenty-third": 23,
+  "twenty-fourth": 24,
+  "twenty-fifth": 25,
+  "twenty-sixth": 26,
+  "twenty-seventh": 27,
+  "twenty-eighth": 28,
+  "twenty-ninth": 29,
+  thirtieth: 30,
+  "thirty-first": 31,
+};
+
+type DayOfNamedMonthSpan = {
+  index: number;
+  end: number;
+  month: number;
+  day: number;
+  year: number | null;
+  negated: boolean;
+};
+
+function calendarDateInZone(year: number, month: number, day: number, zone: string): DateTime {
+  const dt = DateTime.fromObject({ year, month, day }, { zone });
+  if (!dt.isValid || dt.year !== year || dt.month !== month || dt.day !== day) {
+    return DateTime.invalid("unrepresentable calendar date");
+  }
+  return dt.startOf("day");
+}
+
+function dayOrdinalWordToNumber(word: string): number | null {
+  const key = word.toLowerCase().replace(/\s+/g, "-");
+  return DAY_OF_MONTH_WORD_TO_N[key] ?? null;
+}
+
+function dayOfNamedMonthPhraseIsNegated(
+  subject: string,
+  matchIndex: number,
+  matchLength: number
+): boolean {
+  const before = subject.slice(Math.max(0, matchIndex - 64), matchIndex);
+  const after = subject.slice(matchIndex + matchLength);
+  return (
+    /\b(?:not|except)\s+(?:on\s+|do\s+)?$/i.test(before) ||
+    /\bcan(?:not|'?t)\s+(?:do\s+|make\s+)?$/i.test(before) ||
+    /\b(?:instead\s+of|rather\s+than)\s+$/i.test(before) ||
+    /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after)
+  );
+}
+
+/** "I may the 15th" is the verb may, not the month. */
+function monthTokenIsMayVerb(subject: string, monthToken: string, tokenIndex: number): boolean {
+  if (monthToken.toLowerCase() !== "may") return false;
+  const before = subject.slice(Math.max(0, tokenIndex - 16), tokenIndex);
+  return /\b(?:i|we|you|they|he|she)\s+$/i.test(before);
+}
+
+/**
+ * "the 15th of September" / "September the 15th".
+ * "September 15" (month then a bare number) is intentionally not matched here.
+ */
+function findDayOfNamedMonthSpans(subject: string): DayOfNamedMonthSpan[] {
+  const spans: DayOfNamedMonthSpan[] = [];
+  const boundary = "(?![A-Za-z0-9])";
+  const dayToken = `(?:(\\d{1,2})(?:st|nd|rd|th)?|(${DAY_OF_MONTH_WORD_TOKEN}))`;
+  const yearToken = "(?:,?\\s*(20\\d{2}))?";
+
+  const ofMonthRe = new RegExp(
+    `\\b(?:on\\s+)?(?:the\\s+)?${dayToken}\\s+of\\s+(${MONTH_NAME_TOKEN})\\.?${yearToken}${boundary}`,
+    "gi"
+  );
+  const monthTheRe = new RegExp(
+    `\\b(${MONTH_NAME_TOKEN})\\.?\\s+the\\s+${dayToken}${yearToken}${boundary}`,
+    "gi"
+  );
+
+  const push = (
+    index: number,
+    length: number,
+    monthToken: string,
+    dayRaw: string | undefined,
+    wordRaw: string | undefined,
+    yearRaw: string | undefined
+  ) => {
+    if (monthTokenIsMayVerb(subject, monthToken, index)) return;
+    const month = MONTH_NAME_TO_NUM[monthToken.toLowerCase()];
+    const day = dayRaw ? Number(dayRaw) : wordRaw ? dayOrdinalWordToNumber(wordRaw) : null;
+    if (!month || day == null || !Number.isFinite(day) || day < 1 || day > 31) return;
+    const year = yearRaw ? Number(yearRaw) : null;
+    spans.push({
+      index,
+      end: index + length,
+      month,
+      day,
+      year: year != null && Number.isFinite(year) ? year : null,
+      negated: dayOfNamedMonthPhraseIsNegated(subject, index, length),
+    });
+  };
+
+  let m: RegExpExecArray | null;
+  while ((m = ofMonthRe.exec(subject)) !== null) {
+    push(m.index, m[0].length, m[3] ?? "", m[1], m[2], m[4]);
+  }
+  while ((m = monthTheRe.exec(subject)) !== null) {
+    const monthToken = m[1] ?? "";
+    const monthIndex = m.index + m[0].toLowerCase().indexOf(monthToken.toLowerCase());
+    if (monthTokenIsMayVerb(subject, monthToken, monthIndex)) continue;
+    push(m.index, m[0].length, monthToken, m[2], m[3], m[4]);
+  }
+
+  spans.sort((a, b) => a.index - b.index);
+  return spans;
+}
+
+function stripDayOfNamedMonthPhrases(subject: string): string {
+  const spans = findDayOfNamedMonthSpans(subject);
+  if (spans.length === 0) return subject;
+  let out = subject;
+  for (let i = spans.length - 1; i >= 0; i -= 1) {
+    const span = spans[i]!;
+    out = `${out.slice(0, span.index)} ${out.slice(span.end)}`;
+  }
+  return out;
+}
+
+/** Last non-negated "the 15th of September" / "September the 15th". */
+function resolveDayOfNamedMonthFromText(
+  subject: string,
+  local: DateTime,
+  timezone: string
+): { isoDate: string; source: SmsBookingDateSource } | null {
+  const spans = findDayOfNamedMonthSpans(subject).filter((span) => !span.negated);
+  for (let i = spans.length - 1; i >= 0; i -= 1) {
+    const span = spans[i]!;
+    let dt = calendarDateInZone(span.year ?? local.year, span.month, span.day, timezone);
+    if (!dt.isValid) continue;
+    if (span.year == null && dt < local) {
+      dt = calendarDateInZone(local.year + 1, span.month, span.day, timezone);
+    }
+    if (!dt.isValid) continue;
+    const iso = dt.toISODate();
+    if (iso) return { isoDate: iso, source: "explicit_date" };
+  }
+  return null;
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -427,6 +629,9 @@ export function resolveRequestedDateFromText(
     });
     return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
   }
+
+  const dayOfMonth = resolveDayOfNamedMonthFromText(subject, local, timezone);
+  if (dayOfMonth) return dayOfMonth;
 
   const weekdayMap: Record<string, number> = {
     monday: 1,
@@ -908,6 +1113,8 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   const t = inbound.toLowerCase().trim();
   if (!t) return false;
 
+  if (findDayOfNamedMonthSpans(inbound).some((span) => !span.negated)) return true;
+
   const mentionsCalendarPartyOrBookingScope =
     /\b(?:sun(?:day)?|mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|tomorrow|today|\d{4}-\d{2}-\d{2}|for\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)|for\s+\d+\s+players?|\d+\s+players?|half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(
       inbound
@@ -1082,7 +1289,7 @@ export function inboundMentionsLikelyOfferedClock(subject: string): boolean {
 }
 
 function matchOrdinalOfferIndex(inbound: string, offerCount: number): number | null {
-  const lower = inbound.toLowerCase();
+  const lower = stripDayOfNamedMonthPhrases(inbound).toLowerCase();
   if (/\b(?:first)\b(?:\s*(?:one|slot|option|choice|pick|opening|bay))?\b|\b1\s*st\b/.test(lower))
     return offerCount >= 1 ? 0 : null;
   if (/\b(?:second)\b(?:\s*(?:one|slot|option|choice|pick|opening|bay))?\b|\b2\s*nd\b/.test(lower))
