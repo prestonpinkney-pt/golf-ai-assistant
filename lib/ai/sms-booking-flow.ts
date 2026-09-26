@@ -365,38 +365,87 @@ function readSimulatorBayDefaultDurationMinutesFromEnv(): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 60;
 }
 
+function hoursFromDurationToken(token: string): number | null {
+  const t = token.toLowerCase();
+  if (t === "a" || t === "an") return 1;
+  const word = DURATION_WORD_TO_HOURS[t];
+  if (word) return word;
+  const n = Number(t);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 export function extractSimulatorDurationMinutes(fullText: string): number | null {
   const matches: Array<{ index: number; minutes: number }> = [];
+  const spans: Array<{ start: number; end: number }> = [];
 
-  const push = (index: number, minutes: number) => {
-    if (Number.isFinite(minutes)) matches.push({ index, minutes: Math.min(Math.max(Math.round(minutes), 15), 720) });
+  const clampMinutes = (minutes: number) =>
+    Math.min(Math.max(Math.round(minutes), 15), 720);
+
+  const covered = (index: number) => spans.some((span) => index >= span.start && index < span.end);
+
+  const pushCompound = (index: number, end: number, minutes: number) => {
+    if (!Number.isFinite(minutes)) return;
+    matches.push({ index, minutes: clampMinutes(minutes) });
+    spans.push({ start: index, end });
   };
+
+  const consider = (index: number, length: number, minutes: number) => {
+    if (covered(index) || !Number.isFinite(minutes)) return;
+    matches.push({ index, minutes: clampMinutes(minutes) });
+    spans.push({ start: index, end: index + length });
+  };
+
+  // Compound lengths must be recorded before the hour/minute pieces inside them.
+  // Otherwise "1 hour and 30 minutes" keeps the trailing 30, and "an hour and a half" keeps 60.
+  for (const m of fullText.matchAll(
+    /\b(\d{1,2}|one|two|three|four|five|six)\s+and\s+a\s+half\s*(?:hours?|hrs?|hr)\b/gi
+  )) {
+    const h = hoursFromDurationToken(m[1] ?? "");
+    if (h != null) pushCompound(m.index ?? 0, (m.index ?? 0) + m[0].length, h * 60 + 30);
+  }
+
+  for (const m of fullText.matchAll(
+    /\b(\d{1,2}|an|a|one|two|three|four|five|six)\s*(?:hours?|hrs?|hr)\s+and\s+a\s+half\b/gi
+  )) {
+    const h = hoursFromDurationToken(m[1] ?? "");
+    if (h != null) pushCompound(m.index ?? 0, (m.index ?? 0) + m[0].length, h * 60 + 30);
+  }
+
+  for (const m of fullText.matchAll(
+    /\b(\d{1,2}|an|a|one|two|three|four|five|six)\s*(?:hours?|hrs?|hr)\s+and\s+(\d{1,3})\s*(?:minutes?|mins?|min)\b/gi
+  )) {
+    const h = hoursFromDurationToken(m[1] ?? "");
+    const mins = Number(m[2]);
+    if (h != null && Number.isFinite(mins) && mins >= 0) {
+      pushCompound(m.index ?? 0, (m.index ?? 0) + m[0].length, h * 60 + mins);
+    }
+  }
 
   for (const m of fullText.matchAll(/\b(\d{1,2})\s*(?:hours?|hrs?|hr)\b/gi)) {
     const h = Number(m[1]);
-    if (Number.isFinite(h)) push(m.index ?? 0, h * 60);
+    if (Number.isFinite(h)) consider(m.index ?? 0, m[0].length, h * 60);
   }
 
   for (const m of fullText.matchAll(/\b(one|two|three|four|five|six)\s*(?:hours?|hrs?|hr)\b/gi)) {
     const h = DURATION_WORD_TO_HOURS[m[1]?.toLowerCase() ?? ""];
-    if (h) push(m.index ?? 0, h * 60);
+    if (h) consider(m.index ?? 0, m[0].length, h * 60);
   }
 
   for (const m of fullText.matchAll(/\b(\d{2,3})\s*(?:minutes?|mins?|min)\b/gi)) {
     const n = Number(m[1]);
-    if (Number.isFinite(n)) push(m.index ?? 0, n);
+    if (Number.isFinite(n)) consider(m.index ?? 0, m[0].length, n);
   }
 
   for (const m of fullText.matchAll(/\bone\s+(?:and\s+a\s+)?half\s*(?:hours?|hrs?|hr)\b/gi)) {
-    push(m.index ?? 0, 90);
+    consider(m.index ?? 0, m[0].length, 90);
   }
 
   for (const m of fullText.matchAll(/\bhalf\s*-?\s*hour\b/gi)) {
-    push(m.index ?? 0, 30);
+    consider(m.index ?? 0, m[0].length, 30);
   }
 
   for (const m of fullText.matchAll(/\b(?:a|an)\s+(?:full\s+)?hour\b|\bhourly\b/gi)) {
-    push(m.index ?? 0, 60);
+    consider(m.index ?? 0, m[0].length, 60);
   }
 
   matches.sort((a, b) => a.index - b.index);

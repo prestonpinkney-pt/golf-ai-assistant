@@ -391,6 +391,54 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for one and a half hours"), 90);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for a half hour"), 30);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("Book simulator Friday evening for 2 players for 1 hour and 30 minutes"),
+      90
+    );
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("Book simulator Friday evening for 2 players for an hour and a half"),
+      90
+    );
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("Book simulator Friday evening for 2 players for two and a half hours"),
+      150
+    );
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("Book simulator Friday evening for 2 players for 2 hours and 15 minutes"),
+      135
+    );
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("not 1 hour and 30 minutes, book 2 hours"),
+      120
+    );
+  });
+
+  test("1 hour and 30 minutes is sent to Whoosh as 90 minutes, not 30", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", { zone: "America/Los_Angeles" });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    await runAugment({
+      inboundText: "Book simulator Friday evening for 2 players for 1 hour and 30 minutes",
+      playbook: "simulator",
+    });
+
+    assert.deepStrictEqual(seen.map((p) => p.durationMinutes), [90]);
+    assert.deepStrictEqual(seen.map((p) => p.date), ["2026-05-22"]);
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
