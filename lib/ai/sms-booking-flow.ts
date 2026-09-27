@@ -365,38 +365,121 @@ function readSimulatorBayDefaultDurationMinutesFromEnv(): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 60;
 }
 
+const DURATION_WORD_TO_MINUTES: Record<string, number> = {
+  five: 5,
+  ten: 10,
+  fifteen: 15,
+  twenty: 20,
+  twentyfive: 25,
+  thirty: 30,
+  thirtyfive: 35,
+  forty: 40,
+  fortyfive: 45,
+  fifty: 50,
+  fiftyfive: 55,
+  ninety: 90,
+};
+
+function hoursFromDurationToken(token: string): number | null {
+  const t = token.toLowerCase();
+  if (t === "a" || t === "an") return 1;
+  const word = DURATION_WORD_TO_HOURS[t];
+  if (word) return word;
+  const n = Number(t);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function minutesFromDurationToken(token: string): number | null {
+  const compact = token.toLowerCase().replace(/[-\s]+/g, "");
+  if (Object.prototype.hasOwnProperty.call(DURATION_WORD_TO_MINUTES, compact)) {
+    return DURATION_WORD_TO_MINUTES[compact];
+  }
+  const n = Number(token);
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 export function extractSimulatorDurationMinutes(fullText: string): number | null {
   const matches: Array<{ index: number; minutes: number }> = [];
+  const spans: Array<{ start: number; end: number }> = [];
 
-  const push = (index: number, minutes: number) => {
-    if (Number.isFinite(minutes)) matches.push({ index, minutes: Math.min(Math.max(Math.round(minutes), 15), 720) });
+  const clampMinutes = (minutes: number) =>
+    Math.min(Math.max(Math.round(minutes), 15), 720);
+
+  const covered = (index: number) => spans.some((span) => index >= span.start && index < span.end);
+
+  const pushCompound = (index: number, end: number, minutes: number) => {
+    if (!Number.isFinite(minutes)) return;
+    matches.push({ index, minutes: clampMinutes(minutes) });
+    spans.push({ start: index, end });
   };
+
+  const consider = (index: number, minutes: number) => {
+    if (covered(index) || !Number.isFinite(minutes)) return;
+    matches.push({ index, minutes: clampMinutes(minutes) });
+  };
+
+  const hourToken = "\\d{1,2}|an|a|one|two|three|four|five|six";
+  const minuteWord =
+    "forty[-\\s]?five|thirty[-\\s]?five|twenty[-\\s]?five|fifty[-\\s]?five|fifteen|twenty|thirty|forty|fifty|ninety|ten|five";
+
+  // "1 hour 30 minutes" has no "and", so the trailing minute count used to win.
+  // "an hour and thirty minutes" never matched a minute count at all.
+  for (const m of fullText.matchAll(
+    new RegExp(
+      `\\b(${hourToken})\\s*(?:hours?|hrs?|hr)\\s+(${minuteWord}|\\d{1,3})\\s*(?:minutes?|mins?|min)\\b`,
+      "gi"
+    )
+  )) {
+    const h = hoursFromDurationToken(m[1] ?? "");
+    const mins = minutesFromDurationToken(m[2] ?? "");
+    if (h != null && mins != null) {
+      pushCompound(m.index ?? 0, (m.index ?? 0) + m[0].length, h * 60 + mins);
+    }
+  }
+
+  for (const m of fullText.matchAll(
+    new RegExp(
+      `\\b(${hourToken})\\s*(?:hours?|hrs?|hr)\\s+and\\s+(${minuteWord})\\s*(?:minutes?|mins?|min)\\b`,
+      "gi"
+    )
+  )) {
+    const h = hoursFromDurationToken(m[1] ?? "");
+    const mins = minutesFromDurationToken(m[2] ?? "");
+    if (h != null && mins != null) {
+      pushCompound(m.index ?? 0, (m.index ?? 0) + m[0].length, h * 60 + mins);
+    }
+  }
+
+  for (const m of fullText.matchAll(new RegExp(`\\b(${minuteWord})\\s*(?:minutes?|mins?|min)\\b`, "gi"))) {
+    const mins = minutesFromDurationToken(m[1] ?? "");
+    if (mins != null) consider(m.index ?? 0, mins);
+  }
 
   for (const m of fullText.matchAll(/\b(\d{1,2})\s*(?:hours?|hrs?|hr)\b/gi)) {
     const h = Number(m[1]);
-    if (Number.isFinite(h)) push(m.index ?? 0, h * 60);
+    if (Number.isFinite(h)) consider(m.index ?? 0, h * 60);
   }
 
   for (const m of fullText.matchAll(/\b(one|two|three|four|five|six)\s*(?:hours?|hrs?|hr)\b/gi)) {
     const h = DURATION_WORD_TO_HOURS[m[1]?.toLowerCase() ?? ""];
-    if (h) push(m.index ?? 0, h * 60);
+    if (h) consider(m.index ?? 0, h * 60);
   }
 
   for (const m of fullText.matchAll(/\b(\d{2,3})\s*(?:minutes?|mins?|min)\b/gi)) {
     const n = Number(m[1]);
-    if (Number.isFinite(n)) push(m.index ?? 0, n);
+    if (Number.isFinite(n)) consider(m.index ?? 0, n);
   }
 
   for (const m of fullText.matchAll(/\bone\s+(?:and\s+a\s+)?half\s*(?:hours?|hrs?|hr)\b/gi)) {
-    push(m.index ?? 0, 90);
+    consider(m.index ?? 0, 90);
   }
 
   for (const m of fullText.matchAll(/\bhalf\s*-?\s*hour\b/gi)) {
-    push(m.index ?? 0, 30);
+    consider(m.index ?? 0, 30);
   }
 
   for (const m of fullText.matchAll(/\b(?:a|an)\s+(?:full\s+)?hour\b|\bhourly\b/gi)) {
-    push(m.index ?? 0, 60);
+    consider(m.index ?? 0, 60);
   }
 
   matches.sort((a, b) => a.index - b.index);
