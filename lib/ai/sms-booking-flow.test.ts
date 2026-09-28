@@ -391,6 +391,100 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes(
+        "Book simulator Friday evening for 2 players for a quarter of an hour"
+      ),
+      15
+    );
+    assert.strictEqual(
+      extractSimulatorDurationMinutes(
+        "Book simulator Friday evening for 2 players for three quarters of an hour"
+      ),
+      45
+    );
+    assert.strictEqual(
+      extractSimulatorDurationMinutes(
+        "Book simulator Friday evening for 2 players for three-quarters of an hour"
+      ),
+      45
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for a quarter hour"), 15);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for a quarter-hour"), 15);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes(
+        "Book simulator Friday evening for 2 players for an hour and a quarter"
+      ),
+      75
+    );
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("Thursday for 2 hours and three quarters"),
+      165
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for two and a quarter hours"), 135);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("not three quarters of an hour, book 2 hours"),
+      120
+    );
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("not 2 hours, book a quarter of an hour"),
+      15
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("quarter past 2 for an hour"), 60);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for an hour"), 60);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday hourly bay"), 60);
+  });
+
+  test("three quarters of an hour is sent to Whoosh as 45 minutes, not 60", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", { zone: "America/Los_Angeles" });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    await runAugment({
+      inboundText: "Book simulator Friday evening for 2 players for three quarters of an hour",
+      playbook: "simulator",
+    });
+
+    assert.deepStrictEqual(seen.map((p) => p.durationMinutes), [45]);
+    assert.deepStrictEqual(seen.map((p) => p.date), ["2026-05-22"]);
+  });
+
+  test("an hour and a quarter is sent to Whoosh as 75 minutes, not 60", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", { zone: "America/Los_Angeles" });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    await runAugment({
+      inboundText: "Book simulator Friday evening for 2 players for an hour and a quarter",
+      playbook: "simulator",
+    });
+
+    assert.deepStrictEqual(seen.map((p) => p.durationMinutes), [75]);
+    assert.deepStrictEqual(seen.map((p) => p.date), ["2026-05-22"]);
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
