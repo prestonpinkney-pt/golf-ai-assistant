@@ -365,38 +365,119 @@ function readSimulatorBayDefaultDurationMinutesFromEnv(): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 60;
 }
 
+const QUARTER_COUNT_WORDS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+};
+
+function hoursFromDurationToken(token: string): number | null {
+  const t = token.toLowerCase();
+  if (t === "a" || t === "an") return 1;
+  const word = DURATION_WORD_TO_HOURS[t];
+  if (word) return word;
+  const n = Number(t);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function quarterCountFromToken(token: string | undefined): number {
+  if (!token) return 1;
+  const t = token.toLowerCase();
+  if (t === "a" || t === "an") return 1;
+  const word = QUARTER_COUNT_WORDS[t];
+  if (word) return word;
+  const n = Number(t);
+  return Number.isFinite(n) && n >= 1 && n <= 12 ? n : 1;
+}
+
+function durationSpansOverlap(
+  spans: Array<{ start: number; end: number }>,
+  start: number,
+  end: number
+): boolean {
+  return spans.some((span) => start < span.end && end > span.start);
+}
+
 export function extractSimulatorDurationMinutes(fullText: string): number | null {
   const matches: Array<{ index: number; minutes: number }> = [];
+  const covered: Array<{ start: number; end: number }> = [];
 
   const push = (index: number, minutes: number) => {
     if (Number.isFinite(minutes)) matches.push({ index, minutes: Math.min(Math.max(Math.round(minutes), 15), 720) });
   };
 
+  const pushCovered = (index: number, length: number, minutes: number) => {
+    if (durationSpansOverlap(covered, index, index + length)) return;
+    covered.push({ start: index, end: index + length });
+    push(index, minutes);
+  };
+
+  const pushUnlessCovered = (index: number, length: number, minutes: number) => {
+    if (durationSpansOverlap(covered, index, index + length)) return;
+    push(index, minutes);
+  };
+
+  // "an hour and a quarter" / "2 hours and three-quarters" must win over the inner "an hour".
+  for (const m of fullText.matchAll(
+    /\b(an|a|\d{1,2}|one|two|three|four|five|six)\s+hours?\s+and\s+(?:a\s+)?(?:(one|two|three|four|five|six|\d{1,2})[-\s]+)?quarters?\b/gi
+  )) {
+    const hours = hoursFromDurationToken(m[1] ?? "");
+    if (!hours) continue;
+    const index = m.index ?? 0;
+    pushCovered(index, m[0].length, hours * 60 + quarterCountFromToken(m[2]) * 15);
+  }
+
+  // "two and a quarter hours" (the hour word comes after the fraction).
+  for (const m of fullText.matchAll(
+    /\b(one|two|three|four|five|six|\d{1,2})\s+and\s+(?:a\s+)?(?:(one|two|three|four|five|six|\d{1,2})[-\s]+)?quarters?\s+hours?\b/gi
+  )) {
+    const hours = hoursFromDurationToken(m[1] ?? "");
+    if (!hours) continue;
+    const index = m.index ?? 0;
+    pushCovered(index, m[0].length, hours * 60 + quarterCountFromToken(m[2]) * 15);
+  }
+
+  // "three quarters of an hour" / "a quarter of an hour" contain "an hour", which is not the duration.
+  for (const m of fullText.matchAll(
+    /\b(?:(a|an|one|two|three|four|five|six|\d{1,2})[-\s]+)?quarters?\s+of\s+an\s+hour\b/gi
+  )) {
+    const index = m.index ?? 0;
+    pushCovered(index, m[0].length, quarterCountFromToken(m[1]) * 15);
+  }
+
+  for (const m of fullText.matchAll(/\b(?:a\s+)?quarter\s*-?\s*hours?\b/gi)) {
+    const index = m.index ?? 0;
+    pushCovered(index, m[0].length, 15);
+  }
+
   for (const m of fullText.matchAll(/\b(\d{1,2})\s*(?:hours?|hrs?|hr)\b/gi)) {
     const h = Number(m[1]);
-    if (Number.isFinite(h)) push(m.index ?? 0, h * 60);
+    if (Number.isFinite(h)) pushUnlessCovered(m.index ?? 0, m[0].length, h * 60);
   }
 
   for (const m of fullText.matchAll(/\b(one|two|three|four|five|six)\s*(?:hours?|hrs?|hr)\b/gi)) {
     const h = DURATION_WORD_TO_HOURS[m[1]?.toLowerCase() ?? ""];
-    if (h) push(m.index ?? 0, h * 60);
+    if (h) pushUnlessCovered(m.index ?? 0, m[0].length, h * 60);
   }
 
   for (const m of fullText.matchAll(/\b(\d{2,3})\s*(?:minutes?|mins?|min)\b/gi)) {
     const n = Number(m[1]);
-    if (Number.isFinite(n)) push(m.index ?? 0, n);
+    if (Number.isFinite(n)) pushUnlessCovered(m.index ?? 0, m[0].length, n);
   }
 
   for (const m of fullText.matchAll(/\bone\s+(?:and\s+a\s+)?half\s*(?:hours?|hrs?|hr)\b/gi)) {
-    push(m.index ?? 0, 90);
+    pushUnlessCovered(m.index ?? 0, m[0].length, 90);
   }
 
   for (const m of fullText.matchAll(/\bhalf\s*-?\s*hour\b/gi)) {
-    push(m.index ?? 0, 30);
+    pushUnlessCovered(m.index ?? 0, m[0].length, 30);
   }
 
   for (const m of fullText.matchAll(/\b(?:a|an)\s+(?:full\s+)?hour\b|\bhourly\b/gi)) {
-    push(m.index ?? 0, 60);
+    pushUnlessCovered(m.index ?? 0, m[0].length, 60);
   }
 
   matches.sort((a, b) => a.index - b.index);
