@@ -29,6 +29,7 @@ import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
   extractSimulatorDurationMinutes,
+  resolveOfferedSlotPickIndex,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
   squarePaymentHoldCheckoutClient,
@@ -391,6 +392,148 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+  });
+
+  test("the first Friday of October is that Friday, not this coming Friday", () => {
+    const sunday = DateTime.fromISO("2026-05-17T12:00:00", { zone: "America/Los_Angeles" });
+
+    assert.strictEqual(
+      resolveRequestedDateFromText("the first Friday of October", sunday).isoDate,
+      "2026-10-02"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "Book simulator the first Friday of October evening for 2 players for 2 hours",
+        sunday
+      ).isoDate,
+      "2026-10-02"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the fourth Friday of October", sunday).isoDate,
+      "2026-10-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the last Friday in October", sunday).isoDate,
+      "2026-10-30"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the 2nd Saturday of November", sunday).isoDate,
+      "2026-11-14"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("first Fri of Oct", sunday).isoDate,
+      "2026-10-02"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the first Friday of next month", sunday).isoDate,
+      "2026-06-05"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the last Friday of this month", sunday).isoDate,
+      "2026-05-29"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the last Friday of the month", sunday).isoDate,
+      "2026-05-29"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the first Friday of May", sunday).isoDate,
+      "2027-05-07"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the first Friday of October 2027", sunday).isoDate,
+      "2027-10-01"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("not the first Friday of October, the second Friday of June", sunday)
+        .isoDate,
+      "2026-06-12"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("not the first Friday of October, Friday", sunday).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("can't do the fourth Friday of October, Saturday", sunday).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the first Friday of October doesn't work", sunday).isoDate,
+      null
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the fifth Friday of February 2026", sunday).isoDate,
+      null
+    );
+    assert.strictEqual(resolveRequestedDateFromText("I may book Friday", sunday).isoDate, "2026-05-22");
+    assert.strictEqual(resolveRequestedDateFromText("Friday", sunday).isoDate, "2026-05-22");
+    assert.strictEqual(
+      resolveRequestedDateFromText("the first Friday of this month", sunday).isoDate,
+      null
+    );
+
+    const afterFirstFriday = DateTime.fromISO("2026-10-08T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    assert.strictEqual(
+      resolveRequestedDateFromText("the first Friday of October", afterFirstFriday).isoDate,
+      "2027-10-01"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the first Friday of October 2026", afterFirstFriday).isoDate,
+      "2026-10-02"
+    );
+
+    const slots = [sampleSlot(), { ...sampleSlot(), bayOrResourceId: "vendor-slot-772" }];
+    assert.equal(resolveOfferedSlotPickIndex("the first", slots), 0);
+    assert.equal(resolveOfferedSlotPickIndex("I'll take the second", slots), 1);
+    assert.equal(resolveOfferedSlotPickIndex("the first Friday of October", slots), null);
+    assert.equal(resolveOfferedSlotPickIndex("the 2nd Saturday of November", slots), null);
+    assert.equal(
+      resolveOfferedSlotPickIndex(
+        "Book simulator the first Friday of October evening for 2 players",
+        slots
+      ),
+      null
+    );
+  });
+
+  test("the first Friday of October looks up Whoosh for that day, not this Friday", async () => {
+    const sunday = DateTime.fromISO("2026-05-17T12:00:00", { zone: "America/Los_Angeles" });
+    Settings.now = () => sunday.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText: "Book simulator the first Friday of October evening for 2 players for 2 hours",
+      playbook: "simulator",
+      conversationHistory: inboundOnlyHistory([
+        "Friday evening for 2 players for 2 hours book a bay",
+      ]),
+    });
+
+    assert.deepStrictEqual(seen.map((p) => p.date), ["2026-10-02"]);
+    assert.deepStrictEqual(seen.map((p) => p.durationMinutes), [120]);
+    assert.strictEqual(seen[0]?.preferredTimeRange, "evening");
+    const outbound = expectDirectOutbound(flow);
+    assert.strictEqual(outbound.debug.resolved_requested_date, "2026-10-02");
+    assert.strictEqual(outbound.debug.date_source, "explicit_date");
+    assert.notStrictEqual(
+      outbound.replyText,
+      "I don't want to guess on an old set of times. What day and time should I check for you?"
+    );
+    assert.strictEqual(outbound.debug.reason, "whoosh_slots_offered");
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
