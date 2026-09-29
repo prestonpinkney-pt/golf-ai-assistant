@@ -365,6 +365,185 @@ function readSimulatorBayDefaultDurationMinutesFromEnv(): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 60;
 }
 
+const MONTH_NAME_TO_NUM: Record<string, number> = {
+  january: 1,
+  jan: 1,
+  february: 2,
+  feb: 2,
+  march: 3,
+  mar: 3,
+  april: 4,
+  apr: 4,
+  may: 5,
+  june: 6,
+  jun: 6,
+  july: 7,
+  jul: 7,
+  august: 8,
+  aug: 8,
+  september: 9,
+  sept: 9,
+  sep: 9,
+  october: 10,
+  oct: 10,
+  november: 11,
+  nov: 11,
+  december: 12,
+  dec: 12,
+};
+
+/** Longer names first so "september" wins over "sept" / "sep" and "friday" over "fri". */
+const MONTH_NAME_TOKEN =
+  "january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec";
+
+const WEEKDAY_NAME_TO_NUM: Record<string, number> = {
+  monday: 1,
+  mon: 1,
+  tuesday: 2,
+  tues: 2,
+  tue: 2,
+  wednesday: 3,
+  wed: 3,
+  thursday: 4,
+  thurs: 4,
+  thur: 4,
+  thu: 4,
+  friday: 5,
+  fri: 5,
+  saturday: 6,
+  sat: 6,
+  sunday: 7,
+  sun: 7,
+};
+
+const WEEKDAY_NAME_TOKEN =
+  "monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun";
+
+const ORDINAL_WEEK_TO_N: Record<string, number> = {
+  first: 1,
+  "1st": 1,
+  second: 2,
+  "2nd": 2,
+  third: 3,
+  "3rd": 3,
+  fourth: 4,
+  "4th": 4,
+  fifth: 5,
+  "5th": 5,
+  last: -1,
+};
+
+const ORDINAL_WEEK_TOKEN = "first|1st|second|2nd|third|3rd|fourth|4th|fifth|5th|last";
+
+/** "the first Friday of October" / "2nd Saturday in November" / "last Friday of next month". */
+const ORDINAL_WEEKDAY_OF_MONTH_RE = new RegExp(
+  `\\b(?:the\\s+)?(${ORDINAL_WEEK_TOKEN})\\s+(${WEEKDAY_NAME_TOKEN})\\s+(?:of|in)\\s+(?:the\\s+month|(this|next)\\s+month|(${MONTH_NAME_TOKEN})\\.?(?:,?\\s*(20\\d{2}))?)`,
+  "gi"
+);
+
+function ordinalWeekdayPhraseIsNegated(subject: string, index: number, length: number): boolean {
+  const before = subject.slice(Math.max(0, index - 64), index);
+  const after = subject.slice(index + length);
+  return (
+    /\b(?:not|except)\s+(?:this\s+|the\s+|coming\s+)?$/i.test(before) ||
+    /\bcan(?:not|'?t)\s+(?:do\s+|make\s+)?$/i.test(before) ||
+    /\b(?:instead\s+of|rather\s+than)\s+$/i.test(before) ||
+    /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after)
+  );
+}
+
+function nthWeekdayOfMonth(
+  year: number,
+  month: number,
+  weekday: number,
+  n: number,
+  zone: string
+): DateTime | null {
+  const firstOfMonth = DateTime.fromObject({ year, month, day: 1 }, { zone }).startOf("day");
+  if (!firstOfMonth.isValid) return null;
+  const delta = (weekday - firstOfMonth.weekday + 7) % 7;
+  const firstHit = firstOfMonth.plus({ days: delta });
+  if (n < 0) {
+    let cursor = firstHit;
+    let last = firstHit;
+    while (cursor.month === month && cursor.year === year) {
+      last = cursor;
+      cursor = cursor.plus({ weeks: 1 });
+    }
+    return last.month === month && last.year === year ? last : null;
+  }
+  const hit = firstHit.plus({ weeks: n - 1 });
+  if (hit.month !== month || hit.year !== year) return null;
+  return hit;
+}
+
+type OrdinalWeekdayOfMonthMatch = {
+  index: number;
+  end: number;
+  isoDate: string | null;
+  negated: boolean;
+};
+
+/**
+ * Last "first Friday of October" wins. A past named month with no year rolls forward one year.
+ * "this month" / "the month" that has already passed stays unresolved so it does not become
+ * the upcoming weekday. Impossible counts ("fifth Friday of February") stay unresolved.
+ */
+function ordinalWeekdayOfMonthMatches(
+  subject: string,
+  local: DateTime
+): OrdinalWeekdayOfMonthMatch[] {
+  const zone = local.zoneName || BUSINESS_TIMEZONE;
+  const re = new RegExp(ORDINAL_WEEKDAY_OF_MONTH_RE.source, "gi");
+  const matches: OrdinalWeekdayOfMonthMatch[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(subject)) !== null) {
+    const n = ORDINAL_WEEK_TO_N[m[1]?.toLowerCase() ?? ""];
+    const weekday = WEEKDAY_NAME_TO_NUM[m[2]?.toLowerCase() ?? ""];
+    const relativeMonth = m[3]?.toLowerCase() ?? null;
+    const monthName = m[4]?.toLowerCase() ?? null;
+    const explicitYear = m[5] ? Number(m[5]) : null;
+    let isoDate: string | null = null;
+    if (n && weekday) {
+      let year = local.year;
+      let month = local.month;
+      let roll: "year" | "none" = "none";
+      if (relativeMonth === "next") {
+        const nextMonth = local.plus({ months: 1 });
+        year = nextMonth.year;
+        month = nextMonth.month;
+      } else if (relativeMonth === "this" || !monthName) {
+        year = local.year;
+        month = local.month;
+      } else {
+        month = MONTH_NAME_TO_NUM[monthName] ?? local.month;
+        year = explicitYear ?? local.year;
+        roll = explicitYear == null ? "year" : "none";
+      }
+      let dt = nthWeekdayOfMonth(year, month, weekday, n, zone);
+      if (dt && roll === "year" && dt < local) {
+        dt = nthWeekdayOfMonth(year + 1, month, weekday, n, zone);
+      }
+      if (dt && (relativeMonth === "this" || (!monthName && !relativeMonth)) && dt < local) {
+        dt = null;
+      }
+      isoDate = dt?.toISODate() ?? null;
+    }
+    matches.push({
+      index: m.index,
+      end: m.index + m[0].length,
+      isoDate,
+      negated: ordinalWeekdayPhraseIsNegated(subject, m.index, m[0].length),
+    });
+  }
+  return matches;
+}
+
+/** Drop "first Friday of October" so slot ordinals still match a bare "the first". */
+function stripOrdinalWeekdayOfMonthPhrases(inbound: string): string {
+  return inbound.replace(new RegExp(ORDINAL_WEEKDAY_OF_MONTH_RE.source, "gi"), " ");
+}
+
 export function extractSimulatorDurationMinutes(fullText: string): number | null {
   const matches: Array<{ index: number; minutes: number }> = [];
 
@@ -428,6 +607,17 @@ export function resolveRequestedDateFromText(
     return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
   }
 
+  const ordinalWeekdayMatches = ordinalWeekdayOfMonthMatches(subject, local);
+  const lastOrdinalWeekday = ordinalWeekdayMatches.at(-1) ?? null;
+  if (lastOrdinalWeekday && !lastOrdinalWeekday.negated) {
+    const trailingWeekday = new RegExp(`\\b(?:${WEEKDAY_NAME_TOKEN})\\b`, "i").test(
+      subject.slice(lastOrdinalWeekday.end)
+    );
+    if (!trailingWeekday) {
+      return { isoDate: lastOrdinalWeekday.isoDate, source: "explicit_date" };
+    }
+  }
+
   const weekdayMap: Record<string, number> = {
     monday: 1,
     mon: 1,
@@ -449,9 +639,14 @@ export function resolveRequestedDateFromText(
   };
   const weekdayRe =
     /\b(?:(this|next)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun)\b/gi;
+  const negatedOrdinalSpans = ordinalWeekdayMatches
+    .filter((match) => match.negated)
+    .map((match) => [match.index, match.end] as const);
   let weekdayMatch: { modifier: string | null; dow: number } | null = null;
   let m: RegExpExecArray | null;
   while ((m = weekdayRe.exec(subject)) !== null) {
+    const at = m.index;
+    if (negatedOrdinalSpans.some(([start, end]) => at >= start && at < end)) continue;
     const dow = weekdayMap[m[2]?.toLowerCase() ?? ""];
     if (dow) weekdayMatch = { modifier: m[1]?.toLowerCase() ?? null, dow };
   }
@@ -1082,7 +1277,7 @@ export function inboundMentionsLikelyOfferedClock(subject: string): boolean {
 }
 
 function matchOrdinalOfferIndex(inbound: string, offerCount: number): number | null {
-  const lower = inbound.toLowerCase();
+  const lower = stripOrdinalWeekdayOfMonthPhrases(inbound).toLowerCase();
   if (/\b(?:first)\b(?:\s*(?:one|slot|option|choice|pick|opening|bay))?\b|\b1\s*st\b/.test(lower))
     return offerCount >= 1 ? 0 : null;
   if (/\b(?:second)\b(?:\s*(?:one|slot|option|choice|pick|opening|bay))?\b|\b2\s*nd\b/.test(lower))
@@ -1352,7 +1547,9 @@ export function inboundIsStrictSlotSelectionForOffers(
     return false;
 
   if (
-    /\b(book|booking|grab|want|i'?ll\s+take)\b.+?\b(?:first|second|third|three|two|one)\b/i.test(lower)
+    /\b(book|booking|grab|want|i'?ll\s+take)\b.+?\b(?:first|second|third|three|two|one)\b/i.test(
+      stripOrdinalWeekdayOfMonthPhrases(lower)
+    )
   )
     return true;
   if (/\bbook(?:ing)?\s+\d{1,2}\s*[.:]\s*\d{2}\b/i.test(trimmed)) return true;
