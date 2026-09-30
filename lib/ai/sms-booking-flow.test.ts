@@ -391,6 +391,44 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("Friday evening for 2 players for 1 1/2 hours"),
+      90
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("2 1/2 hrs"), 150);
+    assert.strictEqual(extractSimulatorDurationMinutes("1-1/2-hour bay"), 90);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("not 1 1/2 hours, book 2 hours"),
+      120
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("11/2 hours"), 120);
+  });
+
+  test("mixed 1 1/2 hours is not January 2 and keeps the weekday", () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "Book simulator Friday evening for 2 players for 1 1/2 hours",
+        anchor
+      ).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "Book simulator Friday evening for 2 players for 2 1/2 hrs",
+        anchor
+      ).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(resolveRequestedDateFromText("1 1/2 hours", anchor).isoDate, null);
+    assert.strictEqual(
+      resolveRequestedDateFromText("1 1/2 hours on 5/22", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(resolveRequestedDateFromText("11/2", anchor).isoDate, "2026-11-02");
+    assert.strictEqual(resolveRequestedDateFromText("9/18", anchor).isoDate, "2026-09-18");
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
@@ -508,6 +546,38 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(flow.kind, "appendix");
     assert.match(flow.text, /player_count/);
     assert.ok(!/\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i.test(flow.text));
+  });
+
+  test("1 1/2 hours looks up Friday at 90 minutes, not January 2 at 2 hours", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 2,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    await runAugment({
+      inboundText:
+        "Book simulator Friday evening for 2 players for 1 1/2 hours bay reserve schedule please",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].date, "2026-05-22");
+    assert.strictEqual(seen[0].durationMinutes, 90);
+    assert.strictEqual(seen[0].partySize, 2);
+    assert.strictEqual(seen[0].preferredTimeRange, "evening");
   });
 
   test("Whoosh returns evening slots before quoting exact clock times", async () => {
