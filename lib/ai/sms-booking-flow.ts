@@ -365,6 +365,24 @@ function readSimulatorBayDefaultDurationMinutesFromEnv(): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 60;
 }
 
+/**
+ * The `2` in `1 1/2 hours` is a half-hour fraction, not a 2-hour bay.
+ * Bare `1/2 hour` is left alone (separate from this mixed number).
+ */
+function isDenominatorOfMixedHalfHour(fullText: string, digitMatchIndex: number): boolean {
+  const before = fullText.slice(Math.max(0, digitMatchIndex - 16), digitMatchIndex);
+  return /\d(?:\s+|-)\s*1\s*\/\s*$/.test(before);
+}
+
+/** `1 1/2 hours` / `2-1/2 hrs` — the slash is a half hour, not a calendar date. */
+function isMixedHalfHourSlash(subject: string, matchIndex: number, matchText: string): boolean {
+  if (!/^1\/2$/i.test(matchText.replace(/\s/g, ""))) return false;
+  const before = subject.slice(Math.max(0, matchIndex - 6), matchIndex);
+  const after = subject.slice(matchIndex + matchText.length);
+  if (!/\d(?:\s+|-)\s*$/.test(before)) return false;
+  return /^\s*-?\s*(?:hours?|hrs?|hr)\b/i.test(after);
+}
+
 export function extractSimulatorDurationMinutes(fullText: string): number | null {
   const matches: Array<{ index: number; minutes: number }> = [];
 
@@ -372,9 +390,18 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     if (Number.isFinite(minutes)) matches.push({ index, minutes: Math.min(Math.max(Math.round(minutes), 15), 720) });
   };
 
+  for (const m of fullText.matchAll(
+    /\b(\d{1,2})(?:\s+|-)\s*1\s*\/\s*2\s*-?\s*(?:hours?|hrs?|hr)\b/gi
+  )) {
+    const wholeHours = Number(m[1]);
+    if (Number.isFinite(wholeHours)) push(m.index ?? 0, (wholeHours + 0.5) * 60);
+  }
+
   for (const m of fullText.matchAll(/\b(\d{1,2})\s*(?:hours?|hrs?|hr)\b/gi)) {
+    const idx = m.index ?? 0;
+    if (isDenominatorOfMixedHalfHour(fullText, idx)) continue;
     const h = Number(m[1]);
-    if (Number.isFinite(h)) push(m.index ?? 0, h * 60);
+    if (Number.isFinite(h)) push(idx, h * 60);
   }
 
   for (const m of fullText.matchAll(/\b(one|two|three|four|five|six)\s*(?:hours?|hrs?|hr)\b/gi)) {
@@ -419,8 +446,11 @@ export function resolveRequestedDateFromText(
     return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
   }
 
-  const mmdd = /\b(\d{1,2})\/(\d{1,2})\b/.exec(lowered);
-  if (mmdd?.[1] && mmdd[2]) {
+  const mmddRe = /\b(\d{1,2})\/(\d{1,2})\b/g;
+  for (const mmdd of subject.matchAll(mmddRe)) {
+    if (!mmdd[1] || !mmdd[2]) continue;
+    const at = mmdd.index ?? 0;
+    if (isMixedHalfHourSlash(subject, at, mmdd[0])) continue;
     const dt = local.set({
       month: Number(mmdd[1]),
       day: Number(mmdd[2]),
