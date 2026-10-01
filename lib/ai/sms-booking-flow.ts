@@ -365,19 +365,49 @@ function readSimulatorBayDefaultDurationMinutesFromEnv(): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : 60;
 }
 
+function hoursFromDurationToken(token: string): number | null {
+  const lower = token.toLowerCase();
+  if (lower === "an") return 1;
+  if (/^\d{1,2}$/.test(lower)) {
+    const n = Number(lower);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  return DURATION_WORD_TO_HOURS[lower] ?? null;
+}
+
 export function extractSimulatorDurationMinutes(fullText: string): number | null {
   const matches: Array<{ index: number; minutes: number }> = [];
+  const compoundSpans: Array<{ start: number; end: number }> = [];
 
   const push = (index: number, minutes: number) => {
     if (Number.isFinite(minutes)) matches.push({ index, minutes: Math.min(Math.max(Math.round(minutes), 15), 720) });
   };
 
+  const coveredByCompound = (index: number) =>
+    compoundSpans.some((span) => index >= span.start && index < span.end);
+
+  // "1 hour 30" / "2 hrs and 15" have no minute unit, so only the hour was kept.
+  // A following headcount or clock ("1 hour 2 players", "1 hour 3pm") is not minutes.
+  // "1 hour 30 minutes" still belongs to the minute scan below.
+  for (const m of fullText.matchAll(
+    /\b(\d{1,2}|an|one|two|three|four|five|six)\s*(?:hours?|hrs?|hr)\s+(?:and\s+)?(\d{1,2})(?!\s*(?:minutes?|mins?|min|players?|people|persons?|ppl|guests?|of|am|pm)\b)(?!\d)/gi
+  )) {
+    const h = hoursFromDurationToken(m[1] ?? "");
+    const mins = Number(m[2]);
+    if (h == null || !Number.isFinite(mins) || mins < 1 || mins > 59) continue;
+    const index = m.index ?? 0;
+    push(index, h * 60 + mins);
+    compoundSpans.push({ start: index, end: index + m[0].length });
+  }
+
   for (const m of fullText.matchAll(/\b(\d{1,2})\s*(?:hours?|hrs?|hr)\b/gi)) {
+    if (coveredByCompound(m.index ?? 0)) continue;
     const h = Number(m[1]);
     if (Number.isFinite(h)) push(m.index ?? 0, h * 60);
   }
 
   for (const m of fullText.matchAll(/\b(one|two|three|four|five|six)\s*(?:hours?|hrs?|hr)\b/gi)) {
+    if (coveredByCompound(m.index ?? 0)) continue;
     const h = DURATION_WORD_TO_HOURS[m[1]?.toLowerCase() ?? ""];
     if (h) push(m.index ?? 0, h * 60);
   }
@@ -396,6 +426,7 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   }
 
   for (const m of fullText.matchAll(/\b(?:a|an)\s+(?:full\s+)?hour\b|\bhourly\b/gi)) {
+    if (coveredByCompound(m.index ?? 0)) continue;
     push(m.index ?? 0, 60);
   }
 
