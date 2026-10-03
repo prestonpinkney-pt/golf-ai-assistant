@@ -391,8 +391,21 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     push(m.index ?? 0, 90);
   }
 
+  // "2 and a half hours" is N hours + 30. The bare "half hour" scan only sees the
+  // singular tail ("2 and a half hour" → 30) and misses the plural, which then
+  // defaults the bay to 60 minutes.
+  for (const m of fullText.matchAll(
+    /\b(\d{1,2})\s*-?\s*(?:and|&)\s*-?\s*a\s*-?\s*half\s*-?\s*(?:hours?|hrs?|hr)\b/gi
+  )) {
+    const h = Number(m[1]);
+    if (Number.isFinite(h) && h >= 1) push(m.index ?? 0, h * 60 + 30);
+  }
+
   for (const m of fullText.matchAll(/\bhalf\s*-?\s*hour\b/gi)) {
-    push(m.index ?? 0, 30);
+    const idx = m.index ?? 0;
+    const before = fullText.slice(Math.max(0, idx - 24), idx);
+    if (/\b\d{1,2}\s*-?\s*(?:and|&)\s*-?\s*a\s*-?\s*$/i.test(before)) continue;
+    push(idx, 30);
   }
 
   for (const m of fullText.matchAll(/\b(?:a|an)\s+(?:full\s+)?hour\b|\bhourly\b/gi)) {
