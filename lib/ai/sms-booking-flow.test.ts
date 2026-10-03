@@ -28,6 +28,7 @@ import { estimateSimulatorBookingUsdCents } from "@/lib/primetime/simulator-quot
 import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
+  extractPartySize,
   extractSimulatorDurationMinutes,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
@@ -391,6 +392,61 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+  });
+
+  test("digit and-a-half durations are hours plus 30 minutes", () => {
+    assert.strictEqual(
+      extractSimulatorDurationMinutes(
+        "Book simulator Friday evening for 2 players for 2 and a half hours"
+      ),
+      150
+    );
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("Friday evening for 1 and a half hours"),
+      90
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("Friday evening for 3 and a half hrs"), 210);
+    assert.strictEqual(extractSimulatorDurationMinutes("Friday evening for 2 and a half hour"), 150);
+    assert.strictEqual(extractSimulatorDurationMinutes("Friday evening for 2-and-a-half hours"), 150);
+    assert.strictEqual(extractSimulatorDurationMinutes("Friday evening for 2 & a half hours"), 150);
+    assert.strictEqual(extractSimulatorDurationMinutes("not 2 and a half hours, book 2 hours"), 120);
+    assert.strictEqual(extractSimulatorDurationMinutes("not 1 hour, book 2 and a half hours"), 150);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for a half hour"), 30);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for half hour"), 30);
+    assert.strictEqual(extractPartySize("Book Friday evening for 2 and a half hours for 2 players"), 2);
+  });
+
+  test("2 and a half hours is sent to Whoosh as 150 minutes, not 60", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText: "Book simulator Friday evening for 2 players for 2 and a half hours",
+      playbook: "simulator",
+    });
+
+    assert.deepStrictEqual(seen.map((p) => p.date), ["2026-05-22"]);
+    assert.deepStrictEqual(seen.map((p) => p.preferredTimeRange), ["evening"]);
+    assert.deepStrictEqual(seen.map((p) => p.partySize), [2]);
+    assert.deepStrictEqual(seen.map((p) => p.durationMinutes), [150]);
+    const out = expectDirectOutbound(flow);
+    assert.match(out.replyText, /for 150 minutes/);
+    assert.strictEqual(out.debug.durationDefaulted, false);
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
