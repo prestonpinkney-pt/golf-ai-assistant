@@ -28,6 +28,7 @@ import { estimateSimulatorBookingUsdCents } from "@/lib/primetime/simulator-quot
 import type { BookingFlowAugmentation } from "./sms-booking-flow";
 import {
   customerAffirmsWithoutSlotDigitChoice,
+  extractPartySize,
   extractSimulatorDurationMinutes,
   resolveRequestedDateFromText,
   runCloseOsSmsBookingAugmentation,
@@ -393,6 +394,26 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
   });
 
+  test("just me and my wife is a couple, not a solo party of 1", () => {
+    assert.strictEqual(
+      extractPartySize("Book simulator Friday evening for just me and my wife for 2 hours"),
+      2
+    );
+    assert.strictEqual(extractPartySize("my wife and myself"), 2);
+    assert.strictEqual(extractPartySize("myself and my husband"), 2);
+    assert.strictEqual(extractPartySize("just me with my girlfriend"), 2);
+    assert.strictEqual(extractPartySize("my wife, my son, and myself"), 3);
+    assert.strictEqual(extractPartySize("just me and my wife and my son"), 3);
+    assert.strictEqual(extractPartySize("just me"), 1);
+    assert.strictEqual(extractPartySize("solo practice session"), 1);
+    assert.strictEqual(extractPartySize("Book for 4 players. Changed my mind — just me."), 1);
+    assert.strictEqual(extractPartySize("just me and the kids"), null);
+    assert.strictEqual(extractPartySize("not just me"), null);
+    assert.strictEqual(extractPartySize("not just me, 4 players"), 4);
+    assert.strictEqual(extractPartySize("can my wife watch if I book for myself"), 1);
+    assert.strictEqual(extractPartySize("2 players"), 2);
+  });
+
   test("latest inbound explicit weekday overrides stored offer date", async () => {
     const fixedNowMs = 1_779_047_200_000;
     Settings.now = () => fixedNowMs;
@@ -508,6 +529,59 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(flow.kind, "appendix");
     assert.match(flow.text, /player_count/);
     assert.ok(!/\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i.test(flow.text));
+  });
+
+  test("just me and my wife looks up a party of 2, not a solo", async () => {
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-03",
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText:
+        "Book simulator 2035-06-03 evening for just me and my wife for 2 hours",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].partySize, 2);
+    assert.strictEqual(seen[0].durationMinutes, 120);
+    assert.strictEqual(seen[0].date, "2035-06-03");
+    assert.strictEqual(flow.kind, "direct_outbound");
+    assert.strictEqual(expectDirectOutbound(flow).debug.whooshAvailabilityAttempted, true);
+    assert.strictEqual(expectDirectOutbound(flow).debug.requiredDetailsMissing.length, 0);
+  });
+
+  test("not just me asks for a headcount instead of booking a solo", async () => {
+    let called = false;
+    whooshAvailabilityClient.getAvailability = async () => {
+      called = true;
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: "2035-06-03",
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText: "Book simulator 2035-06-03 evening for 2 hours, not just me",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(called, false);
+    assert.strictEqual(flow.kind, "appendix");
+    assert.match(flow.text, /player_count/);
   });
 
   test("Whoosh returns evening slots before quoting exact clock times", async () => {
