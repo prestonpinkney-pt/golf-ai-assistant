@@ -251,10 +251,89 @@ const DURATION_WORD_TO_HOURS: Record<string, number> = {
   six: 6,
 };
 
+const SOLO_PARTY_TOKEN = "just me|myself|solo|one player|1 player";
+const NAMED_COMPANION =
+  "wife|husband|girlfriend|boyfriend|partner|fiance|fiancee|spouse|buddy|pal|friend|son|daughter|kid|dad|mom|mother|father|brother|sister|coworker|colleague|guest";
+
+/**
+ * "just me and my wife" / "my wife and myself" is a group. The bare solo token
+ * below would otherwise lock party size at 1 and undercharge the bay.
+ * Returns the headcount, or null when this phrase does not apply.
+ * `blockSolo` is set when extra people are named but not countable ("the kids").
+ */
+function partySizeFromSoloWithNamedCompanions(lower: string): {
+  count: number | null;
+  blockSolo: boolean;
+} {
+  const tokenRe = new RegExp(
+    `\\b(?:${SOLO_PARTY_TOKEN}|(?:my|our|a)\\s+(?:${NAMED_COMPANION}))\\b`,
+    "gi"
+  );
+  const tokens: Array<{ index: number; end: number; solo: boolean }> = [];
+  const soloTokenRe = new RegExp(`^(?:${SOLO_PARTY_TOKEN})$`, "i");
+  for (const m of lower.matchAll(tokenRe)) {
+    const index = m.index ?? 0;
+    tokens.push({
+      index,
+      end: index + m[0].length,
+      solo: soloTokenRe.test(m[0]),
+    });
+  }
+
+  const gapRe = /^\s*(?:,\s*)?(?:and|with|plus|&)\s+$|^\s*,\s*$/i;
+  const uncountableTailRe =
+    /^\s*(?:,\s*)?(?:and|with|plus|&)\s+(?:the|some|our|my)?\s*(?:kids|children|friends|family|guys|parents|folks|others|people)\b/i;
+  let count: number | null = null;
+  let blockSolo = false;
+  let i = 0;
+  while (i < tokens.length) {
+    let j = i + 1;
+    let hasSolo = tokens[i]?.solo ?? false;
+    let hasCompanion = tokens[i] ? !tokens[i].solo : false;
+    while (j < tokens.length) {
+      const gap = lower.slice(tokens[j - 1]?.end ?? 0, tokens[j]?.index ?? 0);
+      if (!gapRe.test(gap)) break;
+      hasSolo = hasSolo || (tokens[j]?.solo ?? false);
+      hasCompanion = hasCompanion || !(tokens[j]?.solo ?? false);
+      j += 1;
+    }
+    if (j > i + 1 && hasSolo && hasCompanion) {
+      const after = lower.slice(tokens[j - 1]?.end ?? 0);
+      if (uncountableTailRe.test(after)) blockSolo = true;
+      else count = j - i;
+    }
+    i = j > i + 1 ? j : i + 1;
+  }
+
+  if (
+    !blockSolo &&
+    new RegExp(
+      `\\b(?:${SOLO_PARTY_TOKEN})\\b(?:\\s*,)?\\s+(?:and|with|plus|&)\\s+(?:the|some|our|my)?\\s*(?:kids|children|friends|family|guys|parents|folks|others|people)\\b`,
+      "i"
+    ).test(lower)
+  ) {
+    blockSolo = true;
+  }
+
+  return { count, blockSolo };
+}
+
+function hasUnnegatedSoloPartyToken(lower: string): boolean {
+  const re = new RegExp(`\\b(?:${SOLO_PARTY_TOKEN})\\b`, "gi");
+  for (const m of lower.matchAll(re)) {
+    const idx = m.index ?? 0;
+    const before = lower.slice(Math.max(0, idx - 24), idx);
+    if (/\b(?:not|no|isn't|isnt)\s+(?:a|an|the)?\s*$/i.test(before)) continue;
+    return true;
+  }
+  return false;
+}
+
 export function extractPartySize(fullText: string): number | null {
   const lower = fullText.toLowerCase();
-  if (/\bjust me\b|\bsolo\b|\bmyself\b|\bone player\b|\b1 player\b/.test(lower)) return 1;
-  if (/\bsolo\b\s*(practice)?\s*session\b/.test(lower)) return 1;
+  const coordinated = partySizeFromSoloWithNamedCompanions(lower);
+  if (coordinated.count != null) return Math.min(Math.max(coordinated.count, 1), 32);
+  if (!coordinated.blockSolo && hasUnnegatedSoloPartyToken(lower)) return 1;
 
   const wordParty =
     /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:players?|people|person|ppl)\b/i.exec(
