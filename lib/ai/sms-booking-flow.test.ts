@@ -385,6 +385,31 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(resolved.source, "explicit_weekday");
   });
 
+  test("slash dates with an explicit year are not booked in the anchor year", () => {
+    const anchor = DateTime.fromISO("2026-10-05T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "Book simulator 12/20/2027 evening for 2 players for 2 hours",
+        anchor
+      ).isoDate,
+      "2027-12-20"
+    );
+    assert.strictEqual(resolveRequestedDateFromText("12/20/27 evening", anchor).isoDate, "2027-12-20");
+    assert.strictEqual(
+      resolveRequestedDateFromText("12/20/2026 evening", anchor).isoDate,
+      "2026-12-20"
+    );
+    assert.strictEqual(resolveRequestedDateFromText("12/20 evening", anchor).isoDate, "2026-12-20");
+    assert.strictEqual(
+      resolveRequestedDateFromText("3/15/2026 evening", anchor).isoDate,
+      "2026-03-15"
+    );
+    assert.strictEqual(resolveRequestedDateFromText("5/17 evening", anchor).isoDate, "2026-05-17");
+  });
+
   test("simulator duration phrases resolve deterministically", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 people for 2 hours"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for two hours"), 120);
@@ -483,6 +508,40 @@ describe("sms-booking-flow", () => {
     });
 
     assert.deepStrictEqual(seenDates, ["2026-05-21"]);
+  });
+
+  test("12/20/2027 is sent to Whoosh as 2027-12-20, not the current December", async () => {
+    const anchor = DateTime.fromISO("2026-10-05T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText: "Book simulator 12/20/2027 evening for 2 players for 2 hours",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].date, "2027-12-20");
+    assert.strictEqual(seen[0].partySize, 2);
+    assert.strictEqual(seen[0].durationMinutes, 120);
+    assert.strictEqual(seen[0].preferredTimeRange, "evening");
+    const outbound = expectDirectOutbound(flow);
+    assert.strictEqual(outbound.debug.resolved_requested_date, "2027-12-20");
+    assert.strictEqual(outbound.debug.date_source, "explicit_date");
   });
 
   test("Saturday evening interest without player count never calls Whoosh for exact times", async () => {

@@ -419,9 +419,18 @@ export function resolveRequestedDateFromText(
     return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
   }
 
-  const mmdd = /\b(\d{1,2})\/(\d{1,2})\b/.exec(lowered);
+  // Honor an explicit year (`12/20/2027`, `12/20/27`). A bare `12/20` stays in the anchor year.
+  const mmdd = /\b(\d{1,2})\/(\d{1,2})(?:\/(\d{4}|\d{2}))?\b/.exec(lowered);
   if (mmdd?.[1] && mmdd[2]) {
+    const yearDigits = mmdd[3];
+    const year =
+      yearDigits == null
+        ? local.year
+        : yearDigits.length === 2
+          ? 2000 + Number(yearDigits)
+          : Number(yearDigits);
     const dt = local.set({
+      year,
       month: Number(mmdd[1]),
       day: Number(mmdd[2]),
     });
