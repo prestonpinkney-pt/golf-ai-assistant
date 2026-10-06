@@ -317,7 +317,7 @@ export function extractPreferredTimePhrase(fullText: string): string | null {
   const t = fullText.toLowerCase();
   if (/\bmorning\b/.test(t)) return "morning";
   if (/\bafternoon\b/.test(t)) return "afternoon";
-  if (/\bevening\b|\bafter\s*work\b|\blater\b|\btonight\b/.test(t)) return "evening";
+  if (/\bevening\b|\bafter\s*work\b|\blater\b|\btonight\b|\b2nite\b|\b2night\b/.test(t)) return "evening";
 
   const tod = /\b(\d{1,2})\s*:?\s*(\d{2})\s*(am|pm)\b/i.exec(t);
   if (tod?.[0]) return tod[0].trim();
@@ -403,6 +403,41 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+const SMS_RELATIVE_DAY_SHORTHAND =
+  /\b(2day|2nite|2night|2morrow|2moro|2morro|2mro|2mrw|tmrw|tmmrw|tmr|tommorrow|tommorow|tomorow|tomorro)\b/gi;
+
+/** "not tmrw" / "can't do 2day" must not steal a following weekday. */
+function smsDatePhraseNegated(subject: string, index: number, length: number): boolean {
+  const before = subject.slice(Math.max(0, index - 64), index);
+  const after = subject.slice(index + length);
+  return (
+    /\b(?:not|except)\s+(?:this\s+|coming\s+)?$/i.test(before) ||
+    /\bcan(?:not|'?t)\s+(?:do\s+|make\s+)?$/i.test(before) ||
+    /\b(?:instead\s+of|rather\s+than)\s+$/i.test(before) ||
+    /^\s+(?:doesn(?:'?t)|does\s+not|won(?:'?t)|will\s+not)\s+work\b/i.test(after)
+  );
+}
+
+/**
+ * Last non-negated SMS shorthand for today (`2day`, `2nite`) or tomorrow (`tmrw`, `2morrow`).
+ * A later negated shorthand clears an earlier one (`tmrw, not tmrw`).
+ */
+function lastSmsRelativeDayShorthand(subject: string): { index: number; days: 0 | 1 } | null {
+  const re = new RegExp(SMS_RELATIVE_DAY_SHORTHAND.source, "gi");
+  let last: { index: number; days: 0 | 1 } | null = null;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(subject)) !== null) {
+    if (smsDatePhraseNegated(subject, m.index, m[0].length)) {
+      last = null;
+      continue;
+    }
+    const token = m[1]?.toLowerCase() ?? "";
+    const days: 0 | 1 = token === "2day" || token === "2nite" || token === "2night" ? 0 : 1;
+    last = { index: m.index, days };
+  }
+  return last;
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -413,6 +448,33 @@ export function resolveRequestedDateFromText(
 
   const direct = subject.match(ISO_DATE);
   if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
+
+  const shorthand = lastSmsRelativeDayShorthand(subject);
+  if (shorthand) {
+    const laterToday = /\btoday\b/i.exec(subject);
+    const laterTomorrow = /\btomorrow\b/i.exec(subject);
+    const laterMmdd = /\b(\d{1,2})\/(\d{1,2})\b/.exec(lowered);
+    const laterWeekday =
+      /\b(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun)\b/gi;
+    let weekdayIndex = -1;
+    let weekdayHit: RegExpExecArray | null;
+    while ((weekdayHit = laterWeekday.exec(subject)) !== null) {
+      weekdayIndex = weekdayHit.index;
+    }
+    const afterShorthand = (index: number | undefined) =>
+      typeof index === "number" && index > shorthand.index;
+    const deferredToLaterDate =
+      afterShorthand(laterToday?.index) ||
+      afterShorthand(laterTomorrow?.index) ||
+      afterShorthand(laterMmdd?.index) ||
+      weekdayIndex > shorthand.index;
+    if (!deferredToLaterDate) {
+      return {
+        isoDate: local.plus({ days: shorthand.days }).toISODate(),
+        source: "explicit_date",
+      };
+    }
+  }
 
   if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
   if (/\btomorrow\b/i.test(lowered)) {
@@ -934,6 +996,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
     )
   )
     return true;
+  if (new RegExp(SMS_RELATIVE_DAY_SHORTHAND.source, "i").test(inbound)) return true;
   if (/\bfor\s+(?:a\s+)?\d+(?:\.\d+)?\s*(?:hrs?|hours?)\b/i.test(t)) return true;
   if (/\bfor\s+\d+\s+players?\b/i.test(t)) return true;
   if (/\b\d+\s+players?\b/i.test(t)) return true;

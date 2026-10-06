@@ -385,6 +385,104 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(resolved.source, "explicit_weekday");
   });
 
+  test("SMS shorthand tmrw and 2nite are today or tomorrow, not a leftover weekday", () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+
+    assert.strictEqual(resolveRequestedDateFromText("tmrw", anchor).isoDate, "2026-05-18");
+    assert.strictEqual(resolveRequestedDateFromText("tmr evening", anchor).isoDate, "2026-05-18");
+    assert.strictEqual(resolveRequestedDateFromText("2morrow", anchor).isoDate, "2026-05-18");
+    assert.strictEqual(resolveRequestedDateFromText("tommorow", anchor).isoDate, "2026-05-18");
+    assert.strictEqual(resolveRequestedDateFromText("tomorow", anchor).isoDate, "2026-05-18");
+    assert.strictEqual(resolveRequestedDateFromText("2day evening", anchor).isoDate, "2026-05-17");
+    assert.strictEqual(resolveRequestedDateFromText("2nite", anchor).isoDate, "2026-05-17");
+    assert.strictEqual(resolveRequestedDateFromText("2night", anchor).isoDate, "2026-05-17");
+    assert.strictEqual(
+      resolveRequestedDateFromText("not tmrw, Friday evening", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("tmrw actually Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("Friday actually tmrw", anchor).isoDate,
+      "2026-05-18"
+    );
+    assert.strictEqual(resolveRequestedDateFromText("tmrw, not tmrw", anchor).isoDate, null);
+    assert.strictEqual(
+      resolveRequestedDateFromText("can't do 2nite, Saturday", anchor).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(resolveRequestedDateFromText("tomorrow", anchor).isoDate, "2026-05-18");
+  });
+
+  test("tmrw looks up Whoosh for tomorrow, not a Friday already in the transcript", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    await runAugment({
+      inboundText: "Book simulator tmrw evening for 2 players for 2 hours",
+      playbook: "simulator",
+      conversationHistory: inboundOnlyHistory([
+        "Book simulator Friday evening for 2 players for 2 hours",
+      ]),
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].date, "2026-05-18");
+    assert.strictEqual(seen[0].preferredTimeRange, "evening");
+    assert.strictEqual(seen[0].partySize, 2);
+    assert.strictEqual(seen[0].durationMinutes, 120);
+  });
+
+  test("2nite looks up Whoosh for this evening, not a missing date", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 0,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    await runAugment({
+      inboundText: "Book simulator 2nite for 2 players for 2 hours",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].date, "2026-05-17");
+    assert.strictEqual(seen[0].preferredTimeRange, "evening");
+    assert.strictEqual(seen[0].partySize, 2);
+    assert.strictEqual(seen[0].durationMinutes, 120);
+  });
+
   test("simulator duration phrases resolve deterministically", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 people for 2 hours"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for two hours"), 120);
