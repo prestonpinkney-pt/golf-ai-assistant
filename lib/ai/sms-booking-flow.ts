@@ -382,6 +382,14 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     if (h) push(m.index ?? 0, h * 60);
   }
 
+  // "a few" is 3, matching "in a few days". "in/within a few hours" is a start time.
+  for (const m of fullText.matchAll(/\ba\s+few(?:\s+more)?\s+(?:hours?|hrs?|hr)\b/gi)) {
+    const index = m.index ?? 0;
+    const before = fullText.slice(Math.max(0, index - 8), index);
+    if (/(?:^|\b)(?:with)?in\s+$/i.test(before)) continue;
+    push(index, 3 * 60);
+  }
+
   for (const m of fullText.matchAll(/\b(\d{2,3})\s*(?:minutes?|mins?|min)\b/gi)) {
     const n = Number(m[1]);
     if (Number.isFinite(n)) push(m.index ?? 0, n);

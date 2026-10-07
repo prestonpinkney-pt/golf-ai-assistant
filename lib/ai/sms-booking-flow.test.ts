@@ -393,6 +393,74 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
   });
 
+  test("a few hours is 3 hours, not the 1-hour default", () => {
+    assert.strictEqual(extractSimulatorDurationMinutes("for a few hours"), 180);
+    assert.strictEqual(extractSimulatorDurationMinutes("a few hrs"), 180);
+    assert.strictEqual(extractSimulatorDurationMinutes("just a few more hours"), 180);
+    assert.strictEqual(extractSimulatorDurationMinutes("in a few hours"), null);
+    assert.strictEqual(extractSimulatorDurationMinutes("within a few hours"), null);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("not a few hours, book 2 hours"),
+      120
+    );
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("1 hour. Actually a few hours"),
+      180
+    );
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("in a few hours for 2 hours"),
+      120
+    );
+  });
+
+  test("a few hours looks up Whoosh for 3 hours, not the 60-minute default", async () => {
+    const sunday = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => sunday.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText: "Book simulator Friday evening for 2 players for a few hours",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].date, "2026-05-22");
+    assert.strictEqual(seen[0].preferredTimeRange, "evening");
+    assert.strictEqual(seen[0].partySize, 2);
+    assert.strictEqual(seen[0].durationMinutes, 180);
+    const outbound = expectDirectOutbound(flow);
+    assert.strictEqual(outbound.debug.durationDefaulted, false);
+    assert.match(outbound.replyText, /for 3 hours/);
+
+    const slotStart = "2026-05-23T02:00:00.000Z";
+    const oneHour = estimateSimulatorBookingUsdCents({
+      partySize: 2,
+      durationMinutes: 60,
+      slotStartIso: slotStart,
+    });
+    const threeHours = estimateSimulatorBookingUsdCents({
+      partySize: 2,
+      durationMinutes: 180,
+      slotStartIso: slotStart,
+    });
+    assert.strictEqual(oneHour, 8000);
+    assert.strictEqual(threeHours, 24000);
+  });
+
   test("latest inbound explicit weekday overrides stored offer date", async () => {
     const fixedNowMs = 1_779_047_200_000;
     Settings.now = () => fixedNowMs;
