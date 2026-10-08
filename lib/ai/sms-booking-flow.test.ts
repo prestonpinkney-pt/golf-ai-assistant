@@ -391,6 +391,21 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 hrs"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 90 minutes"), 90);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for a 90-minute session"), 90);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for a 30-minute session"), 30);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 30-min"), 30);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 120-minutes"), 120);
+    assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 45-mins"), 45);
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("2 hours. Actually a 90-minute session"),
+      90
+    );
+    assert.strictEqual(
+      extractSimulatorDurationMinutes("not a 90-minute session, book 2 hours"),
+      120
+    );
+    assert.strictEqual(extractSimulatorDurationMinutes("I'll be there in 10-minutes"), 15);
+    assert.strictEqual(extractSimulatorDurationMinutes("I'll be there in 10 minutes"), 15);
   });
 
   test("latest inbound explicit weekday overrides stored offer date", async () => {
@@ -728,6 +743,67 @@ describe("sms-booking-flow", () => {
     });
     assert.strictEqual(expectDirectOutbound(flow).debug.intent, "pricing");
     assert.strictEqual(expectDirectOutbound(flow).debug.durationDefaulted, false);
+  });
+
+  test("hyphenated 90-minute session is a 90-minute Whoosh lookup, not the 60-minute default", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const slotStart = "2026-05-23T01:30:00.000Z";
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [
+          {
+            startTime: slotStart,
+            endTime: "2026-05-23T02:30:00.000Z",
+            bayOrResourceId: "vendor-slot-90",
+            resourceName: "Bay A",
+            serviceType: "simulator",
+            priceEstimate: null,
+            raw: { agenda_date: "2026-05-22" },
+          },
+        ],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText: "Book simulator Friday evening for 2 players for a 90-minute session",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0].date, "2026-05-22");
+    assert.strictEqual(seen[0].partySize, 2);
+    assert.strictEqual(seen[0].durationMinutes, 90);
+    assert.strictEqual(seen[0].preferredTimeRange, "evening");
+    const out = expectDirectOutbound(flow);
+    assert.strictEqual(out.debug.durationDefaulted, false);
+    assert.match(out.replyText, /for 90 minutes/);
+    assert.strictEqual(
+      estimateSimulatorBookingUsdCents({
+        partySize: 2,
+        durationMinutes: seen[0].durationMinutes,
+        slotStartIso: slotStart,
+      }),
+      12000
+    );
+    assert.strictEqual(
+      estimateSimulatorBookingUsdCents({
+        partySize: 2,
+        durationMinutes: 60,
+        slotStartIso: slotStart,
+      }),
+      8000
+    );
   });
 
   test("Sunday morning bay for two triggers Whoosh with 60m default duration (no transcript duration)", async () => {

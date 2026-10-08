@@ -382,7 +382,7 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
     if (h) push(m.index ?? 0, h * 60);
   }
 
-  for (const m of fullText.matchAll(/\b(\d{2,3})\s*(?:minutes?|mins?|min)\b/gi)) {
+  for (const m of fullText.matchAll(/\b(\d{2,3})\s*-?\s*(?:minutes?|mins?|min)\b/gi)) {
     const n = Number(m[1]);
     if (Number.isFinite(n)) push(m.index ?? 0, n);
   }
