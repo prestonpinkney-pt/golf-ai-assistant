@@ -449,16 +449,22 @@ export function resolveRequestedDateFromText(
   };
   const weekdayRe =
     /\b(?:(this|next)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun)\b/gi;
-  let weekdayMatch: { modifier: string | null; dow: number } | null = null;
+  let weekdayMatch: { modifier: string | null; dow: number; afterNext: boolean } | null = null;
   let m: RegExpExecArray | null;
   while ((m = weekdayRe.exec(subject)) !== null) {
     const dow = weekdayMap[m[2]?.toLowerCase() ?? ""];
-    if (dow) weekdayMatch = { modifier: m[1]?.toLowerCase() ?? null, dow };
+    if (!dow) continue;
+    const after = subject.slice((m.index ?? 0) + m[0].length);
+    // "Friday after next" is the Friday after the upcoming one. Do not treat
+    // "after next week/month" as that suffix.
+    const afterNext = /^\s*,?\s*after\s+next\b(?!\s+(?:week|month))/i.test(after);
+    weekdayMatch = { modifier: m[1]?.toLowerCase() ?? null, dow, afterNext };
   }
   if (weekdayMatch) {
     const baseDelta = (weekdayMatch.dow - local.weekday + 7) % 7;
     const days =
-      weekdayMatch.modifier === "next" ? baseDelta + 7 : baseDelta;
+      (weekdayMatch.modifier === "next" ? baseDelta + 7 : baseDelta) +
+      (weekdayMatch.afterNext ? 7 : 0);
     return {
       isoDate: local.plus({ days }).toISODate(),
       source: "explicit_weekday",
