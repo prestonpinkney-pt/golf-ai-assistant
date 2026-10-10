@@ -393,6 +393,67 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 1 hour"), 60);
   });
 
+  test("the day after Friday is the following Saturday, not that Friday", () => {
+    // Sunday 2026-05-17: this Friday is 2026-05-22; the day after is 2026-05-23.
+    const sunday = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    assert.strictEqual(resolveRequestedDateFromText("Friday", sunday).isoDate, "2026-05-22");
+    assert.strictEqual(resolveRequestedDateFromText("this Friday", sunday).isoDate, "2026-05-22");
+    assert.strictEqual(resolveRequestedDateFromText("next Friday", sunday).isoDate, "2026-05-29");
+    assert.strictEqual(
+      resolveRequestedDateFromText("the day after Friday", sunday).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("day after Friday evening", sunday).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the day after Fri", sunday).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a day after the Friday", sunday).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the day after Saturday", sunday).isoDate,
+      "2026-05-24"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the day after Sunday", sunday).isoDate,
+      "2026-05-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the day after next Friday", sunday).isoDate,
+      "2026-05-30"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("the day after Friday, actually this Friday", sunday).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("not this Friday, the day after Friday", sunday).isoDate,
+      "2026-05-23"
+    );
+    // "birthday after Friday" is not "the day after Friday".
+    assert.strictEqual(
+      resolveRequestedDateFromText("birthday after Friday", sunday).isoDate,
+      "2026-05-22"
+    );
+
+    const friday = DateTime.fromISO("2026-05-22T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    assert.strictEqual(resolveRequestedDateFromText("Friday", friday).isoDate, "2026-05-22");
+    assert.strictEqual(
+      resolveRequestedDateFromText("the day after Friday", friday).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(resolveRequestedDateFromText("next Friday", friday).isoDate, "2026-05-29");
+  });
+
   test("latest inbound explicit weekday overrides stored offer date", async () => {
     const fixedNowMs = 1_779_047_200_000;
     Settings.now = () => fixedNowMs;
@@ -449,6 +510,42 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(out.debug.timezone, "America/Los_Angeles");
     assert.strictEqual(out.debug.usingStoredOfferSlots, false);
     assert.strictEqual(out.debug.storedOfferRejectedReason, "superseded_by_new_booking_request");
+  });
+
+  test("the day after Friday looks up Whoosh on Saturday, not that Friday", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText: "Book simulator the day after Friday evening for 2 players for 2 hours",
+      playbook: "simulator",
+    });
+
+    assert.strictEqual(seen.length, 1);
+    assert.strictEqual(seen[0]?.date, "2026-05-23");
+    assert.strictEqual(seen[0]?.preferredTimeRange, "evening");
+    assert.strictEqual(seen[0]?.partySize, 2);
+    assert.strictEqual(seen[0]?.durationMinutes, 120);
+    const outbound = expectDirectOutbound(flow);
+    assert.strictEqual(outbound.debug.resolved_requested_date, "2026-05-23");
+    assert.strictEqual(outbound.debug.date_source, "explicit_weekday");
+    assert.match(outbound.replyText, /Sat May 23/);
+    assert.doesNotMatch(outbound.replyText, /May 22/);
   });
 
   test("Wednesday and Thursday resolve distinctly and latest inbound wins over history", async () => {
