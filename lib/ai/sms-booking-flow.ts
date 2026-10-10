@@ -449,16 +449,23 @@ export function resolveRequestedDateFromText(
   };
   const weekdayRe =
     /\b(?:(this|next)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun)\b/gi;
-  let weekdayMatch: { modifier: string | null; dow: number } | null = null;
+  let weekdayMatch: { modifier: string | null; dow: number; dayAfter: boolean } | null = null;
   let m: RegExpExecArray | null;
   while ((m = weekdayRe.exec(subject)) !== null) {
     const dow = weekdayMap[m[2]?.toLowerCase() ?? ""];
-    if (dow) weekdayMatch = { modifier: m[1]?.toLowerCase() ?? null, dow };
+    if (!dow) continue;
+    const before = subject.slice(0, m.index ?? 0);
+    // "the day after Friday" is the calendar day after that weekday. A non-letter
+    // boundary keeps "birthday after Friday" on Friday. Last mention still wins.
+    const dayAfter =
+      /(?:^|[^a-z0-9])(?:(?:the|a)\s+)?day\s+after\s*,?\s*(?:the\s+)?$/i.test(before);
+    weekdayMatch = { modifier: m[1]?.toLowerCase() ?? null, dow, dayAfter };
   }
   if (weekdayMatch) {
     const baseDelta = (weekdayMatch.dow - local.weekday + 7) % 7;
     const days =
-      weekdayMatch.modifier === "next" ? baseDelta + 7 : baseDelta;
+      (weekdayMatch.modifier === "next" ? baseDelta + 7 : baseDelta) +
+      (weekdayMatch.dayAfter ? 1 : 0);
     return {
       isoDate: local.plus({ days }).toISODate(),
       source: "explicit_weekday",
