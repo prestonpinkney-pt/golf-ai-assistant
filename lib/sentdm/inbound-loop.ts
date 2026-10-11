@@ -197,7 +197,7 @@ function getLessonQualificationTemplate() {
     readiness_score: 0,
     last_question_asked: null,
     next_question:
-      "Happy to help. Are you looking for a 30-minute or 1-hour lesson, and is it for you or someone else?",
+      "Are you looking for a 30-minute or one-hour lesson — and is it for you or someone else?",
     next_best_action: "ask_question",
   };
 }

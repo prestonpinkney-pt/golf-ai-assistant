@@ -505,9 +505,9 @@ describe("sms-booking-flow", () => {
     });
 
     assert.strictEqual(called, false);
-    assert.strictEqual(flow.kind, "appendix");
-    assert.match(flow.text, /player_count/);
-    assert.ok(!/\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i.test(flow.text));
+    assert.strictEqual(flow.kind, "direct_outbound");
+    assert.match(expectDirectOutbound(flow).replyText, /how many people/i);
+    assert.ok(!/\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i.test(expectDirectOutbound(flow).replyText));
   });
 
   test("Whoosh returns evening slots before quoting exact clock times", async () => {
@@ -578,7 +578,7 @@ describe("sms-booking-flow", () => {
     });
 
     assert.strictEqual(createCalls, 0);
-    assert.match(expectDirectOutbound(followUp.flow).replyText, /Text 1, 2, or 3/i);
+    assert.match(expectDirectOutbound(followUp.flow).replyText, /reply 1, 2, or 3/i);
   });
 
   test("explicit clock text without enumerated pick does not call createBooking", async () => {
@@ -796,10 +796,9 @@ describe("sms-booking-flow", () => {
       simulatorBayDefaultDurationMinutes: null,
     });
 
-    assert.strictEqual(flow.kind, "appendix");
-    assert.match(flow.text, /duration_minutes/);
-    assert.match(flow.text, /Roughly how long — 30 minutes, an hour, or two/);
-    assert.ok(!/\bMorning, afternoon, or evening\b/.test(flow.text));
+    assert.strictEqual(flow.kind, "direct_outbound");
+    assert.match(expectDirectOutbound(flow).replyText, /About how long — 30 minutes, an hour, or two hours/);
+    assert.ok(!/\bMorning, afternoon, or evening\b/.test(expectDirectOutbound(flow).replyText));
   });
 
   test("when default disabled and customer adds explicit time, appendix asks concise duration follow-up", async () => {
@@ -826,9 +825,9 @@ describe("sms-booking-flow", () => {
     });
 
     assert.strictEqual(availCalls, 0);
-    assert.strictEqual(flow.kind, "appendix");
+    assert.strictEqual(flow.kind, "direct_outbound");
     assert.ok(flow.debug.requiredDetailsMissing.includes("duration_minutes"));
-    assert.match(flow.text, /How long were you thinking for the bay\?/);
+    assert.match(expectDirectOutbound(flow).replyText, /How long did you want the bay for\?/);
   });
 
   test("availability_completed booking_action stores enumerated offered_slots for follow-up UX", async () => {

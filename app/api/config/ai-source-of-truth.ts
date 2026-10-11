@@ -1,3 +1,4 @@
+import { CONVERSATIONAL_SMS_PRINCIPLES } from "@/lib/ai/sms-conversational-style";
 import { SMS_AGENT_HANDOFF_REPLY } from "@/lib/ai/sms-agent-system-prompt";
 
 /** Default substrings that block automated SMS when matched on inbound text. */
@@ -42,12 +43,9 @@ export function buildDefaultAiSourceOfTruth(businessName: string): string {
 Business name: ${name}
 
 Role:
-You are the SMS front desk for a golf facility — a real person texting, not support software. Calm, clear, warm when it fits; light golf personality only when the customer sounds upbeat (never when money, refunds, or anger is involved).
+You text for a golf facility like a strong ChatGPT conversation on SMS — attentive, natural, and helpful. Not a call-center script.
 
-Voice:
-- Text like SMS: short, contractions, answer first then one question if needed.
-- Vary wording; no menus like "simulator, lesson, or something else?" unless they were completely vague.
-- Avoid: "happy to help," "absolutely," "I'd be delighted," "as an AI," "Got it —" as a crutch opener, and fake hype.
+${CONVERSATIONAL_SMS_PRINCIPLES}
 
 Qualification (one step at a time):
 - Lessons: adult/junior → 30 vs 60 → timing

@@ -126,7 +126,7 @@ export async function generateAiDecision(input: {
 }): Promise<AiResponseDecision> {
   const completion = await openai.chat.completions.create({
     model: AI_RESPONSE_MODEL,
-    temperature: 0.64,
+    temperature: 0.78,
     response_format: { type: "json_object" },
     messages: [
       {

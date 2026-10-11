@@ -25,6 +25,11 @@ import {
   buildPaymentHoldSquareDescriptionNote,
 } from "@/lib/closeos/sms-hold-copy";
 import {
+  conversationalAfterHandoffAck,
+  conversationalOfferClarificationSms,
+  conversationalSlotOfferSms,
+} from "@/lib/ai/sms-conversational-style";
+import {
   compactPricingSmsForBayQuestion,
   isLikelyLessonPricingQuestion,
   isLikelyStandalonePricingQuestion,
@@ -695,15 +700,15 @@ export function summarizeMissingQuestions(
     return missing.map((m) => {
       switch (m) {
         case "date":
-          return "Confirm which precise day you'd like.";
+          return "What day were you thinking?";
         case "adult_or_junior":
-          return "Is this for an adult or a junior?";
+          return "Is this for you (adult) or for a junior?";
         case "session_length_minutes":
-          return "Prefer 30 or 60 minutes today?";
+          return "Do you want a 30-minute lesson or a full hour?";
         case "time_preference_window":
-          return "Morning, afternoon, or evening work better that day?";
+          return "Morning, afternoon, or evening work better for you?";
         case "customer_phone":
-          return "Is texting this SMS number okay for confirmations? Reply YES.";
+          return "Is this number the best one to text you on for updates?";
         default:
           return m;
       }
@@ -713,19 +718,19 @@ export function summarizeMissingQuestions(
   return missing.map((m) => {
     switch (m) {
       case "date":
-        return "What exact calendar day fits?";
+        return "What day works for you?";
       case "player_count":
-        return "How many players total?";
+        return "How many people are you booking for?";
       case "duration_minutes":
         return extractLastExplicitClockPhrase(transcriptHint ?? "")
-          ? "How long were you thinking for the bay?"
-          : "Roughly how long — 30 minutes, an hour, or two?";
+          ? "How long did you want the bay for?"
+          : "About how long — 30 minutes, an hour, or two hours?";
       case "time_range":
-        return "Morning, afternoon, or evening?";
+        return "Are you thinking morning, afternoon, or evening?";
       case "customer_phone":
-        return "Is texting this SMS number okay for confirmations? Reply YES.";
+        return "Is this number the best one to text you on for updates?";
       case "numeric_slot_choice":
-        return "Reply using 1, 2, or 3 matching the numbered openings.";
+        return conversationalOfferClarificationSms();
       default:
         return m;
     }
@@ -1461,14 +1466,13 @@ export function formatSmsSlotOffers(
     if (readableEnd.isValid) return `${readableStart.toFormat("h:mm a")}-${readableEnd.toFormat("h:mm a")}`;
     return readableStart.toFormat("h:mm a");
   });
-  let listSentence: string;
-  if (labels.length === 1) listSentence = labels[0] ?? "";
-  else if (labels.length === 2) listSentence = `${labels[0]} and ${labels[1]}`;
-  else listSentence = `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
   const durationLabel = formatDurationLabel(durationMinutes);
   const durationPhrase = durationLabel ? ` for ${durationLabel}` : "";
-  const body = `${dateLabel} I've got ${listSentence} open${durationPhrase}. Text 1, 2, or 3 for one of those.`;
-  return body.slice(0, 318);
+  return conversationalSlotOfferSms({
+    dateLabel,
+    timeLabels: labels,
+    durationPhrase,
+  });
 }
 
 /** Slot pick narrow enough for reusing enumerated offers — not full booking prose. */
@@ -1550,10 +1554,10 @@ function chooseEnumeratedOfferClarificationReply(params: {
 }): string {
   const { offeredSlots, agendaDateIso, conversationHistory, durationMinutes } = params;
   if (lastOutboundContainsSlotFingerprints(conversationHistory, offeredSlots)) {
-    return "Which works — reply 1, 2, or 3, or tell me a time (like 11:30 AM).";
+    return conversationalOfferClarificationSms();
   }
   const body = formatSmsSlotOffers(offeredSlots, agendaDateIso, durationMinutes);
-  return `${body.slice(0, 280)} Or just tell me a time (like 11:30 AM).`.slice(0, 318);
+  return body.slice(0, 318);
 }
 
 /** Numeric / option pick only (does not inspect clock wording). Exported for tooling/tests. */
@@ -1811,8 +1815,7 @@ export async function runCloseOsSmsBookingAugmentation(params: {
       kind: "direct_outbound",
       bypassRiskyResponseGuard: false,
       bookingConfirmedByWhoosh: false,
-      replyText:
-        "Perfect — the team will follow up. Text us anytime if anything changes.",
+      replyText: conversationalAfterHandoffAck(),
       debug: {
         intent: "missing_details",
         whooshAvailabilityAttempted: false,
@@ -2745,15 +2748,13 @@ export async function runCloseOsSmsBookingAugmentation(params: {
         );
 
   if (missingFacts.length > 0) {
-    const lines = summarizeMissingQuestions(missingFacts, facts, transcript)[0]!;
+    const question = summarizeMissingQuestions(missingFacts, facts, transcript)[0]!;
 
     return {
-      kind: "appendix",
-      text:
-        `\nWHOOSH_BOOKING_PRECHECK_FAILED` +
-        `\nBOOKING_VOICE_BAN: Never say booked, locked in, finalized, reserved, priced, totals, confirmations, nor "seeing you then" timelines unless Whoosh booking POST succeeds (sms_booking metadata).\nNever say booked/reserved/you're set/confirmed without Whoosh POST booking success.` +
-        `\nMissing BEFORE live lookup (no availability/booking APIs until cleared): ${missingFacts.join(", ")}.` +
-        `\nAsk ONE question only: "${lines}". Do NOT cite exact clock hours until Whoosh_LOOKUP_SUCCESS.`,
+      kind: "direct_outbound",
+      bypassRiskyResponseGuard: false,
+      bookingConfirmedByWhoosh: false,
+      replyText: question,
       debug: {
         intent: "missing_details",
         whooshAvailabilityAttempted: false,
