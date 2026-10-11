@@ -1,0 +1,11 @@
+{
+  "name": "meta_cloud_shape",
+  "language": "en_US",
+  "category": "UTILITY",
+  "components": [
+    {
+      "type": "BODY",
+      "text": "This is Meta's components[] format, not the Sent v3 request body."
+    }
+  ]
+}
