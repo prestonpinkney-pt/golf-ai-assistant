@@ -49,6 +49,8 @@ Optional but common:
 | -------- | ------- |
 | `CLOSEOS_TEST_SMS_ALLOWLIST` | Comma-separated E.164; required for live agent test mode provider auto-send |
 | `CLOSEOS_LIVE_AGENT_TEST_MODE` | `true` enables allowlisted inbound auto-send QA (does not bypass STOP/opt-out/cooling-off/high-risk) |
+| `CLOSEOS_AUTOMATION_DISCLOSURE` | First auto-SMS intro: `minimal` (default, human front-desk line), `full` (legacy "automated assistant"), or `off` |
+| `CLOSEOS_ASSISTANT_NAME` | Name in disclosure line (default `Front desk`) |
 | `CLOSEOS_QUIET_HOURS_ENABLED` | `true` to defer overnight sends |
 | `CLOSEOS_WEBHOOK_JOB_SECRET` | Ops override for manual webhook drain |
 | `WHOOSH_*` | Whoosh agenda/booking integration (if enabled) |

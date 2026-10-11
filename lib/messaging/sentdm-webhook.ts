@@ -42,6 +42,9 @@ export function sentDmWebhookSignatureHeaderPresence(
     // legacy / alternate spellings kept for diagnostics
     "x-sentdm-signature",
     "x-sent-dm-signature",
+    "x-sentdm-timestamp",
+    "x-sent-dm-timestamp",
+    "sentdm-timestamp",
     "x-sentdm-secret",
     "x-sent-dm-secret",
   ] as const;

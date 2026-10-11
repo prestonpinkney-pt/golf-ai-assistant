@@ -40,7 +40,7 @@ const QUALIFYING_REPLY_PATTERNS: RegExp[] = [
 
 /** Default low-risk follow-up when model over-escalates a safe availability ask. */
 export const SAFE_AVAILABILITY_PLAYER_COUNT_REPLY =
-  "Got it — how many players total?";
+  "How many players will you have?";
 
 export type SafeBookingQualificationInput = {
   inboundText: string;
