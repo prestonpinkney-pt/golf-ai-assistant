@@ -221,6 +221,46 @@ function mergeTranscript(history: ConversationHistoryMessage[], inbound: string)
   return [...history.map((m) => m.message_text ?? ""), inbound].join("\n").trim().slice(-8000);
 }
 
+function isInboundHistoryMessage(message: ConversationHistoryMessage): boolean {
+  const direction = (message.direction || "").toLowerCase();
+  return direction === "inbound" || direction === "incoming";
+}
+
+/** Customer-only lines (avoids bot slot copy polluting duration/time parsing). */
+export function mergeCustomerTranscript(
+  history: ConversationHistoryMessage[],
+  inbound: string
+): string {
+  const lines = history
+    .filter(isInboundHistoryMessage)
+    .map((m) => m.message_text ?? "")
+    .filter((t) => t.trim().length > 0);
+  lines.push(inbound);
+  return lines.join("\n").trim().slice(-8000);
+}
+
+export function lastOutboundMessageText(
+  history: ConversationHistoryMessage[]
+): string | null {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i]!;
+    const direction = (m.direction || "").toLowerCase();
+    if (direction === "outbound" || direction === "outgoing") {
+      const t = m.message_text?.trim();
+      if (t) return t;
+    }
+  }
+  return null;
+}
+
+export function outboundLooksLikePendingTeamHandoff(text: string): boolean {
+  const t = text.toLowerCase();
+  return (
+    /team/.test(t) &&
+    (/confirm/.test(t) || /follow up/.test(t) || /text you/.test(t) || /locking/.test(t))
+  );
+}
+
 export function inferServiceType(playbook: string): WhooshServiceType {
   if (playbook === "lesson") return "lesson";
   if (playbook === "event") return "event";
@@ -289,14 +329,45 @@ export function extractLessonTrack(fullText: string): BookingFacts["lessonTrack"
   return null;
 }
 
-export function extractLessonDuration(fullText: string): 30 | 60 | null {
-  const t = fullText.toLowerCase();
+/** Lesson length from a single customer line (ignores clock times like 11:30 AM). */
+export function extractLessonDurationFromCustomerLine(line: string): 30 | 60 | null {
+  const t = line.trim().toLowerCase();
+  if (!t) return null;
 
-  if (/\b30\b|\bhalf\s*-?\s*hour\b|\bhalf\b(?!\w)/i.test(t)) return 30;
-  if (/\b60\b|\b1\s*-?\s*hour\b|\bfull\s*-?\s*hour\b|\bhour\b/i.test(t) || /\ban hour\b/i.test(t))
+  if (
+    /\bfull\s*-?\s*hour\b/.test(t) ||
+    /\ban hour\b/.test(t) ||
+    /\b1\s*-?\s*hour\b/.test(t) ||
+    /\b60\s*-?\s*min(?:ute)?s?\b/.test(t) ||
+    /(?:^|\s)60(?:\s|$)/.test(t)
+  ) {
     return 60;
+  }
+
+  if (
+    /\bhalf\s*-?\s*hour\b/.test(t) ||
+    /\b30\s*-?\s*min(?:ute)?s?\b/.test(t) ||
+    (/\b30\b/.test(t) && !/\d{1,2}:\d{2}/.test(t))
+  ) {
+    return 30;
+  }
 
   return null;
+}
+
+/** Last explicit duration mention across customer lines (newest inbound wins). */
+export function extractLessonDurationFromCustomerText(customerText: string): 30 | 60 | null {
+  const lines = customerText.split("\n").map((l) => l.trim()).filter(Boolean);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const d = extractLessonDurationFromCustomerLine(lines[i]!);
+    if (d) return d;
+  }
+  return null;
+}
+
+/** @deprecated Prefer customer-only parsers; kept for tests and legacy callers. */
+export function extractLessonDuration(fullText: string): 30 | 60 | null {
+  return extractLessonDurationFromCustomerText(fullText);
 }
 
 /** Prefer explicit clock (last mention wins) over coarse morning/afternoon/evening. */
@@ -322,6 +393,25 @@ export function extractPreferredTimePhrase(fullText: string): string | null {
   const tod = /\b(\d{1,2})\s*:?\s*(\d{2})\s*(am|pm)\b/i.exec(t);
   if (tod?.[0]) return tod[0].trim();
 
+  return null;
+}
+
+/** Coarse window from latest inbound, else newest customer line with a preference. */
+export function resolvePreferredTimePhraseForLookup(
+  history: ConversationHistoryMessage[],
+  latestInbound: string
+): string | null {
+  const fromLatest = extractPreferredTimePhrase(latestInbound);
+  if (fromLatest) return fromLatest;
+
+  const customerLines = history
+    .filter(isInboundHistoryMessage)
+    .map((m) => m.message_text ?? "")
+    .filter((t) => t.trim().length > 0);
+  for (let i = customerLines.length - 1; i >= 0; i--) {
+    const pref = extractPreferredTimePhrase(customerLines[i]!);
+    if (pref) return pref;
+  }
   return null;
 }
 
@@ -474,11 +564,14 @@ export function resolveIsoDateFromTranscript(subject: string, anchor: DateTime):
 
 function collectBookingFactsWithDateResolution(
   playbook: string,
-  transcript: string,
+  history: ConversationHistoryMessage[],
   latestInboundText: string,
   anchorLA: DateTime
 ): { facts: BookingFacts; dateResolution: { isoDate: string | null; source: SmsBookingDateSource } } {
   const serviceType = inferServiceType(playbook);
+  const transcript = mergeTranscript(history, latestInboundText);
+  const customerText = mergeCustomerTranscript(history, latestInboundText);
+
   const latestInboundDate = resolveRequestedDateFromText(latestInboundText, anchorLA);
   const contextDate =
     latestInboundDate.isoDate ? latestInboundDate : resolveRequestedDateFromText(transcript, anchorLA);
@@ -491,21 +584,25 @@ function collectBookingFactsWithDateResolution(
     facts: {
       serviceType,
       isoDate: dateResolution.isoDate,
-      partySize: extractPartySize(transcript),
-      preferredTimePhrase: extractPreferredTimePhrase(transcript),
+      partySize: extractPartySize(customerText),
+      preferredTimePhrase: resolvePreferredTimePhraseForLookup(history, latestInboundText),
       simulatorDurationMinutes:
         serviceType === "lesson" ? null :
           extractSimulatorDurationMinutes(latestInboundText) ??
-          extractSimulatorDurationMinutes(transcript),
-      lessonTrack: extractLessonTrack(transcript),
-      lessonDurationMinutes: extractLessonDuration(transcript),
+          extractSimulatorDurationMinutes(customerText),
+      lessonTrack: extractLessonTrack(customerText),
+      lessonDurationMinutes: extractLessonDurationFromCustomerText(customerText),
     },
     dateResolution,
   };
 }
 
-export function collectBookingFacts(playbook: string, transcript: string, anchorLA: DateTime): BookingFacts {
-  return collectBookingFactsWithDateResolution(playbook, transcript, transcript, anchorLA).facts;
+export function collectBookingFacts(
+  playbook: string,
+  transcript: string,
+  anchorLA: DateTime
+): BookingFacts {
+  return collectBookingFactsWithDateResolution(playbook, [], transcript, anchorLA).facts;
 }
 
 function missingFactsForLesson(
@@ -600,7 +697,7 @@ export function summarizeMissingQuestions(
         case "date":
           return "Confirm which precise day you'd like.";
         case "adult_or_junior":
-          return "Say adult or junior so we grab the correct lesson SKU.";
+          return "Is this for an adult or a junior?";
         case "session_length_minutes":
           return "Prefer 30 or 60 minutes today?";
         case "time_preference_window":
@@ -731,6 +828,28 @@ async function persistBookingAction(params: {
   return { ok: true, errorMessage: null };
 }
 
+/** Closes enumerated slot UX so affirmations do not re-send the same offer list. */
+async function consumeStoredAvailabilityOffer(params: {
+  supabase: SupabaseClient;
+  businessId: string;
+  conversationId: string | null;
+  contactId: string | null;
+  serviceType: WhooshServiceType;
+  requestedDateIso: string | null;
+}) {
+  await persistBookingAction({
+    supabase: params.supabase,
+    businessId: params.businessId,
+    conversationId: params.conversationId,
+    contactId: params.contactId,
+    actionType: "availability_lookup",
+    status: "completed",
+    serviceType: params.serviceType,
+    requestedDateIso: params.requestedDateIso,
+    payload: { offer_consumed: true, offered_slots: [] },
+  });
+}
+
 /** Stored snapshot for SMS slot UX (indexed 1–3 + fields required for booking create). */
 export type StoredOfferedSlotWire = {
   option_index: number;
@@ -807,6 +926,7 @@ export type CompletedAvailabilityOfferRow = {
   conversation_id: string | null;
   contact_id: string | null;
   requested_date: string | null;
+  requested_time_range: string | null;
   service_type: string | null;
   party_size: number | null;
   duration_minutes: number | null;
@@ -839,7 +959,7 @@ async function fetchLatestCompletedAvailabilityOfferRow(
   let query = supabase
     .from("booking_actions")
     .select(
-      "created_at, business_id, conversation_id, contact_id, requested_date, service_type, party_size, duration_minutes, raw_payload"
+      "created_at, business_id, conversation_id, contact_id, requested_date, requested_time_range, service_type, party_size, duration_minutes, raw_payload"
     )
     .eq("business_id", params.businessId)
     .eq("action_type", "availability_lookup")
@@ -885,6 +1005,10 @@ async function fetchLatestCompletedAvailabilityOfferRow(
       : d.requested_date instanceof Date ?
         DateTime.fromJSDate(d.requested_date).toFormat("yyyy-MM-dd")
       : coerceYmdComparable(d.requested_date),
+    requested_time_range:
+      typeof d.requested_time_range === "string" && d.requested_time_range.trim() ?
+        d.requested_time_range.trim().toLowerCase()
+      : null,
     service_type:
       typeof d.service_type === "string" ? d.service_type.trim().toLowerCase() : null,
     party_size:
@@ -972,6 +1096,8 @@ export function evaluateStoredAvailabilityOfferForSms(params: {
   /** Only compare browse duration once simulator/Lesson minutes are explicit from transcript vs defaults. */
   durationExplicitInLatestTranscript: boolean;
   supersedeOffersForFreshBookingPhrase: boolean;
+  /** When customer refines morning/afternoon/evening on the latest SMS, invalidate stale slot lists. */
+  latestInboundCoarseTimePreference?: "morning" | "afternoon" | "evening" | null;
 }): StoredOfferEvaluateResult {
   const {
     row,
@@ -1003,7 +1129,18 @@ export function evaluateStoredAvailabilityOfferForSms(params: {
 
   if (!row || !row.raw_payload) return { ok: false, reason: "no_stored_offer_row", diagnostics };
 
+  if (row.raw_payload.offer_consumed === true)
+    return { ok: false, reason: "stored_offer_consumed", diagnostics };
+
   if (supersedeOffersForFreshBookingPhrase) return { ok: false, reason: "superseded_by_new_booking_request", diagnostics };
+
+  const coarsePref = params.latestInboundCoarseTimePreference;
+  if (coarsePref) {
+    const rowPref = row.requested_time_range?.toLowerCase() ?? null;
+    if (rowPref !== coarsePref) {
+      return { ok: false, reason: "stored_offer_time_preference_mismatch", diagnostics };
+    }
+  }
 
   const cid = conversationContactId ?? null;
   const rid = row.contact_id ?? null;
@@ -1494,7 +1631,7 @@ export async function runCloseOsSmsBookingAugmentation(params: {
 
   const { facts, dateResolution } = collectBookingFactsWithDateResolution(
     effectivePlaybook,
-    transcript,
+    params.conversationHistory,
     params.inboundText,
     anchorLA
   );
@@ -1600,6 +1737,10 @@ export async function runCloseOsSmsBookingAugmentation(params: {
         facts.lessonDurationMinutes !== null
       : facts.simulatorDurationMinutes !== null,
     supersedeOffersForFreshBookingPhrase: latestInboundIsNewBookingRequest,
+    latestInboundCoarseTimePreference: (() => {
+      const pref = extractPreferredTimePhrase(trimmedInbound);
+      return pref === "morning" || pref === "afternoon" || pref === "evening" ? pref : null;
+    })(),
   });
 
   const offersAwaitingStored = storedAvailabilityEval.ok ? storedAvailabilityEval.slots : null;
@@ -1655,6 +1796,32 @@ export async function runCloseOsSmsBookingAugmentation(params: {
         requiredDetailsMissing: ["date", "time_range"],
         selectedSlotSource: "none",
         reason: "numeric_slot_pick_without_valid_stored_offer",
+        ...smsOfferDebugNoFreshLookup,
+      },
+    };
+  }
+
+  const lastOutbound = lastOutboundMessageText(params.conversationHistory);
+  if (
+    lastOutbound &&
+    outboundLooksLikePendingTeamHandoff(lastOutbound) &&
+    customerAffirmsWithoutSlotDigitChoice(trimmedInbound)
+  ) {
+    return {
+      kind: "direct_outbound",
+      bypassRiskyResponseGuard: false,
+      bookingConfirmedByWhoosh: false,
+      replyText:
+        "Perfect — the team will follow up. Text us anytime if anything changes.",
+      debug: {
+        intent: "missing_details",
+        whooshAvailabilityAttempted: false,
+        whooshBookingAttempted: false,
+        whooshBookingConfirmed: false,
+        durationDefaulted: durationDefaultedDebug,
+        requiredDetailsMissing: [],
+        selectedSlotSource: "none",
+        reason: "affirmed_after_team_handoff",
         ...smsOfferDebugNoFreshLookup,
       },
     };
@@ -1830,6 +1997,14 @@ export async function runCloseOsSmsBookingAugmentation(params: {
           "sms_booking_create_failed",
           configFailureMetadata
         );
+        await consumeStoredAvailabilityOffer({
+          supabase: params.supabase,
+          businessId: params.businessId,
+          conversationId: params.conversationId,
+          contactId: params.contactId,
+          serviceType: facts.serviceType,
+          requestedDateIso: storedAvailabilityEval.agendaDateIso,
+        });
         return {
           kind: "direct_outbound",
           bypassRiskyResponseGuard: false,
