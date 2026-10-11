@@ -70,7 +70,7 @@ type BusinessMessagingConfigRow = {
   risky_response_terms: string[] | null;
 };
 
-const DEFAULT_ASSISTANT_NAME = `${BUSINESS_NAME} AI Assistant`;
+const DEFAULT_ASSISTANT_NAME = "Front desk";
 
 function cleanPhone(value: unknown): string | null {
   if (typeof value !== "string") return null;

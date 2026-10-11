@@ -578,7 +578,7 @@ describe("sms-booking-flow", () => {
     });
 
     assert.strictEqual(createCalls, 0);
-    assert.match(expectDirectOutbound(followUp.flow).replyText, /Reply 1,/i);
+    assert.match(expectDirectOutbound(followUp.flow).replyText, /Text 1, 2, or 3/i);
   });
 
   test("explicit clock text without enumerated pick does not call createBooking", async () => {
@@ -798,7 +798,7 @@ describe("sms-booking-flow", () => {
 
     assert.strictEqual(flow.kind, "appendix");
     assert.match(flow.text, /duration_minutes/);
-    assert.match(flow.text, /Roughly how long would you like the bay — 30 minutes, 1 hour, or 2 hours/);
+    assert.match(flow.text, /Roughly how long — 30 minutes, an hour, or two/);
     assert.ok(!/\bMorning, afternoon, or evening\b/.test(flow.text));
   });
 
@@ -828,7 +828,7 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(availCalls, 0);
     assert.strictEqual(flow.kind, "appendix");
     assert.ok(flow.debug.requiredDetailsMissing.includes("duration_minutes"));
-    assert.match(flow.text, /Got it — roughly how long would you like the bay for\?/);
+    assert.match(flow.text, /How long were you thinking for the bay\?/);
   });
 
   test("availability_completed booking_action stores enumerated offered_slots for follow-up UX", async () => {

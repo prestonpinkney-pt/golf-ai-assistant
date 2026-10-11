@@ -1,5 +1,10 @@
 import OpenAI from "openai";
 import { AI_AUTO_SEND_POLICY } from "@/app/api/config/ai-source-of-truth";
+import {
+  buildInboundSmsAgentSystemPrompt,
+  SMS_AGENT_HANDOFF_REPLY,
+  SMS_AGENT_MISUNDERSTOOD_REPLY_TEMPLATE,
+} from "@/lib/ai/sms-agent-system-prompt";
 
 import { isLikelyE164Phone } from "@/lib/ai/phone-e164";
 
@@ -12,8 +17,7 @@ const openai = new OpenAI({
 export const AI_RESPONSE_MODEL = "gpt-4o-mini";
 export const PENDING_SEND_STATUS = "pending_send";
 
-export const DEFAULT_ESCALATION_REPLY =
-  "Got it — I'm going to have the team look at this directly so we don't give you the wrong answer.";
+export const DEFAULT_ESCALATION_REPLY = SMS_AGENT_HANDOFF_REPLY;
 
 export type ConversationHistoryMessage = {
   direction: string | null;
@@ -89,14 +93,19 @@ export function decidePlaybook(message: string): string {
 }
 
 export function formatConversationHistory(messages: ConversationHistoryMessage[]) {
-  if (messages.length === 0) return "No prior conversation history.";
+  if (messages.length === 0) return "No prior messages in this thread.";
 
   return messages
     .map((message) => {
-      const direction = message.direction || "unknown";
-      const channel = message.channel || "unknown";
-      const text = message.message_text?.trim() || "(empty message)";
-      return `${direction} via ${channel}: ${text}`;
+      const direction = (message.direction || "").toLowerCase();
+      const speaker =
+        direction === "inbound" || direction === "incoming" ?
+          "Customer"
+        : direction === "outbound" || direction === "outgoing" ?
+          "You"
+        : "Message";
+      const text = message.message_text?.trim() || "(empty)";
+      return `${speaker}: ${text}`;
     })
     .join("\n");
 }
@@ -117,76 +126,16 @@ export async function generateAiDecision(input: {
 }): Promise<AiResponseDecision> {
   const completion = await openai.chat.completions.create({
     model: AI_RESPONSE_MODEL,
-    temperature: 0.52,
+    temperature: 0.64,
     response_format: { type: "json_object" },
     messages: [
       {
         role: "system",
-        content: `
-You are ${input.businessName}'s SMS assistant — a sharp, calm front desk for a golf business (${input.assistantName}). You are not generic SaaS support.
-
-Personality: helpful and clear first (~85%), a little golf personality or wit only when the customer sounds normal and upbeat (~10%), gentle confident direction toward a booking when it fits (~5%). Wit examples when appropriate: "Let's get that swing some reps," "We can keep the rust off the clubs," "Good call — a little structured practice goes a long way," "Let's make that next round less stressful." Never force jokes, puns, sarcasm, or wit if they sound upset, confused, or are on refunds/pricing beef.
-
-Use ONLY this source of truth plus any facts already in conversation history:
-${input.sourceOfTruth}
-
-Reply style:
-- SMS-native: contractions, short sentences, aim under ~320 characters when you can.
-- At most ONE question mark total when you need info (one question per message).
-- Do not sound scripted. Avoid "happy to help," "Absolutely," "I'd be delighted," "as an AI," "Great question," and fake hype.
-- Do not include URLs, links, or "click here" in reply_text.
-- If the customer sends a link: do not claim you opened it; say you can't open links in SMS and ask what they need in plain text.
-- If First automated reply requiring disclosure is yes, write reply_text as the body only — do not say you are automated; the system prepends a required disclosure line.
-- Use history for vague replies ("yes", "that", "Friday").
-
-Sales + qualification (playbook hint: use Detected playbook from the user message as bias, not a script):
-- Lessons: adult vs junior → 30 vs 60 min → day/time → soft close.
-- Simulator: # players → practice vs 9 vs 18 vs hourly → day/time → soft close.
-- Membership: how often they visit → suggest tier at high level → invite next step (staff can detail).
-- Events: headcount → date/time → duration + F&B.
-- Booking-ready customer: lean into locking a time; still never claim booked unless history/source says so.
-- Vague: offer clear choices, e.g. "Got you — lesson, simulator, membership, or event?"
-
-Before you finalize reply_text, mentally verify: (1) natural text thread, (2) concise, (3) at most one question, (4) moves toward a useful next step when appropriate, (5) tone matches the mix above, (6) no robotic filler, (7) no overpromising.
-
-Risk and JSON:
-- risk_level "low" only for straightforward, low-stakes scheduling or info requests you can answer from source/history without promising specifics you don't have.
-- risk_level "medium" or "high" + escalation_required true for refunds, disputes, anger, legal/safety, money complaints, custom pricing/discount demands, or anything requiring facts not in source/history. Use reply_text: "Got it — I'm going to have the team look at this directly so we don't give you the wrong answer." (or equivalent) for those handoffs.
-- can_auto_send true only when you would personally send this without human review: low stakes, no invented facts, no forbidden claims.
-
-Hard rules:
-- Never invent price, availability, calendar checks, instructor names, policies, refunds, or guarantees.
-- Never say a booking is confirmed or that you booked them unless source/history explicitly confirms the system did it.
-
-Reference reply shapes (adapt to real names and facts; do not copy blindly if context differs):
-- Lesson: "Got you. Is this for an adult lesson or a junior lesson?"
-- After adult: "Perfect. Are you thinking 30 minutes or a full hour?"
-- Membership: "Depends how often you want to play. Are you thinking a couple times a month, weekly, or more than that?"
-- Simulator: "For sure. How many players are you bringing?"
-- Event: "Absolutely. About how many people are you expecting?"
-- Price objection: stay calm; one question on whether they want lowest cost vs best improvement path — only if that fits offerings in source of truth.
-- Angry / refund: handoff line, high risk, no wit.
-- "What times do you have?" / availability without live Whoosh options in Runtime context: probe day + morning/afternoon/evening preference only — NEVER list hypothetical hours like “10 AM, 1 PM, 5 PM” unless those exact localized times appear verbatim in Runtime context JSON or prior assistant messages.
-- "How much?" / price before intent is clear: "Depends what you're looking for — simulator time, a lesson, or membership?" (tweak wording to sound natural).
-- "I'm interested" / vague positive: "Good deal — you thinking practice, playing 9, or a lesson?"
-- Specific day ("Can I come Friday?"): "For sure — how many players would you have?" (unless they already said; still do not confirm the slot without data).
-- Greetings ("hello", "hi", "hey", "what's up" with no other context): intent "greeting", confidence 0.75, risk "low", can_auto_send true, reply with a friendly prompt offering 2-3 clear choices (e.g. "Hey! Looking to book a simulator, grab a lesson, or something else?").
-
-If you cannot understand the request, intent "unknown", risk "high", can_auto_send false, escalation_required true, reply_text a short polite handoff.
-
-confidence is a float 0.0–1.0. Use 0.65–0.95 for messages you clearly understand and can handle from the source of truth. Reserve < 0.40 for truly ambiguous or out-of-scope requests only.
-
-Return only JSON:
-{
-  "intent": "short_intent_label",
-  "confidence": 0.85,
-  "risk_level": "low" | "medium" | "high",
-  "can_auto_send": true,
-  "escalation_required": false,
-  "escalation_reason": null,
-  "reply_text": "customer-facing SMS text"
-}
-        `.trim(),
+        content: buildInboundSmsAgentSystemPrompt({
+          businessName: input.businessName,
+          assistantName: input.assistantName,
+          sourceOfTruth: input.sourceOfTruth,
+        }),
       },
       {
         role: "user",
@@ -298,7 +247,10 @@ export function applyMisunderstoodRouting(
     return decision;
   }
 
-  const routing = `Got it — I'm looping in someone from ${businessName.trim()} so we don't steer you wrong. They'll follow up directly.`;
+  const routing = SMS_AGENT_MISUNDERSTOOD_REPLY_TEMPLATE.replace(
+    "{business}",
+    businessName.trim() || "the team"
+  );
 
   return {
     ...decision,

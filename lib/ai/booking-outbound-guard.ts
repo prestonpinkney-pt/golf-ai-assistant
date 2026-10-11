@@ -3,10 +3,10 @@
  */
 
 export const BOOKING_CONFIRMATION_HANDOFF_REPLY =
-  "I have the details. I'll have the team confirm the booking for you shortly.";
+  "I've got your details saved — someone on the team will text you shortly to finish locking this in.";
 
 export const WHOOSH_BOOKING_TROUBLE_HANDOFF_REPLY =
-  "I have the details. I'm having trouble completing the live booking right now, so I'll have the team confirm it for you.";
+  "I've got your details — I'm having trouble finishing the booking in the system, so someone on the team will text you to confirm.";
 
 /** Curly/smart apostrophe (iOS keyboards) vs ASCII `'` — both count for contractions like I’ll */
 const A = "(?:'|\u2019)";

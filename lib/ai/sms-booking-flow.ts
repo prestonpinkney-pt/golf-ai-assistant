@@ -621,8 +621,8 @@ export function summarizeMissingQuestions(
         return "How many players total?";
       case "duration_minutes":
         return extractLastExplicitClockPhrase(transcriptHint ?? "")
-          ? "Got it — roughly how long would you like the bay for?"
-          : "Roughly how long would you like the bay — 30 minutes, 1 hour, or 2 hours?";
+          ? "How long were you thinking for the bay?"
+          : "Roughly how long — 30 minutes, an hour, or two?";
       case "time_range":
         return "Morning, afternoon, or evening?";
       case "customer_phone":
@@ -1330,7 +1330,7 @@ export function formatSmsSlotOffers(
   else listSentence = `${labels.slice(0, -1).join(", ")} and ${labels.at(-1)}`;
   const durationLabel = formatDurationLabel(durationMinutes);
   const durationPhrase = durationLabel ? ` for ${durationLabel}` : "";
-  const body = `${dateLabel}: I see ${listSentence} available${durationPhrase}. Reply 1, 2, or 3.`;
+  const body = `${dateLabel} I've got ${listSentence} open${durationPhrase}. Text 1, 2, or 3 for one of those.`;
   return body.slice(0, 318);
 }
 
@@ -1413,10 +1413,10 @@ function chooseEnumeratedOfferClarificationReply(params: {
 }): string {
   const { offeredSlots, agendaDateIso, conversationHistory, durationMinutes } = params;
   if (lastOutboundContainsSlotFingerprints(conversationHistory, offeredSlots)) {
-    return "Reply 1, 2, or 3 for one of those times I listed above—or say the clock time verbatim (example: 11:30 AM).";
+    return "Which works — reply 1, 2, or 3, or tell me a time (like 11:30 AM).";
   }
   const body = formatSmsSlotOffers(offeredSlots, agendaDateIso, durationMinutes);
-  return `${body.slice(0, 280)} Or say the clock time verbatim (example: 11:30 AM).`.slice(0, 318);
+  return `${body.slice(0, 280)} Or just tell me a time (like 11:30 AM).`.slice(0, 318);
 }
 
 /** Numeric / option pick only (does not inspect clock wording). Exported for tooling/tests. */
