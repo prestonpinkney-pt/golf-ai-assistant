@@ -403,6 +403,12 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+/** "the day before Friday" / "a day before tomorrow", not "birthday before". */
+function hasDayBeforePrefix(text: string, index: number): boolean {
+  const before = text.slice(Math.max(0, index - 48), index);
+  return /\b(?:(?:the|a)\s+)?day\s+before\s*,?\s*(?:the\s+)?$/i.test(before);
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -415,18 +421,6 @@ export function resolveRequestedDateFromText(
   if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
 
   if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
-  if (/\btomorrow\b/i.test(lowered)) {
-    return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
-  }
-
-  const mmdd = /\b(\d{1,2})\/(\d{1,2})\b/.exec(lowered);
-  if (mmdd?.[1] && mmdd[2]) {
-    const dt = local.set({
-      month: Number(mmdd[1]),
-      day: Number(mmdd[2]),
-    });
-    return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
-  }
 
   const weekdayMap: Record<string, number> = {
     monday: 1,
@@ -449,16 +443,49 @@ export function resolveRequestedDateFromText(
   };
   const weekdayRe =
     /\b(?:(this|next)\s+)?(monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun)\b/gi;
-  let weekdayMatch: { modifier: string | null; dow: number } | null = null;
+  let weekdayMatch: { modifier: string | null; dow: number; index: number } | null = null;
   let m: RegExpExecArray | null;
   while ((m = weekdayRe.exec(subject)) !== null) {
     const dow = weekdayMap[m[2]?.toLowerCase() ?? ""];
-    if (dow) weekdayMatch = { modifier: m[1]?.toLowerCase() ?? null, dow };
+    if (dow) weekdayMatch = { modifier: m[1]?.toLowerCase() ?? null, dow, index: m.index };
   }
+
+  if (/\btomorrow\b/i.test(lowered)) {
+    const tomorrowRe = /\btomorrow\b/gi;
+    let lastBareTomorrow = -1;
+    let lastDayBeforeTomorrow = -1;
+    let tomorrowMatch: RegExpExecArray | null;
+    while ((tomorrowMatch = tomorrowRe.exec(subject)) !== null) {
+      if (hasDayBeforePrefix(subject, tomorrowMatch.index)) lastDayBeforeTomorrow = tomorrowMatch.index;
+      else lastBareTomorrow = tomorrowMatch.index;
+    }
+    const weekdayIndex = weekdayMatch?.index ?? -1;
+    const latestTomorrowCue = Math.max(lastBareTomorrow, lastDayBeforeTomorrow);
+    const laterWeekdayOwnsDate =
+      weekdayMatch !== null &&
+      weekdayIndex > latestTomorrowCue &&
+      (hasDayBeforePrefix(subject, weekdayMatch.index) || lastDayBeforeTomorrow >= 0);
+    if (!laterWeekdayOwnsDate) {
+      if (lastDayBeforeTomorrow > lastBareTomorrow) {
+        return { isoDate: local.toISODate(), source: "explicit_date" };
+      }
+      return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
+    }
+  }
+
+  const mmdd = /\b(\d{1,2})\/(\d{1,2})\b/.exec(lowered);
+  if (mmdd?.[1] && mmdd[2]) {
+    const dt = local.set({
+      month: Number(mmdd[1]),
+      day: Number(mmdd[2]),
+    });
+    return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
+  }
+
   if (weekdayMatch) {
     const baseDelta = (weekdayMatch.dow - local.weekday + 7) % 7;
-    const days =
-      weekdayMatch.modifier === "next" ? baseDelta + 7 : baseDelta;
+    let days = weekdayMatch.modifier === "next" ? baseDelta + 7 : baseDelta;
+    if (hasDayBeforePrefix(subject, weekdayMatch.index)) days -= 1;
     return {
       isoDate: local.plus({ days }).toISODate(),
       source: "explicit_weekday",
