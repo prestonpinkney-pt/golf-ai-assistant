@@ -22,6 +22,7 @@
     "test:live-agent-sms": "node --import ./tests/stub-server-only.cjs --import ./tests/live-agent-sms-preload.mjs --import tsx --test --experimental-test-module-mocks lib/sentdm/live-agent-outbound.test.ts lib/sentdm/live-agent-sms.integration.test.ts",
     "test:live-agent-sms:e2e": "node --import ./tests/stub-server-only.cjs --import tsx scripts/test-live-agent-sms-e2e.mjs",
     "qa:live-agent-reply": "node --import ./tests/stub-server-only.cjs --import tsx scripts/qa-live-agent-reply.mjs",
+    "demo:sms-conversation": "node --import ./tests/stub-server-only.cjs --import tsx scripts/demo-sms-conversation.ts",
     "check:revenue-recovery": "node --import tsx scripts/check-revenue-recovery-reachability.mjs"
   },
   "dependencies": {

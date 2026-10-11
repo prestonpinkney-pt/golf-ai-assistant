@@ -123,7 +123,7 @@ function getEventQualificationTemplate() {
     readiness_score: 0,
     last_question_asked: null,
     next_question:
-      "Happy to help. What type of event are you planning, and about how many people are you expecting?",
+      "What kind of event are you planning, and about how many people?",
     next_best_action: "ask_question",
   };
 }
@@ -159,7 +159,7 @@ function getMembershipQualificationTemplate() {
     readiness_score: 0,
     last_question_asked: null,
     next_question:
-      "Happy to help. Are you mainly looking to practice, play more often, or a mix of both?",
+      "Are you mostly looking to practice, play more often, or a bit of both?",
     next_best_action: "ask_question",
   };
 }
@@ -175,7 +175,7 @@ function getGeneralQualificationTemplate() {
     readiness_score: 0,
     last_question_asked: null,
     next_question:
-      "Happy to help. Are you looking to book time, get a lesson, ask about membership, or plan something for a group?",
+      "What can I help with — a lesson, sim time, membership, or a group event?",
     next_best_action: "ask_question",
   };
 }
