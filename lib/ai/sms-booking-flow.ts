@@ -403,6 +403,213 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+const RELATIVE_DAY_COUNT_WORDS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+};
+
+const WEEKDAY_TO_LUXON: Record<string, number> = {
+  monday: 1,
+  mon: 1,
+  tuesday: 2,
+  tues: 2,
+  tue: 2,
+  wednesday: 3,
+  wed: 3,
+  thursday: 4,
+  thurs: 4,
+  thur: 4,
+  thu: 4,
+  friday: 5,
+  fri: 5,
+  saturday: 6,
+  sat: 6,
+  sunday: 7,
+  sun: 7,
+};
+
+const WEEKDAY_NAME_RE =
+  "monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun";
+
+/** "2 days before Friday" / "a couple of days before tomorrow". Not "the day before" or "a day before". */
+const DAYS_BEFORE_TARGET_RE = new RegExp(
+  String.raw`\b(a\s+couple(?:\s+of)?|couple(?:\s+of)?|\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+days?\s+before\s+(?:the\s+)?(today|tomorrow|now|(?:(this|next)\s+)?(?:${WEEKDAY_NAME_RE}))\b`,
+  "gi"
+);
+
+type DaysBeforePhrase = {
+  index: number;
+  end: number;
+  negated: boolean;
+  isoDate: string | null;
+};
+
+/** True when a short negation sits immediately before a date token. */
+function isRelativeDateMentionNegated(subject: string, matchIndex: number): boolean {
+  const before = subject.slice(Math.max(0, matchIndex - 48), matchIndex);
+  return /(?:\bnot\b|\bno\b|\bnever\b|\binstead of\b|\brather than\b|\bexcept\b|\bwithout\b|\bcan't\b|\bcannot\b|\bcant\b|\bwon't\b|\bwont\b|\bdon't\b|\bdont\b|\bdoesn't\b|\bdoesnt\b|\bdoes not\b|\bcan not\b)(?:\s+\w+){0,3}\s*$/i.test(
+    before
+  );
+}
+
+function parseRelativeDayCount(raw: string): number | null {
+  const t = raw.trim().toLowerCase().replace(/\s+/g, " ");
+  if (/^(?:a\s+)?couple(?:\s+of)?$/.test(t)) return 2;
+  if (/^\d{1,4}$/.test(t)) {
+    const n = Number(t);
+    return Number.isInteger(n) ? n : null;
+  }
+  const word = RELATIVE_DAY_COUNT_WORDS[t];
+  return typeof word === "number" ? word : null;
+}
+
+function isoFromWeekdayOffset(local: DateTime, dow: number, modifier: string | null): string | null {
+  const baseDelta = (dow - local.weekday + 7) % 7;
+  const days = modifier === "next" ? baseDelta + 7 : baseDelta;
+  return local.plus({ days }).toISODate();
+}
+
+function collectDaysBeforePhrases(subject: string, local: DateTime): DaysBeforePhrase[] {
+  const phrases: DaysBeforePhrase[] = [];
+  const re = new RegExp(DAYS_BEFORE_TARGET_RE.source, "gi");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(subject)) !== null) {
+    const count = parseRelativeDayCount(m[1] ?? "");
+    const target = (m[2] ?? "").toLowerCase();
+    const modifier = m[3]?.toLowerCase() ?? null;
+    const weekdayName = target.match(
+      new RegExp(String.raw`\b(${WEEKDAY_NAME_RE})\b`, "i")
+    )?.[1]?.toLowerCase();
+    let isoDate: string | null = null;
+    if (count != null && count >= 0 && count <= 90) {
+      if (target === "tomorrow") {
+        isoDate = local.plus({ days: 1 }).minus({ days: count }).toISODate();
+      } else if (target === "today" || target === "now") {
+        isoDate = local.minus({ days: count }).toISODate();
+      } else if (weekdayName) {
+        const dow = WEEKDAY_TO_LUXON[weekdayName];
+        const baseIso = dow ? isoFromWeekdayOffset(local, dow, modifier) : null;
+        if (baseIso) {
+          isoDate = DateTime.fromISO(baseIso, { zone: local.zone }).minus({ days: count }).toISODate();
+        }
+      }
+    }
+    phrases.push({
+      index: m.index,
+      end: m.index + m[0].length,
+      negated: isRelativeDateMentionNegated(subject, m.index),
+      isoDate,
+    });
+  }
+  return phrases;
+}
+
+function indexInsideDaysBeforePhrase(index: number, phrases: DaysBeforePhrase[]): boolean {
+  return phrases.some((phrase) => index >= phrase.index && index < phrase.end);
+}
+
+/**
+ * When "N days before Friday/today/tomorrow" is present, the named day is the
+ * anchor of the offset. Last non-negated mention wins so a later weekday or
+ * slash date can still override, and a negated offset does not fall through
+ * to that named day.
+ */
+function resolveDateWhenDaysBeforePresent(
+  subject: string,
+  local: DateTime,
+  phrases: DaysBeforePhrase[]
+): { isoDate: string | null; source: SmsBookingDateSource } {
+  type Mention =
+    | { index: number; kind: "offset"; isoDate: string | null }
+    | { index: number; kind: "weekday"; dow: number; modifier: string | null }
+    | { index: number; kind: "today" }
+    | { index: number; kind: "tomorrow" }
+    | { index: number; kind: "slash"; month: number; day: number };
+
+  const mentions: Mention[] = [];
+
+  for (const phrase of phrases) {
+    if (phrase.negated) continue;
+    mentions.push({ index: phrase.index, kind: "offset", isoDate: phrase.isoDate });
+  }
+
+  const weekdayRe = new RegExp(
+    String.raw`\b(?:(this|next)\s+)?(${WEEKDAY_NAME_RE})\b`,
+    "gi"
+  );
+  let weekdayMatch: RegExpExecArray | null;
+  while ((weekdayMatch = weekdayRe.exec(subject)) !== null) {
+    if (isRelativeDateMentionNegated(subject, weekdayMatch.index)) continue;
+    if (indexInsideDaysBeforePhrase(weekdayMatch.index, phrases)) continue;
+    const dow = WEEKDAY_TO_LUXON[weekdayMatch[2]?.toLowerCase() ?? ""];
+    if (!dow) continue;
+    mentions.push({
+      index: weekdayMatch.index,
+      kind: "weekday",
+      dow,
+      modifier: weekdayMatch[1]?.toLowerCase() ?? null,
+    });
+  }
+
+  const todayRe = /\b(today|tomorrow)\b/gi;
+  let todayMatch: RegExpExecArray | null;
+  while ((todayMatch = todayRe.exec(subject)) !== null) {
+    if (indexInsideDaysBeforePhrase(todayMatch.index, phrases)) continue;
+    if (isRelativeDateMentionNegated(subject, todayMatch.index)) continue;
+    if (todayMatch[1]?.toLowerCase() === "tomorrow") {
+      mentions.push({ index: todayMatch.index, kind: "tomorrow" });
+    } else {
+      mentions.push({ index: todayMatch.index, kind: "today" });
+    }
+  }
+
+  const slashRe = /\b(\d{1,2})\/(\d{1,2})\b/g;
+  let slashMatch: RegExpExecArray | null;
+  while ((slashMatch = slashRe.exec(subject)) !== null) {
+    if (isRelativeDateMentionNegated(subject, slashMatch.index)) continue;
+    const month = Number(slashMatch[1]);
+    const day = Number(slashMatch[2]);
+    if (!Number.isInteger(month) || !Number.isInteger(day)) continue;
+    mentions.push({ index: slashMatch.index, kind: "slash", month, day });
+  }
+
+  const winner = mentions.reduce<Mention | null>((best, mention) => {
+    if (!best || mention.index >= best.index) return mention;
+    return best;
+  }, null);
+
+  if (!winner) return { isoDate: null, source: "fallback" };
+
+  if (winner.kind === "offset") {
+    return { isoDate: winner.isoDate, source: "explicit_date" };
+  }
+  if (winner.kind === "weekday") {
+    return {
+      isoDate: isoFromWeekdayOffset(local, winner.dow, winner.modifier),
+      source: "explicit_weekday",
+    };
+  }
+  if (winner.kind === "tomorrow") {
+    return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
+  }
+  if (winner.kind === "today") {
+    return { isoDate: local.toISODate(), source: "explicit_date" };
+  }
+
+  const dt = local.set({ month: winner.month, day: winner.day });
+  return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -413,6 +620,11 @@ export function resolveRequestedDateFromText(
 
   const direct = subject.match(ISO_DATE);
   if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
+
+  const daysBeforePhrases = collectDaysBeforePhrases(subject, local);
+  if (daysBeforePhrases.length > 0) {
+    return resolveDateWhenDaysBeforePresent(subject, local, daysBeforePhrases);
+  }
 
   if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
   if (/\btomorrow\b/i.test(lowered)) {
@@ -939,6 +1151,12 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
   if (/\b\d+\s+players?\b/i.test(t)) return true;
   if (
     /\b(?:half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(t)
+  )
+    return true;
+  if (
+    /\b(?:a\s+couple(?:\s+of)?|couple(?:\s+of)?|\d{1,4}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+days?\s+before\s+(?:the\s+)?(?:today|tomorrow|now|(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun))\b/i.test(
+      inbound
+    )
   )
     return true;
   return false;
