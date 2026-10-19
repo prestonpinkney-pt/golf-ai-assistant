@@ -385,6 +385,180 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(resolved.source, "explicit_weekday");
   });
 
+  test("counted days after or from a day are that offset, not the named day", () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    const friday = DateTime.fromISO("2026-05-22T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+
+    const daysAfter = resolveRequestedDateFromText(
+      "Book simulator 3 days after Friday evening for 2 players for 2 hours",
+      anchor
+    );
+    assert.strictEqual(daysAfter.isoDate, "2026-05-25");
+    assert.strictEqual(daysAfter.source, "explicit_date");
+
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days after Fri", anchor).isoDate,
+      "2026-05-25"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("2 days after Friday", anchor).isoDate,
+      "2026-05-24"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a couple of days after Friday", anchor).isoDate,
+      "2026-05-24"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a couple days after the Friday", anchor).isoDate,
+      "2026-05-24"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("couple days after Friday", anchor).isoDate,
+      "2026-05-24"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three days after Friday", anchor).isoDate,
+      "2026-05-25"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("1 day after Friday", anchor).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("one day from Friday", anchor).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days from Friday", anchor).isoDate,
+      "2026-05-25"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a couple of days from Friday", anchor).isoDate,
+      "2026-05-24"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days after next Friday", anchor).isoDate,
+      "2026-06-01"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("2 days from next Friday", anchor).isoDate,
+      "2026-05-31"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days from the next Friday", anchor).isoDate,
+      "2026-06-01"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days after tomorrow", anchor).isoDate,
+      "2026-05-21"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("1 day after tomorrow", anchor).isoDate,
+      "2026-05-19"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("2 days after today", anchor).isoDate,
+      "2026-05-19"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("4 days after now", anchor).isoDate,
+      "2026-05-21"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days after Friday", friday).isoDate,
+      "2026-05-25"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("2 days from Friday", friday).isoDate,
+      "2026-05-24"
+    );
+
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days after Friday, actually Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days after Friday, actually Friday", anchor).source,
+      "explicit_weekday"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days after Friday, actually this Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("Friday, actually 3 days after Friday", anchor).isoDate,
+      "2026-05-25"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("Friday, actually 3 days from Friday", anchor).isoDate,
+      "2026-05-25"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("not 3 days after Friday, Saturday", anchor).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days after Friday not Saturday", anchor).isoDate,
+      "2026-05-25"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("not 3 days from Friday, Saturday", anchor).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days from Friday not Saturday", anchor).isoDate,
+      "2026-05-25"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("not 3 days after Friday", anchor).isoDate,
+      null
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("not 3 days after Friday", anchor).source,
+      "fallback"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("not 3 days from Friday", anchor).isoDate,
+      null
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days after Friday, actually tomorrow", anchor).isoDate,
+      "2026-05-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 days after Friday, actually 5/21", anchor).isoDate,
+      "2026-05-21"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("5/18, actually 3 days after Friday", anchor).isoDate,
+      "2026-05-25"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("91 days after Friday", anchor).isoDate,
+      null
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "3 days after Friday, actually 4 days from Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-27"
+    );
+
+    assert.strictEqual(resolveRequestedDateFromText("Friday", anchor).isoDate, "2026-05-22");
+    assert.strictEqual(resolveRequestedDateFromText("next Friday", anchor).isoDate, "2026-05-29");
+    assert.strictEqual(resolveRequestedDateFromText("today", anchor).isoDate, "2026-05-17");
+    assert.strictEqual(resolveRequestedDateFromText("tomorrow", anchor).isoDate, "2026-05-18");
+    assert.strictEqual(
+      resolveRequestedDateFromText("tomorrow, actually Friday", anchor).isoDate,
+      "2026-05-18"
+    );
+  });
+
   test("simulator duration phrases resolve deterministically", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 people for 2 hours"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for two hours"), 120);
@@ -483,6 +657,131 @@ describe("sms-booking-flow", () => {
     });
 
     assert.deepStrictEqual(seenDates, ["2026-05-21"]);
+  });
+
+  test("3 days after Friday looks up that later Monday, not this Friday", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText: "Book simulator 3 days after Friday evening for 2 players for 2 hours",
+      playbook: "simulator",
+    });
+
+    assert.deepStrictEqual(
+      seen.map((p) => ({
+        date: p.date,
+        partySize: p.partySize,
+        durationMinutes: p.durationMinutes,
+        preferredTimeRange: p.preferredTimeRange,
+      })),
+      [
+        {
+          date: "2026-05-25",
+          partySize: 2,
+          durationMinutes: 120,
+          preferredTimeRange: "evening",
+        },
+      ]
+    );
+    const outbound = expectDirectOutbound(flow);
+    assert.strictEqual(outbound.debug.resolved_requested_date, "2026-05-25");
+    assert.strictEqual(outbound.debug.date_source, "explicit_date");
+    assert.match(outbound.replyText, /Mon May 25/);
+    assert.match(outbound.replyText, /2 hours/);
+    assert.doesNotMatch(outbound.replyText, /Fri May 22/);
+  });
+
+  test("actually 3 days after Friday does not reuse stored Friday slots", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const conv = "00000000-0000-4000-a000-00000000d2c4";
+    const sb = new FakeBookingSupabase();
+    const biz = "00000000-0000-0000-0000-000000000099";
+    const cid = "00000000-0000-4000-a000-000000000002";
+    sb.rows.push({
+      business_id: biz,
+      conversation_id: conv,
+      contact_id: cid,
+      provider: "whoosh",
+      action_type: "availability_lookup",
+      status: "completed",
+      service_type: "simulator",
+      requested_date: "2026-05-22",
+      party_size: 2,
+      duration_minutes: 120,
+      raw_payload: {
+        agenda_date: "2026-05-22",
+        offered_slots: wireStoredOffersFromBaySlots(sampleBaySlots1100Thru1130Jun17()),
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    const { flow } = await runAugment({
+      inboundText: "actually 3 days after Friday",
+      playbook: "simulator",
+      conversationId: conv,
+      contactId: cid,
+      sb,
+      conversationHistory: inboundOnlyHistory([
+        "Book simulator Friday evening for 2 players for 2 hours",
+      ]),
+    });
+
+    assert.deepStrictEqual(
+      seen.map((p) => ({
+        date: p.date,
+        partySize: p.partySize,
+        durationMinutes: p.durationMinutes,
+        preferredTimeRange: p.preferredTimeRange,
+      })),
+      [
+        {
+          date: "2026-05-25",
+          partySize: 2,
+          durationMinutes: 120,
+          preferredTimeRange: "evening",
+        },
+      ]
+    );
+    const out = expectDirectOutbound(flow);
+    assert.strictEqual(out.debug.resolved_requested_date, "2026-05-25");
+    assert.strictEqual(out.debug.date_source, "explicit_date");
+    assert.strictEqual(out.debug.usingStoredOfferSlots, false);
+    assert.strictEqual(out.debug.storedOfferRejectedReason, "superseded_by_new_booking_request");
+    assert.match(out.replyText, /Mon May 25/);
+    assert.doesNotMatch(out.replyText, /Fri May 22/);
   });
 
   test("Saturday evening interest without player count never calls Whoosh for exact times", async () => {
