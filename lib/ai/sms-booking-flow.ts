@@ -403,6 +403,184 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+const FEW_NIGHTS_OFFSET = 3;
+
+const WEEKDAY_TO_LUXON: Record<string, number> = {
+  monday: 1,
+  mon: 1,
+  tuesday: 2,
+  tues: 2,
+  tue: 2,
+  wednesday: 3,
+  wed: 3,
+  thursday: 4,
+  thurs: 4,
+  thur: 4,
+  thu: 4,
+  friday: 5,
+  fri: 5,
+  saturday: 6,
+  sat: 6,
+  sunday: 7,
+  sun: 7,
+};
+
+const WEEKDAY_NAME_RE =
+  "monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun";
+
+/**
+ * "a few nights before Friday" / "a few nights before tomorrow".
+ * "a few" is three nights. Not a counted "N nights before", not "the night before",
+ * and not "a few nights after|from".
+ */
+const FEW_NIGHTS_BEFORE_TARGET_RE = new RegExp(
+  String.raw`\ba\s+few\s+(?:more\s+)?nights\s+before\s+(?:the\s+)?(today|tomorrow|now|(?:(this|next)\s+)?(?:${WEEKDAY_NAME_RE}))\b`,
+  "gi"
+);
+
+type FewNightsBeforePhrase = {
+  index: number;
+  end: number;
+  negated: boolean;
+  isoDate: string | null;
+};
+
+/** True when a short negation sits immediately before a date token. */
+function isFewNightsBeforeMentionNegated(subject: string, matchIndex: number): boolean {
+  const before = subject.slice(Math.max(0, matchIndex - 48), matchIndex);
+  return /(?:\bnot\b|\bno\b|\bnever\b|\binstead of\b|\brather than\b|\bexcept\b|\bwithout\b|\bcan't\b|\bcannot\b|\bcant\b|\bwon't\b|\bwont\b|\bdon't\b|\bdont\b|\bdoesn't\b|\bdoesnt\b|\bdoes not\b|\bcan not\b)(?:\s+\w+){0,3}\s*$/i.test(
+    before
+  );
+}
+
+function isoFromWeekdayOffset(local: DateTime, dow: number, modifier: string | null): string | null {
+  const baseDelta = (dow - local.weekday + 7) % 7;
+  const days = modifier === "next" ? baseDelta + 7 : baseDelta;
+  return local.plus({ days }).toISODate();
+}
+
+function isoDateForFewNightsBeforeTarget(
+  local: DateTime,
+  target: string,
+  modifier: string | null
+): string | null {
+  if (target === "tomorrow") return local.plus({ days: 1 }).minus({ days: FEW_NIGHTS_OFFSET }).toISODate();
+  if (target === "today" || target === "now") return local.minus({ days: FEW_NIGHTS_OFFSET }).toISODate();
+
+  const weekdayName = target.match(new RegExp(String.raw`\b(${WEEKDAY_NAME_RE})\b`, "i"))?.[1]?.toLowerCase();
+  const dow = weekdayName ? WEEKDAY_TO_LUXON[weekdayName] : undefined;
+  const baseIso = dow ? isoFromWeekdayOffset(local, dow, modifier) : null;
+  if (!baseIso) return null;
+  return DateTime.fromISO(baseIso, { zone: local.zone }).minus({ days: FEW_NIGHTS_OFFSET }).toISODate();
+}
+
+function collectFewNightsBeforePhrases(subject: string, local: DateTime): FewNightsBeforePhrase[] {
+  const phrases: FewNightsBeforePhrase[] = [];
+  const re = new RegExp(FEW_NIGHTS_BEFORE_TARGET_RE.source, "gi");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(subject)) !== null) {
+    const target = (m[1] ?? "").toLowerCase();
+    phrases.push({
+      index: m.index,
+      end: m.index + m[0].length,
+      negated: isFewNightsBeforeMentionNegated(subject, m.index),
+      isoDate: isoDateForFewNightsBeforeTarget(local, target, m[2]?.toLowerCase() ?? null),
+    });
+  }
+  return phrases;
+}
+
+function indexInsideFewNightsBeforePhrase(index: number, phrases: FewNightsBeforePhrase[]): boolean {
+  return phrases.some((phrase) => index >= phrase.index && index < phrase.end);
+}
+
+/**
+ * When "a few nights before <day>" is present, that day is the anchor minus three.
+ * Last non-negated mention wins. A negated offset does not fall through to the named day.
+ */
+function resolveDateWhenFewNightsBeforePresent(
+  subject: string,
+  local: DateTime,
+  phrases: FewNightsBeforePhrase[]
+): { isoDate: string | null; source: SmsBookingDateSource } {
+  type Mention =
+    | { index: number; kind: "offset"; isoDate: string | null }
+    | { index: number; kind: "weekday"; dow: number; modifier: string | null }
+    | { index: number; kind: "today" }
+    | { index: number; kind: "tomorrow" }
+    | { index: number; kind: "slash"; month: number; day: number };
+
+  const mentions: Mention[] = [];
+
+  for (const phrase of phrases) {
+    if (phrase.negated) continue;
+    mentions.push({ index: phrase.index, kind: "offset", isoDate: phrase.isoDate });
+  }
+
+  const weekdayRe = new RegExp(String.raw`\b(?:(this|next)\s+)?(${WEEKDAY_NAME_RE})\b`, "gi");
+  let weekdayMatch: RegExpExecArray | null;
+  while ((weekdayMatch = weekdayRe.exec(subject)) !== null) {
+    if (isFewNightsBeforeMentionNegated(subject, weekdayMatch.index)) continue;
+    if (indexInsideFewNightsBeforePhrase(weekdayMatch.index, phrases)) continue;
+    const dow = WEEKDAY_TO_LUXON[weekdayMatch[2]?.toLowerCase() ?? ""];
+    if (!dow) continue;
+    mentions.push({
+      index: weekdayMatch.index,
+      kind: "weekday",
+      dow,
+      modifier: weekdayMatch[1]?.toLowerCase() ?? null,
+    });
+  }
+
+  const todayRe = /\b(today|tomorrow)\b/gi;
+  let todayMatch: RegExpExecArray | null;
+  while ((todayMatch = todayRe.exec(subject)) !== null) {
+    if (indexInsideFewNightsBeforePhrase(todayMatch.index, phrases)) continue;
+    if (isFewNightsBeforeMentionNegated(subject, todayMatch.index)) continue;
+    if (todayMatch[1]?.toLowerCase() === "tomorrow") {
+      mentions.push({ index: todayMatch.index, kind: "tomorrow" });
+    } else {
+      mentions.push({ index: todayMatch.index, kind: "today" });
+    }
+  }
+
+  const slashRe = /\b(\d{1,2})\/(\d{1,2})\b/g;
+  let slashMatch: RegExpExecArray | null;
+  while ((slashMatch = slashRe.exec(subject)) !== null) {
+    if (isFewNightsBeforeMentionNegated(subject, slashMatch.index)) continue;
+    const month = Number(slashMatch[1]);
+    const day = Number(slashMatch[2]);
+    if (!Number.isInteger(month) || !Number.isInteger(day)) continue;
+    mentions.push({ index: slashMatch.index, kind: "slash", month, day });
+  }
+
+  const winner = mentions.reduce<Mention | null>((best, mention) => {
+    if (!best || mention.index >= best.index) return mention;
+    return best;
+  }, null);
+
+  if (!winner) return { isoDate: null, source: "fallback" };
+
+  if (winner.kind === "offset") {
+    return { isoDate: winner.isoDate, source: winner.isoDate ? "explicit_date" : "fallback" };
+  }
+  if (winner.kind === "weekday") {
+    return {
+      isoDate: isoFromWeekdayOffset(local, winner.dow, winner.modifier),
+      source: "explicit_weekday",
+    };
+  }
+  if (winner.kind === "tomorrow") {
+    return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
+  }
+  if (winner.kind === "today") {
+    return { isoDate: local.toISODate(), source: "explicit_date" };
+  }
+
+  const dt = local.set({ month: winner.month, day: winner.day });
+  return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -413,6 +591,11 @@ export function resolveRequestedDateFromText(
 
   const direct = subject.match(ISO_DATE);
   if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
+
+  const fewNightsBeforePhrases = collectFewNightsBeforePhrases(subject, local);
+  if (fewNightsBeforePhrases.length > 0) {
+    return resolveDateWhenFewNightsBeforePresent(subject, local, fewNightsBeforePhrases);
+  }
 
   if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
   if (/\btomorrow\b/i.test(lowered)) {
