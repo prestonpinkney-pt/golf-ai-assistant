@@ -403,6 +403,229 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+const YEAR_OFFSET_WORD_TO_N: Record<string, number> = {
+  an: 1,
+  a: 1,
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+};
+
+const YEAR_OFFSET_WEEKDAY_TO_LUXON: Record<string, number> = {
+  monday: 1,
+  mon: 1,
+  tuesday: 2,
+  tues: 2,
+  tue: 2,
+  wednesday: 3,
+  wed: 3,
+  thursday: 4,
+  thurs: 4,
+  thur: 4,
+  thu: 4,
+  friday: 5,
+  fri: 5,
+  saturday: 6,
+  sat: 6,
+  sunday: 7,
+  sun: 7,
+};
+
+const YEAR_OFFSET_WEEKDAY_RE =
+  "monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun";
+
+/**
+ * "a year after Friday" / "2 years before tomorrow" / "a year from Friday".
+ * Calendar years, not 365-day chunks. Not "a few years", not "half a year",
+ * and not "in a year" with no anchor day.
+ */
+const YEAR_OFFSET_RE = new RegExp(
+  String.raw`\b(a\s+couple(?:\s+of)?\s+years|the\s+year|(?:an|a|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d{1,2})\s+years?|year)\s+(after|before|from)\s+(?:the\s+)?(?:(this|next)\s+)?(today|tomorrow|now|${YEAR_OFFSET_WEEKDAY_RE})\b`,
+  "gi"
+);
+
+const MAX_YEAR_OFFSET = 12;
+
+type YearOffsetPhrase = {
+  index: number;
+  end: number;
+  negated: boolean;
+  isoDate: string | null;
+};
+
+/** True when a short negation sits immediately before a date token. */
+function isYearOffsetMentionNegated(subject: string, matchIndex: number): boolean {
+  const before = subject.slice(Math.max(0, matchIndex - 48), matchIndex);
+  return /(?:\bnot\b|\bno\b|\bnever\b|\binstead of\b|\brather than\b|\bexcept\b|\bwithout\b|\bcan't\b|\bcannot\b|\bcant\b|\bwon't\b|\bwont\b|\bdon't\b|\bdont\b|\bdoesn't\b|\bdoesnt\b|\bdoes not\b|\bcan not\b)(?:\s+\w+){0,3}\s*$/i.test(
+    before
+  );
+}
+
+function isoFromYearOffsetWeekday(local: DateTime, dow: number, modifier: string | null): string | null {
+  const baseDelta = (dow - local.weekday + 7) % 7;
+  const days = modifier === "next" ? baseDelta + 7 : baseDelta;
+  return local.plus({ days }).toISODate();
+}
+
+function parseYearOffsetCount(countPhrase: string): number | null {
+  const t = countPhrase.toLowerCase().replace(/\s+/g, " ").trim();
+  if (/^a couple(?: of)? years$/.test(t)) return 2;
+  if (t === "the year" || t === "year") return 1;
+  const m = /^(an|a|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|\d{1,2})\s+years?$/.exec(t);
+  if (!m?.[1]) return null;
+  const token = m[1];
+  if (/^\d+$/.test(token)) {
+    const n = Number(token);
+    return Number.isFinite(n) ? Math.round(n) : null;
+  }
+  return YEAR_OFFSET_WORD_TO_N[token] ?? null;
+}
+
+function anchorIsoForYearOffsetTarget(
+  local: DateTime,
+  target: string,
+  modifier: string | null
+): string | null {
+  if (target === "tomorrow") return local.plus({ days: 1 }).toISODate();
+  if (target === "today" || target === "now") return local.toISODate();
+  const dow = YEAR_OFFSET_WEEKDAY_TO_LUXON[target];
+  if (!dow) return null;
+  return isoFromYearOffsetWeekday(local, dow, modifier);
+}
+
+/** "half a year" / "half year" is six months, not this phrase. */
+function isHalfYearPrefix(subject: string, matchIndex: number): boolean {
+  const before = subject.slice(Math.max(0, matchIndex - 12), matchIndex).toLowerCase();
+  return /\bhalf\s+$/.test(before);
+}
+
+function collectYearOffsetPhrases(subject: string, local: DateTime): YearOffsetPhrase[] {
+  const phrases: YearOffsetPhrase[] = [];
+  const re = new RegExp(YEAR_OFFSET_RE.source, "gi");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(subject)) !== null) {
+    if (isHalfYearPrefix(subject, m.index)) continue;
+    const years = parseYearOffsetCount(m[1] ?? "");
+    if (years === null || years < 1) continue;
+    const direction = m[2]?.toLowerCase() === "before" ? -1 : 1;
+    const modifier = m[3]?.toLowerCase() ?? null;
+    const target = (m[4] ?? "").toLowerCase();
+    const baseIso = anchorIsoForYearOffsetTarget(local, target, modifier);
+    let isoDate: string | null = null;
+    if (years <= MAX_YEAR_OFFSET && baseIso) {
+      isoDate = DateTime.fromISO(baseIso, { zone: local.zone }).plus({ years: direction * years }).toISODate();
+    }
+    phrases.push({
+      index: m.index,
+      end: m.index + m[0].length,
+      negated: isYearOffsetMentionNegated(subject, m.index),
+      isoDate,
+    });
+  }
+  return phrases;
+}
+
+function indexInsideYearOffsetPhrase(index: number, phrases: YearOffsetPhrase[]): boolean {
+  return phrases.some((phrase) => index >= phrase.index && index < phrase.end);
+}
+
+/**
+ * When "N years after|before|from <day>" is present, that day is the anchor plus or minus N calendar years.
+ * Last non-negated mention wins. A negated offset does not fall through to the named day.
+ * Counts above 12 ask instead of booking the named day.
+ */
+function resolveDateWhenYearOffsetPresent(
+  subject: string,
+  local: DateTime,
+  phrases: YearOffsetPhrase[]
+): { isoDate: string | null; source: SmsBookingDateSource } {
+  type Mention =
+    | { index: number; kind: "offset"; isoDate: string | null }
+    | { index: number; kind: "weekday"; dow: number; modifier: string | null }
+    | { index: number; kind: "today" }
+    | { index: number; kind: "tomorrow" }
+    | { index: number; kind: "slash"; month: number; day: number };
+
+  const mentions: Mention[] = [];
+
+  for (const phrase of phrases) {
+    if (phrase.negated) continue;
+    mentions.push({ index: phrase.index, kind: "offset", isoDate: phrase.isoDate });
+  }
+
+  const weekdayRe = new RegExp(String.raw`\b(?:(this|next)\s+)?(${YEAR_OFFSET_WEEKDAY_RE})\b`, "gi");
+  let weekdayMatch: RegExpExecArray | null;
+  while ((weekdayMatch = weekdayRe.exec(subject)) !== null) {
+    if (isYearOffsetMentionNegated(subject, weekdayMatch.index)) continue;
+    if (indexInsideYearOffsetPhrase(weekdayMatch.index, phrases)) continue;
+    const dow = YEAR_OFFSET_WEEKDAY_TO_LUXON[weekdayMatch[2]?.toLowerCase() ?? ""];
+    if (!dow) continue;
+    mentions.push({
+      index: weekdayMatch.index,
+      kind: "weekday",
+      dow,
+      modifier: weekdayMatch[1]?.toLowerCase() ?? null,
+    });
+  }
+
+  const todayRe = /\b(today|tomorrow)\b/gi;
+  let todayMatch: RegExpExecArray | null;
+  while ((todayMatch = todayRe.exec(subject)) !== null) {
+    if (indexInsideYearOffsetPhrase(todayMatch.index, phrases)) continue;
+    if (isYearOffsetMentionNegated(subject, todayMatch.index)) continue;
+    if (todayMatch[1]?.toLowerCase() === "tomorrow") {
+      mentions.push({ index: todayMatch.index, kind: "tomorrow" });
+    } else {
+      mentions.push({ index: todayMatch.index, kind: "today" });
+    }
+  }
+
+  const slashRe = /\b(\d{1,2})\/(\d{1,2})\b/g;
+  let slashMatch: RegExpExecArray | null;
+  while ((slashMatch = slashRe.exec(subject)) !== null) {
+    if (isYearOffsetMentionNegated(subject, slashMatch.index)) continue;
+    const month = Number(slashMatch[1]);
+    const day = Number(slashMatch[2]);
+    if (!Number.isInteger(month) || !Number.isInteger(day)) continue;
+    mentions.push({ index: slashMatch.index, kind: "slash", month, day });
+  }
+
+  const winner = mentions.reduce<Mention | null>((best, mention) => {
+    if (!best || mention.index >= best.index) return mention;
+    return best;
+  }, null);
+
+  if (!winner) return { isoDate: null, source: "fallback" };
+
+  if (winner.kind === "offset") {
+    return { isoDate: winner.isoDate, source: winner.isoDate ? "explicit_date" : "fallback" };
+  }
+  if (winner.kind === "weekday") {
+    return {
+      isoDate: isoFromYearOffsetWeekday(local, winner.dow, winner.modifier),
+      source: "explicit_weekday",
+    };
+  }
+  if (winner.kind === "tomorrow") {
+    return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
+  }
+  if (winner.kind === "today") {
+    return { isoDate: local.toISODate(), source: "explicit_date" };
+  }
+
+  const dt = local.set({ month: winner.month, day: winner.day });
+  return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -413,6 +636,11 @@ export function resolveRequestedDateFromText(
 
   const direct = subject.match(ISO_DATE);
   if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
+
+  const yearOffsetPhrases = collectYearOffsetPhrases(subject, local);
+  if (yearOffsetPhrases.length > 0) {
+    return resolveDateWhenYearOffsetPresent(subject, local, yearOffsetPhrases);
+  }
 
   if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
   if (/\btomorrow\b/i.test(lowered)) {
@@ -941,6 +1169,7 @@ export function latestInboundLooksLikeFreshBookingRequest(inbound: string): bool
     /\b(?:half\s+hour|half-hour|(?:one|two|three|\d+)\s*(?:hrs?|hours?))\b/i.test(t)
   )
     return true;
+  if (collectYearOffsetPhrases(inbound, DateTime.now().setZone(BUSINESS_TIMEZONE)).length > 0) return true;
   return false;
 }
 
