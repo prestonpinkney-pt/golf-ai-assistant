@@ -403,6 +403,191 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+const FEW_YEARS_OFFSET = 3;
+
+const FEW_YEARS_WEEKDAY_TO_LUXON: Record<string, number> = {
+  monday: 1,
+  mon: 1,
+  tuesday: 2,
+  tues: 2,
+  tue: 2,
+  wednesday: 3,
+  wed: 3,
+  thursday: 4,
+  thurs: 4,
+  thur: 4,
+  thu: 4,
+  friday: 5,
+  fri: 5,
+  saturday: 6,
+  sat: 6,
+  sunday: 7,
+  sun: 7,
+};
+
+const FEW_YEARS_WEEKDAY_RE =
+  "monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun";
+
+/**
+ * "a few years after Friday" / "a few years before tomorrow" / "a few years from Friday".
+ * "a few" is three calendar years. Not a counted "N years after|before", not "half a year",
+ * and not "in a few years" with no anchor day.
+ */
+const FEW_YEARS_TARGET_RE = new RegExp(
+  String.raw`\ba\s+few\s+(?:more\s+)?years\s+(after|before|from)\s+(?:the\s+)?(?:(this|next)\s+)?(today|tomorrow|now|${FEW_YEARS_WEEKDAY_RE})\b`,
+  "gi"
+);
+
+type FewYearsPhrase = {
+  index: number;
+  end: number;
+  negated: boolean;
+  isoDate: string | null;
+};
+
+/** True when a short negation sits immediately before a date token. */
+function isFewYearsMentionNegated(subject: string, matchIndex: number): boolean {
+  const before = subject.slice(Math.max(0, matchIndex - 48), matchIndex);
+  return /(?:\bnot\b|\bno\b|\bnever\b|\binstead of\b|\brather than\b|\bexcept\b|\bwithout\b|\bcan't\b|\bcannot\b|\bcant\b|\bwon't\b|\bwont\b|\bdon't\b|\bdont\b|\bdoesn't\b|\bdoesnt\b|\bdoes not\b|\bcan not\b)(?:\s+\w+){0,3}\s*$/i.test(
+    before
+  );
+}
+
+function isoFromFewYearsWeekday(local: DateTime, dow: number, modifier: string | null): string | null {
+  const baseDelta = (dow - local.weekday + 7) % 7;
+  const days = modifier === "next" ? baseDelta + 7 : baseDelta;
+  return local.plus({ days }).toISODate();
+}
+
+function isoDateForFewYearsTarget(
+  local: DateTime,
+  relation: string,
+  target: string,
+  modifier: string | null
+): string | null {
+  const direction = relation === "before" ? -1 : 1;
+  let baseIso: string | null = null;
+  if (target === "tomorrow") baseIso = local.plus({ days: 1 }).toISODate();
+  else if (target === "today" || target === "now") baseIso = local.toISODate();
+  else {
+    const dow = FEW_YEARS_WEEKDAY_TO_LUXON[target];
+    if (!dow) return null;
+    baseIso = isoFromFewYearsWeekday(local, dow, modifier);
+  }
+  if (!baseIso) return null;
+  return DateTime.fromISO(baseIso, { zone: local.zone })
+    .plus({ years: direction * FEW_YEARS_OFFSET })
+    .toISODate();
+}
+
+function collectFewYearsPhrases(subject: string, local: DateTime): FewYearsPhrase[] {
+  const phrases: FewYearsPhrase[] = [];
+  const re = new RegExp(FEW_YEARS_TARGET_RE.source, "gi");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(subject)) !== null) {
+    const relation = (m[1] ?? "").toLowerCase();
+    const target = (m[3] ?? "").toLowerCase();
+    phrases.push({
+      index: m.index,
+      end: m.index + m[0].length,
+      negated: isFewYearsMentionNegated(subject, m.index),
+      isoDate: isoDateForFewYearsTarget(local, relation, target, m[2]?.toLowerCase() ?? null),
+    });
+  }
+  return phrases;
+}
+
+function indexInsideFewYearsPhrase(index: number, phrases: FewYearsPhrase[]): boolean {
+  return phrases.some((phrase) => index >= phrase.index && index < phrase.end);
+}
+
+/**
+ * When "a few years after|before|from <day>" is present, that day is the anchor plus or minus three calendar years.
+ * Last non-negated mention wins. A negated offset does not fall through to the named day.
+ */
+function resolveDateWhenFewYearsPresent(
+  subject: string,
+  local: DateTime,
+  phrases: FewYearsPhrase[]
+): { isoDate: string | null; source: SmsBookingDateSource } {
+  type Mention =
+    | { index: number; kind: "offset"; isoDate: string | null }
+    | { index: number; kind: "weekday"; dow: number; modifier: string | null }
+    | { index: number; kind: "today" }
+    | { index: number; kind: "tomorrow" }
+    | { index: number; kind: "slash"; month: number; day: number };
+
+  const mentions: Mention[] = [];
+
+  for (const phrase of phrases) {
+    if (phrase.negated) continue;
+    mentions.push({ index: phrase.index, kind: "offset", isoDate: phrase.isoDate });
+  }
+
+  const weekdayRe = new RegExp(String.raw`\b(?:(this|next)\s+)?(${FEW_YEARS_WEEKDAY_RE})\b`, "gi");
+  let weekdayMatch: RegExpExecArray | null;
+  while ((weekdayMatch = weekdayRe.exec(subject)) !== null) {
+    if (isFewYearsMentionNegated(subject, weekdayMatch.index)) continue;
+    if (indexInsideFewYearsPhrase(weekdayMatch.index, phrases)) continue;
+    const dow = FEW_YEARS_WEEKDAY_TO_LUXON[weekdayMatch[2]?.toLowerCase() ?? ""];
+    if (!dow) continue;
+    mentions.push({
+      index: weekdayMatch.index,
+      kind: "weekday",
+      dow,
+      modifier: weekdayMatch[1]?.toLowerCase() ?? null,
+    });
+  }
+
+  const todayRe = /\b(today|tomorrow)\b/gi;
+  let todayMatch: RegExpExecArray | null;
+  while ((todayMatch = todayRe.exec(subject)) !== null) {
+    if (indexInsideFewYearsPhrase(todayMatch.index, phrases)) continue;
+    if (isFewYearsMentionNegated(subject, todayMatch.index)) continue;
+    if (todayMatch[1]?.toLowerCase() === "tomorrow") {
+      mentions.push({ index: todayMatch.index, kind: "tomorrow" });
+    } else {
+      mentions.push({ index: todayMatch.index, kind: "today" });
+    }
+  }
+
+  const slashRe = /\b(\d{1,2})\/(\d{1,2})\b/g;
+  let slashMatch: RegExpExecArray | null;
+  while ((slashMatch = slashRe.exec(subject)) !== null) {
+    if (isFewYearsMentionNegated(subject, slashMatch.index)) continue;
+    const month = Number(slashMatch[1]);
+    const day = Number(slashMatch[2]);
+    if (!Number.isInteger(month) || !Number.isInteger(day)) continue;
+    mentions.push({ index: slashMatch.index, kind: "slash", month, day });
+  }
+
+  const winner = mentions.reduce<Mention | null>((best, mention) => {
+    if (!best || mention.index >= best.index) return mention;
+    return best;
+  }, null);
+
+  if (!winner) return { isoDate: null, source: "fallback" };
+
+  if (winner.kind === "offset") {
+    return { isoDate: winner.isoDate, source: winner.isoDate ? "explicit_date" : "fallback" };
+  }
+  if (winner.kind === "weekday") {
+    return {
+      isoDate: isoFromFewYearsWeekday(local, winner.dow, winner.modifier),
+      source: "explicit_weekday",
+    };
+  }
+  if (winner.kind === "tomorrow") {
+    return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
+  }
+  if (winner.kind === "today") {
+    return { isoDate: local.toISODate(), source: "explicit_date" };
+  }
+
+  const dt = local.set({ month: winner.month, day: winner.day });
+  return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -413,6 +598,11 @@ export function resolveRequestedDateFromText(
 
   const direct = subject.match(ISO_DATE);
   if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
+
+  const fewYearsPhrases = collectFewYearsPhrases(subject, local);
+  if (fewYearsPhrases.length > 0) {
+    return resolveDateWhenFewYearsPresent(subject, local, fewYearsPhrases);
+  }
 
   if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
   if (/\btomorrow\b/i.test(lowered)) {
