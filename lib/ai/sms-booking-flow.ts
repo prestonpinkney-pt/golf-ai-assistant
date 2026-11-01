@@ -403,6 +403,197 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+const YEAR_AND_A_HALF_MONTHS = 18;
+
+const YEAR_AND_A_HALF_WEEKDAY_TO_LUXON: Record<string, number> = {
+  monday: 1,
+  mon: 1,
+  tuesday: 2,
+  tues: 2,
+  tue: 2,
+  wednesday: 3,
+  wed: 3,
+  thursday: 4,
+  thurs: 4,
+  thur: 4,
+  thu: 4,
+  friday: 5,
+  fri: 5,
+  saturday: 6,
+  sat: 6,
+  sunday: 7,
+  sun: 7,
+};
+
+const YEAR_AND_A_HALF_WEEKDAY_RE =
+  "monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun";
+
+/**
+ * "a year and a half after Friday" / "one and a half years before tomorrow".
+ * A year and a half is eighteen calendar months (one year plus the six months
+ * already used for half a year). Not a bare "a year", "N years", "a few years",
+ * "half a year", "several years", "two and a half years", or "in a year and a half"
+ * / "a year and a half ago" with no anchor day. Not an hour-and-a-half duration.
+ */
+const YEAR_AND_A_HALF_TARGET_RE = new RegExp(
+  String.raw`\b(?:(?:a|one|1)\s+year\s+and\s+a\s+half|(?:one|1)\s+and\s+a\s+half\s+years?)\s+(after|before|from)\s+(?:the\s+)?(?:(this|next)\s+)?(today|tomorrow|now|${YEAR_AND_A_HALF_WEEKDAY_RE})\b`,
+  "gi"
+);
+
+type YearAndAHalfPhrase = {
+  index: number;
+  end: number;
+  negated: boolean;
+  isoDate: string | null;
+};
+
+/** True when a short negation sits immediately before a date token. */
+function isYearAndAHalfMentionNegated(subject: string, matchIndex: number): boolean {
+  const before = subject.slice(Math.max(0, matchIndex - 64), matchIndex);
+  return /(?:\bnot\b|\bno\b|\bnever\b|\binstead of\b|\brather than\b|\bexcept\b|\bwithout\b|\bcan't\b|\bcannot\b|\bcant\b|\bwon't\b|\bwont\b|\bdon't\b|\bdont\b|\bdoesn't\b|\bdoesnt\b|\bdoes not\b|\bcan not\b)(?:\s+\w+){0,3}\s*$/i.test(
+    before
+  );
+}
+
+function isoFromYearAndAHalfWeekday(local: DateTime, dow: number, modifier: string | null): string | null {
+  const baseDelta = (dow - local.weekday + 7) % 7;
+  const days = modifier === "next" ? baseDelta + 7 : baseDelta;
+  return local.plus({ days }).toISODate();
+}
+
+function isoDateForYearAndAHalfTarget(
+  local: DateTime,
+  relation: string,
+  target: string,
+  modifier: string | null
+): string | null {
+  const direction = relation === "before" ? -1 : 1;
+  let baseIso: string | null = null;
+  if (target === "tomorrow") baseIso = local.plus({ days: 1 }).toISODate();
+  else if (target === "today" || target === "now") baseIso = local.toISODate();
+  else {
+    const dow = YEAR_AND_A_HALF_WEEKDAY_TO_LUXON[target];
+    if (!dow) return null;
+    baseIso = isoFromYearAndAHalfWeekday(local, dow, modifier);
+  }
+  if (!baseIso) return null;
+  return DateTime.fromISO(baseIso, { zone: local.zone })
+    .plus({ months: direction * YEAR_AND_A_HALF_MONTHS })
+    .toISODate();
+}
+
+function collectYearAndAHalfPhrases(subject: string, local: DateTime): YearAndAHalfPhrase[] {
+  const phrases: YearAndAHalfPhrase[] = [];
+  const re = new RegExp(YEAR_AND_A_HALF_TARGET_RE.source, "gi");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(subject)) !== null) {
+    const relation = (m[1] ?? "").toLowerCase();
+    const target = (m[3] ?? "").toLowerCase();
+    phrases.push({
+      index: m.index,
+      end: m.index + m[0].length,
+      negated: isYearAndAHalfMentionNegated(subject, m.index),
+      isoDate: isoDateForYearAndAHalfTarget(local, relation, target, m[2]?.toLowerCase() ?? null),
+    });
+  }
+  return phrases;
+}
+
+function indexInsideYearAndAHalfPhrase(index: number, phrases: YearAndAHalfPhrase[]): boolean {
+  return phrases.some((phrase) => index >= phrase.index && index < phrase.end);
+}
+
+/**
+ * When "a year and a half after|before|from <day>" is present, that day is the anchor
+ * plus or minus eighteen calendar months. Last non-negated mention wins. A negated
+ * offset does not fall through to the named day.
+ */
+function resolveDateWhenYearAndAHalfPresent(
+  subject: string,
+  local: DateTime,
+  phrases: YearAndAHalfPhrase[]
+): { isoDate: string | null; source: SmsBookingDateSource } {
+  type Mention =
+    | { index: number; kind: "offset"; isoDate: string | null }
+    | { index: number; kind: "weekday"; dow: number; modifier: string | null }
+    | { index: number; kind: "today" }
+    | { index: number; kind: "tomorrow" }
+    | { index: number; kind: "slash"; month: number; day: number };
+
+  const mentions: Mention[] = [];
+
+  for (const phrase of phrases) {
+    if (phrase.negated) continue;
+    mentions.push({ index: phrase.index, kind: "offset", isoDate: phrase.isoDate });
+  }
+
+  const weekdayRe = new RegExp(
+    String.raw`\b(?:(this|next)\s+)?(${YEAR_AND_A_HALF_WEEKDAY_RE})\b`,
+    "gi"
+  );
+  let weekdayMatch: RegExpExecArray | null;
+  while ((weekdayMatch = weekdayRe.exec(subject)) !== null) {
+    if (isYearAndAHalfMentionNegated(subject, weekdayMatch.index)) continue;
+    if (indexInsideYearAndAHalfPhrase(weekdayMatch.index, phrases)) continue;
+    const dow = YEAR_AND_A_HALF_WEEKDAY_TO_LUXON[weekdayMatch[2]?.toLowerCase() ?? ""];
+    if (!dow) continue;
+    mentions.push({
+      index: weekdayMatch.index,
+      kind: "weekday",
+      dow,
+      modifier: weekdayMatch[1]?.toLowerCase() ?? null,
+    });
+  }
+
+  const todayRe = /\b(today|tomorrow)\b/gi;
+  let todayMatch: RegExpExecArray | null;
+  while ((todayMatch = todayRe.exec(subject)) !== null) {
+    if (indexInsideYearAndAHalfPhrase(todayMatch.index, phrases)) continue;
+    if (isYearAndAHalfMentionNegated(subject, todayMatch.index)) continue;
+    if (todayMatch[1]?.toLowerCase() === "tomorrow") {
+      mentions.push({ index: todayMatch.index, kind: "tomorrow" });
+    } else {
+      mentions.push({ index: todayMatch.index, kind: "today" });
+    }
+  }
+
+  const slashRe = /\b(\d{1,2})\/(\d{1,2})\b/g;
+  let slashMatch: RegExpExecArray | null;
+  while ((slashMatch = slashRe.exec(subject)) !== null) {
+    if (isYearAndAHalfMentionNegated(subject, slashMatch.index)) continue;
+    const month = Number(slashMatch[1]);
+    const day = Number(slashMatch[2]);
+    if (!Number.isInteger(month) || !Number.isInteger(day)) continue;
+    mentions.push({ index: slashMatch.index, kind: "slash", month, day });
+  }
+
+  const winner = mentions.reduce<Mention | null>((best, mention) => {
+    if (!best || mention.index >= best.index) return mention;
+    return best;
+  }, null);
+
+  if (!winner) return { isoDate: null, source: "fallback" };
+
+  if (winner.kind === "offset") {
+    return { isoDate: winner.isoDate, source: winner.isoDate ? "explicit_date" : "fallback" };
+  }
+  if (winner.kind === "weekday") {
+    return {
+      isoDate: isoFromYearAndAHalfWeekday(local, winner.dow, winner.modifier),
+      source: "explicit_weekday",
+    };
+  }
+  if (winner.kind === "tomorrow") {
+    return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
+  }
+  if (winner.kind === "today") {
+    return { isoDate: local.toISODate(), source: "explicit_date" };
+  }
+
+  const dt = local.set({ month: winner.month, day: winner.day });
+  return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -413,6 +604,11 @@ export function resolveRequestedDateFromText(
 
   const direct = subject.match(ISO_DATE);
   if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
+
+  const yearAndAHalfPhrases = collectYearAndAHalfPhrases(subject, local);
+  if (yearAndAHalfPhrases.length > 0) {
+    return resolveDateWhenYearAndAHalfPresent(subject, local, yearAndAHalfPhrases);
+  }
 
   if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
   if (/\btomorrow\b/i.test(lowered)) {
