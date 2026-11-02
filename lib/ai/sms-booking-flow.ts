@@ -403,6 +403,197 @@ export function extractSimulatorDurationMinutes(fullText: string): number | null
   return matches.at(-1)?.minutes ?? null;
 }
 
+const TWO_AND_A_HALF_YEARS_MONTHS = 30;
+
+const TWO_AND_A_HALF_YEARS_WEEKDAY_TO_LUXON: Record<string, number> = {
+  monday: 1,
+  mon: 1,
+  tuesday: 2,
+  tues: 2,
+  tue: 2,
+  wednesday: 3,
+  wed: 3,
+  thursday: 4,
+  thurs: 4,
+  thur: 4,
+  thu: 4,
+  friday: 5,
+  fri: 5,
+  saturday: 6,
+  sat: 6,
+  sunday: 7,
+  sun: 7,
+};
+
+const TWO_AND_A_HALF_YEARS_WEEKDAY_RE =
+  "monday|tuesday|wednesday|thursday|friday|saturday|sunday|mon|tues|tue|wed|thurs|thur|thu|fri|sat|sun";
+
+/**
+ * "two and a half years after Friday" / "2 years and a half before tomorrow".
+ * Two and a half years is thirty calendar months (two years plus the six months
+ * already used for half a year). Not a bare "2 years", "a year and a half",
+ * "a few years", "half a year", "several years", or "in two and a half years"
+ * / "two and a half years ago" with no anchor day. Not a two-and-a-half-hour duration.
+ */
+const TWO_AND_A_HALF_YEARS_TARGET_RE = new RegExp(
+  String.raw`\b(?:(?:two|2)\s+and\s+a\s+half\s+years?|(?:two|2)\s+years?\s+and\s+a\s+half)\s+(after|before|from)\s+(?:the\s+)?(?:(this|next)\s+)?(today|tomorrow|now|${TWO_AND_A_HALF_YEARS_WEEKDAY_RE})\b`,
+  "gi"
+);
+
+type TwoAndAHalfYearsPhrase = {
+  index: number;
+  end: number;
+  negated: boolean;
+  isoDate: string | null;
+};
+
+/** True when a short negation sits immediately before a date token. */
+function isTwoAndAHalfYearsMentionNegated(subject: string, matchIndex: number): boolean {
+  const before = subject.slice(Math.max(0, matchIndex - 64), matchIndex);
+  return /(?:\bnot\b|\bno\b|\bnever\b|\binstead of\b|\brather than\b|\bexcept\b|\bwithout\b|\bcan't\b|\bcannot\b|\bcant\b|\bwon't\b|\bwont\b|\bdon't\b|\bdont\b|\bdoesn't\b|\bdoesnt\b|\bdoes not\b|\bcan not\b)(?:\s+\w+){0,3}\s*$/i.test(
+    before
+  );
+}
+
+function isoFromTwoAndAHalfYearsWeekday(local: DateTime, dow: number, modifier: string | null): string | null {
+  const baseDelta = (dow - local.weekday + 7) % 7;
+  const days = modifier === "next" ? baseDelta + 7 : baseDelta;
+  return local.plus({ days }).toISODate();
+}
+
+function isoDateForTwoAndAHalfYearsTarget(
+  local: DateTime,
+  relation: string,
+  target: string,
+  modifier: string | null
+): string | null {
+  const direction = relation === "before" ? -1 : 1;
+  let baseIso: string | null = null;
+  if (target === "tomorrow") baseIso = local.plus({ days: 1 }).toISODate();
+  else if (target === "today" || target === "now") baseIso = local.toISODate();
+  else {
+    const dow = TWO_AND_A_HALF_YEARS_WEEKDAY_TO_LUXON[target];
+    if (!dow) return null;
+    baseIso = isoFromTwoAndAHalfYearsWeekday(local, dow, modifier);
+  }
+  if (!baseIso) return null;
+  return DateTime.fromISO(baseIso, { zone: local.zone })
+    .plus({ months: direction * TWO_AND_A_HALF_YEARS_MONTHS })
+    .toISODate();
+}
+
+function collectTwoAndAHalfYearsPhrases(subject: string, local: DateTime): TwoAndAHalfYearsPhrase[] {
+  const phrases: TwoAndAHalfYearsPhrase[] = [];
+  const re = new RegExp(TWO_AND_A_HALF_YEARS_TARGET_RE.source, "gi");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(subject)) !== null) {
+    const relation = (m[1] ?? "").toLowerCase();
+    const target = (m[3] ?? "").toLowerCase();
+    phrases.push({
+      index: m.index,
+      end: m.index + m[0].length,
+      negated: isTwoAndAHalfYearsMentionNegated(subject, m.index),
+      isoDate: isoDateForTwoAndAHalfYearsTarget(local, relation, target, m[2]?.toLowerCase() ?? null),
+    });
+  }
+  return phrases;
+}
+
+function indexInsideTwoAndAHalfYearsPhrase(index: number, phrases: TwoAndAHalfYearsPhrase[]): boolean {
+  return phrases.some((phrase) => index >= phrase.index && index < phrase.end);
+}
+
+/**
+ * When "two and a half years after|before|from <day>" is present, that day is the anchor
+ * plus or minus thirty calendar months. Last non-negated mention wins. A negated
+ * offset does not fall through to the named day.
+ */
+function resolveDateWhenTwoAndAHalfYearsPresent(
+  subject: string,
+  local: DateTime,
+  phrases: TwoAndAHalfYearsPhrase[]
+): { isoDate: string | null; source: SmsBookingDateSource } {
+  type Mention =
+    | { index: number; kind: "offset"; isoDate: string | null }
+    | { index: number; kind: "weekday"; dow: number; modifier: string | null }
+    | { index: number; kind: "today" }
+    | { index: number; kind: "tomorrow" }
+    | { index: number; kind: "slash"; month: number; day: number };
+
+  const mentions: Mention[] = [];
+
+  for (const phrase of phrases) {
+    if (phrase.negated) continue;
+    mentions.push({ index: phrase.index, kind: "offset", isoDate: phrase.isoDate });
+  }
+
+  const weekdayRe = new RegExp(
+    String.raw`\b(?:(this|next)\s+)?(${TWO_AND_A_HALF_YEARS_WEEKDAY_RE})\b`,
+    "gi"
+  );
+  let weekdayMatch: RegExpExecArray | null;
+  while ((weekdayMatch = weekdayRe.exec(subject)) !== null) {
+    if (isTwoAndAHalfYearsMentionNegated(subject, weekdayMatch.index)) continue;
+    if (indexInsideTwoAndAHalfYearsPhrase(weekdayMatch.index, phrases)) continue;
+    const dow = TWO_AND_A_HALF_YEARS_WEEKDAY_TO_LUXON[weekdayMatch[2]?.toLowerCase() ?? ""];
+    if (!dow) continue;
+    mentions.push({
+      index: weekdayMatch.index,
+      kind: "weekday",
+      dow,
+      modifier: weekdayMatch[1]?.toLowerCase() ?? null,
+    });
+  }
+
+  const todayRe = /\b(today|tomorrow)\b/gi;
+  let todayMatch: RegExpExecArray | null;
+  while ((todayMatch = todayRe.exec(subject)) !== null) {
+    if (indexInsideTwoAndAHalfYearsPhrase(todayMatch.index, phrases)) continue;
+    if (isTwoAndAHalfYearsMentionNegated(subject, todayMatch.index)) continue;
+    if (todayMatch[1]?.toLowerCase() === "tomorrow") {
+      mentions.push({ index: todayMatch.index, kind: "tomorrow" });
+    } else {
+      mentions.push({ index: todayMatch.index, kind: "today" });
+    }
+  }
+
+  const slashRe = /\b(\d{1,2})\/(\d{1,2})\b/g;
+  let slashMatch: RegExpExecArray | null;
+  while ((slashMatch = slashRe.exec(subject)) !== null) {
+    if (isTwoAndAHalfYearsMentionNegated(subject, slashMatch.index)) continue;
+    const month = Number(slashMatch[1]);
+    const day = Number(slashMatch[2]);
+    if (!Number.isInteger(month) || !Number.isInteger(day)) continue;
+    mentions.push({ index: slashMatch.index, kind: "slash", month, day });
+  }
+
+  const winner = mentions.reduce<Mention | null>((best, mention) => {
+    if (!best || mention.index >= best.index) return mention;
+    return best;
+  }, null);
+
+  if (!winner) return { isoDate: null, source: "fallback" };
+
+  if (winner.kind === "offset") {
+    return { isoDate: winner.isoDate, source: winner.isoDate ? "explicit_date" : "fallback" };
+  }
+  if (winner.kind === "weekday") {
+    return {
+      isoDate: isoFromTwoAndAHalfYearsWeekday(local, winner.dow, winner.modifier),
+      source: "explicit_weekday",
+    };
+  }
+  if (winner.kind === "tomorrow") {
+    return { isoDate: local.plus({ days: 1 }).toISODate(), source: "explicit_date" };
+  }
+  if (winner.kind === "today") {
+    return { isoDate: local.toISODate(), source: "explicit_date" };
+  }
+
+  const dt = local.set({ month: winner.month, day: winner.day });
+  return { isoDate: dt.isValid ? dt.toISODate() : null, source: "explicit_date" };
+}
+
 export function resolveRequestedDateFromText(
   subject: string,
   anchor: DateTime,
@@ -413,6 +604,11 @@ export function resolveRequestedDateFromText(
 
   const direct = subject.match(ISO_DATE);
   if (direct?.[1]) return { isoDate: direct[1], source: "explicit_date" };
+
+  const twoAndAHalfYearsPhrases = collectTwoAndAHalfYearsPhrases(subject, local);
+  if (twoAndAHalfYearsPhrases.length > 0) {
+    return resolveDateWhenTwoAndAHalfYearsPresent(subject, local, twoAndAHalfYearsPhrases);
+  }
 
   if (/\btoday\b/i.test(lowered)) return { isoDate: local.toISODate(), source: "explicit_date" };
   if (/\btomorrow\b/i.test(lowered)) {
