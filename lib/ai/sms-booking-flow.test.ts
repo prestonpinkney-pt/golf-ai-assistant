@@ -385,6 +385,511 @@ describe("sms-booking-flow", () => {
     assert.strictEqual(resolved.source, "explicit_weekday");
   });
 
+  test("three quarters of a year after, before, or from a day is nine calendar months, not the named day", () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    const friday = DateTime.fromISO("2026-05-22T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+
+    const threeQuartersAfter = resolveRequestedDateFromText(
+      "Book simulator three quarters of a year after Friday evening for 2 players for 2 hours",
+      anchor
+    );
+    assert.strictEqual(threeQuartersAfter.isoDate, "2027-02-22");
+    assert.strictEqual(threeQuartersAfter.source, "explicit_date");
+
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year after Fri", anchor).isoDate,
+      "2027-02-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year after the Friday", anchor).isoDate,
+      "2027-02-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year from Friday", anchor).isoDate,
+      "2027-02-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year from the Friday", anchor).isoDate,
+      "2027-02-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("3 quarters of a year after Friday", anchor).isoDate,
+      "2027-02-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year before Friday", anchor).isoDate,
+      "2025-08-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year before the Friday", anchor).isoDate,
+      "2025-08-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year after next Friday", anchor).isoDate,
+      "2027-02-28"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year from the next Friday", anchor).isoDate,
+      "2027-02-28"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year before next Friday", anchor).isoDate,
+      "2025-08-29"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year before the next Friday", anchor).isoDate,
+      "2025-08-29"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year after this Friday", anchor).isoDate,
+      "2027-02-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year after today", anchor).isoDate,
+      "2027-02-17"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year from today", anchor).isoDate,
+      "2027-02-17"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year after now", anchor).isoDate,
+      "2027-02-17"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year from now", anchor).isoDate,
+      "2027-02-17"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year before today", anchor).isoDate,
+      "2025-08-17"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year before now", anchor).isoDate,
+      "2025-08-17"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year after tomorrow", anchor).isoDate,
+      "2027-02-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year from tomorrow", anchor).isoDate,
+      "2027-02-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year before tomorrow", anchor).isoDate,
+      "2025-08-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year after Friday", friday).isoDate,
+      "2027-02-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year before Friday", friday).isoDate,
+      "2025-08-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year after next Friday", friday).isoDate,
+      "2027-02-28"
+    );
+
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually Friday",
+        anchor
+      ).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually Friday",
+        anchor
+      ).source,
+      "explicit_weekday"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually this Friday",
+        anchor
+      ).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "Friday, actually three quarters of a year after Friday",
+        anchor
+      ).isoDate,
+      "2027-02-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "not three quarters of a year after Friday, Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday not Saturday",
+        anchor
+      ).isoDate,
+      "2027-02-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("not three quarters of a year after Friday", anchor).isoDate,
+      null
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("not three quarters of a year after Friday", anchor).source,
+      "fallback"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("not three quarters of a year before Friday", anchor).isoDate,
+      null
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "can't do three quarters of a year after Friday, Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually tomorrow",
+        anchor
+      ).isoDate,
+      "2026-05-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after today, actually Friday",
+        anchor
+      ).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year after Friday, actually 5/21", anchor)
+        .isoDate,
+      "2026-05-21"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "5/18, actually three quarters of a year after Friday",
+        anchor
+      ).isoDate,
+      "2027-02-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually three quarters of a year before Saturday",
+        anchor
+      ).isoDate,
+      "2025-08-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually three quarters of a year from Saturday",
+        anchor
+      ).isoDate,
+      "2027-02-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually 2 years from Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually a year and a half from Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually two and a half years from Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually 2 months from Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually 2 weeks from Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually a fortnight from Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually a quarter of a year from Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually a quarter from Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually half a year from Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually a month and a half from Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText(
+        "three quarters of a year after Friday, actually several years from Saturday",
+        anchor
+      ).isoDate,
+      "2026-05-23"
+    );
+
+    assert.strictEqual(resolveRequestedDateFromText("Friday", anchor).isoDate, "2026-05-22");
+    assert.strictEqual(resolveRequestedDateFromText("Friday night", anchor).isoDate, "2026-05-22");
+    assert.strictEqual(resolveRequestedDateFromText("next Friday", anchor).isoDate, "2026-05-29");
+    assert.strictEqual(resolveRequestedDateFromText("today", anchor).isoDate, "2026-05-17");
+    assert.strictEqual(resolveRequestedDateFromText("tomorrow", anchor).isoDate, "2026-05-18");
+    assert.strictEqual(
+      resolveRequestedDateFromText("tomorrow, actually Friday", anchor).isoDate,
+      "2026-05-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("2026-05-18 three quarters of a year after Friday", anchor)
+        .isoDate,
+      "2026-05-18"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("in three quarters of a year", anchor).isoDate,
+      null
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year ago", anchor).isoDate,
+      null
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of an hour after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarter hours after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a quarter of a year after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a quarter after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a fortnight after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("2 weeks after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("two and a half years after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a year and a half after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("half a year after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a few years after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a year after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("2 years after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("several years after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("several months after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("a month and a half after Friday", anchor).isoDate,
+      "2026-05-22"
+    );
+    assert.strictEqual(
+      resolveRequestedDateFromText("three quarters of a year after 5/22", anchor).isoDate,
+      "2026-05-22"
+    );
+  });
+
+  test("three quarters of a year after Friday looks up that later Monday, not this Friday", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const { flow } = await runAugment({
+      inboundText:
+        "Book simulator three quarters of a year after Friday evening for 2 players for 2 hours",
+      playbook: "simulator",
+    });
+
+    assert.deepStrictEqual(
+      seen.map((p) => ({
+        date: p.date,
+        partySize: p.partySize,
+        durationMinutes: p.durationMinutes,
+        preferredTimeRange: p.preferredTimeRange,
+      })),
+      [
+        {
+          date: "2027-02-22",
+          partySize: 2,
+          durationMinutes: 120,
+          preferredTimeRange: "evening",
+        },
+      ]
+    );
+    const outbound = expectDirectOutbound(flow);
+    assert.strictEqual(outbound.debug.resolved_requested_date, "2027-02-22");
+    assert.strictEqual(outbound.debug.date_source, "explicit_date");
+    assert.match(outbound.replyText, /Mon Feb 22/);
+    assert.match(outbound.replyText, /2 hours/);
+    assert.doesNotMatch(outbound.replyText, /Fri May 22/);
+  });
+
+  test("actually three quarters of a year after Friday does not reuse stored Friday slots", async () => {
+    const anchor = DateTime.fromISO("2026-05-17T12:00:00", {
+      zone: "America/Los_Angeles",
+    });
+    Settings.now = () => anchor.toMillis();
+
+    const seen: WhooshAvailabilityParams[] = [];
+    whooshAvailabilityClient.getAvailability = async (p) => {
+      seen.push(p);
+      return {
+        ok: true,
+        slots: [sampleSlot()],
+        fetchedAtIso: new Date().toISOString(),
+        agenda_date: p.date,
+        slotRowsLoaded: 1,
+        bookingRowsLoaded: 0,
+      };
+    };
+
+    const conv = "00000000-0000-4000-a000-00000000d2cd";
+    const sb = new FakeBookingSupabase();
+    const biz = "00000000-0000-0000-0000-000000000099";
+    const cid = "00000000-0000-4000-a000-000000000002";
+    sb.rows.push({
+      business_id: biz,
+      conversation_id: conv,
+      contact_id: cid,
+      provider: "whoosh",
+      action_type: "availability_lookup",
+      status: "completed",
+      service_type: "simulator",
+      requested_date: "2026-05-22",
+      party_size: 2,
+      duration_minutes: 120,
+      raw_payload: {
+        agenda_date: "2026-05-22",
+        offered_slots: wireStoredOffersFromBaySlots(sampleBaySlots1100Thru1130Jun17()),
+      },
+      created_at: new Date().toISOString(),
+    });
+
+    const { flow } = await runAugment({
+      inboundText: "actually three quarters of a year after Friday",
+      playbook: "simulator",
+      conversationId: conv,
+      contactId: cid,
+      sb,
+      conversationHistory: inboundOnlyHistory([
+        "Book simulator Friday evening for 2 players for 2 hours",
+      ]),
+    });
+
+    assert.deepStrictEqual(
+      seen.map((p) => ({
+        date: p.date,
+        partySize: p.partySize,
+        durationMinutes: p.durationMinutes,
+        preferredTimeRange: p.preferredTimeRange,
+      })),
+      [
+        {
+          date: "2027-02-22",
+          partySize: 2,
+          durationMinutes: 120,
+          preferredTimeRange: "evening",
+        },
+      ]
+    );
+    const out = expectDirectOutbound(flow);
+    assert.strictEqual(out.debug.resolved_requested_date, "2027-02-22");
+    assert.strictEqual(out.debug.date_source, "explicit_date");
+    assert.strictEqual(out.debug.usingStoredOfferSlots, false);
+    assert.strictEqual(out.debug.storedOfferRejectedReason, "superseded_by_new_booking_request");
+    assert.match(out.replyText, /Mon Feb 22/);
+    assert.doesNotMatch(out.replyText, /Fri May 22/);
+  });
+
   test("simulator duration phrases resolve deterministically", () => {
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for 2 people for 2 hours"), 120);
     assert.strictEqual(extractSimulatorDurationMinutes("Thursday for two hours"), 120);
